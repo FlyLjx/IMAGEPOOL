@@ -55,3 +55,21 @@ func TestDelete(t *testing.T) {
 		t.Fatalf("removed=%d calls=%#v", removed, svc.List("", "", ""))
 	}
 }
+
+func TestStabilityUsesRollingSixtySecondWindow(t *testing.T) {
+	svc := NewService("")
+	now := time.Date(2026, 7, 12, 14, 10, 30, 500000000, time.UTC)
+	svc.now = func() time.Time { return now }
+	svc.Record(Call{Time: now.Add(-10 * time.Second), Endpoint: "/v1/images/generations", Status: "success"})
+	svc.Record(Call{Time: now.Add(-20 * time.Second), Endpoint: "/v1/images/generations", Status: "failed"})
+	svc.Record(Call{Time: now.Add(-59900 * time.Millisecond), Endpoint: "/v1/images/generations", Status: "success"})
+	svc.Record(Call{Time: now.Add(-70 * time.Second), Endpoint: "/v1/images/generations", Status: "failed"})
+
+	stability := svc.Stability(time.Minute)
+	if stability.WindowSeconds != 60 || stability.Total != 3 || stability.Success != 2 || stability.Failed != 1 {
+		t.Fatalf("stability=%#v", stability)
+	}
+	if stability.StabilityPercent != 200.0/3 || stability.Status != "degraded" || len(stability.Series) != 60 {
+		t.Fatalf("stability=%#v", stability)
+	}
+}

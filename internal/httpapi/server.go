@@ -116,6 +116,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "app": s.currentConfig().AppName})
 		return
 	}
+	if r.Method == http.MethodGet && r.URL.Path == "/health/stability" {
+		w.Header().Set("Cache-Control", "no-store")
+		writeJSON(w, http.StatusOK, s.metrics.Stability(time.Minute))
+		return
+	}
 	if r.Method == http.MethodGet && r.URL.Path == "/version" {
 		writeJSON(w, http.StatusOK, map[string]any{"version": "go-image-pool"})
 		return

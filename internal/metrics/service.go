@@ -30,6 +30,25 @@ type Call struct {
 	Details    map[string]any `json:"detail,omitempty"`
 }
 
+type StabilityPoint struct {
+	Time    time.Time `json:"time"`
+	Success int       `json:"success"`
+	Failed  int       `json:"failed"`
+}
+
+type Stability struct {
+	WindowSeconds    int              `json:"window_seconds"`
+	WindowStart      time.Time        `json:"window_start"`
+	WindowEnd        time.Time        `json:"window_end"`
+	GeneratedAt      time.Time        `json:"generated_at"`
+	Total            int              `json:"total"`
+	Success          int              `json:"success"`
+	Failed           int              `json:"failed"`
+	StabilityPercent float64          `json:"stability_percent"`
+	Status           string           `json:"status"`
+	Series           []StabilityPoint `json:"series"`
+}
+
 type Service struct {
 	mu       sync.RWMutex
 	path     string
@@ -223,6 +242,75 @@ func (s *Service) Summary(window time.Duration) map[string]any {
 		"runtime":       map[string]any{"window_minutes": int(window / time.Minute), "bucket_minutes": int(bucket / time.Minute), "start_time": start, "end_time": now, "total": total, "success_rate": successRate, "error_rate": errorRate, "totals": totals, "series": series, "status_pie": statusPie, "error_reasons": reasons},
 		"recent_failed": recentFailed,
 	}
+}
+
+// Stability returns a rolling view of completed API calls. It is intentionally
+// computed from the current time on every request so callers can poll it
+// continuously without waiting for a periodic aggregation job.
+func (s *Service) Stability(window time.Duration) Stability {
+	if window <= 0 {
+		window = time.Minute
+	}
+	now := s.now()
+	start := now.Add(-window)
+	seconds := int(window / time.Second)
+	if seconds < 1 {
+		seconds = 1
+	}
+	lastSecond := now.Truncate(time.Second)
+	firstSecond := lastSecond.Add(-time.Duration(seconds-1) * time.Second)
+	points := make([]StabilityPoint, seconds)
+	bySecond := make(map[time.Time]int, seconds)
+	for index := range points {
+		at := firstSecond.Add(time.Duration(index) * time.Second)
+		points[index] = StabilityPoint{Time: at}
+		bySecond[at] = index
+	}
+
+	result := Stability{
+		WindowSeconds: seconds,
+		WindowStart:   start,
+		WindowEnd:     now,
+		GeneratedAt:   now,
+		Status:        "idle",
+		Series:        points,
+	}
+	for _, call := range s.List("", "", "") {
+		if call.Time.Before(start) || call.Time.After(now) {
+			continue
+		}
+		bucket := call.Time.Truncate(time.Second)
+		index, inSeries := bySecond[bucket]
+		switch normalizeStatus(call.Status) {
+		case "success":
+			result.Success++
+			if inSeries {
+				result.Series[index].Success++
+			}
+		case "failed":
+			result.Failed++
+			if inSeries {
+				result.Series[index].Failed++
+			}
+		default:
+			continue
+		}
+	}
+	result.Total = result.Success + result.Failed
+	if result.Total == 0 {
+		result.StabilityPercent = 100
+		return result
+	}
+	result.StabilityPercent = float64(result.Success) * 100 / float64(result.Total)
+	switch {
+	case result.Failed == 0:
+		result.Status = "stable"
+	case result.Success == 0:
+		result.Status = "unstable"
+	default:
+		result.Status = "degraded"
+	}
+	return result
 }
 
 func runtimeBucket(window time.Duration) time.Duration {

@@ -15,6 +15,7 @@
 - OpenAI 兼容：`GET /v1/models`、`POST /v1/images/generations`、`POST /v1/images/edits`、`POST /v1/chat/completions`、`POST /v1/responses`
 - Anthropic 兼容：`POST /v1/messages`
 - 搜索：`POST /v1/search`
+- 稳定性：`GET /health/stability`（公开、无缓存，返回最近 60 秒调用的稳定性与逐秒统计）
 - 异步图片任务：`GET /api/image-tasks`、`POST /api/image-tasks/generations`、`POST /api/image-tasks/edits`、`GET /api/image-tasks/{id}/status`
 - 管理接口：账号池、用户 Key、配置、运行状况、日志、图片与标签、代理运行时设置。
 

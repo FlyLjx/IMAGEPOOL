@@ -18,6 +18,7 @@ import (
 	"imagepool/internal/accounts"
 	"imagepool/internal/config"
 	"imagepool/internal/images"
+	"imagepool/internal/metrics"
 	"imagepool/internal/openaiweb"
 	"imagepool/internal/registration"
 	"imagepool/internal/searches"
@@ -110,6 +111,30 @@ func TestHealthAndAuth(t *testing.T) {
 	resp, err = http.DefaultClient.Do(req)
 	if err != nil || resp.StatusCode != 401 {
 		t.Fatalf("auth status=%v err=%v", resp.StatusCode, err)
+	}
+}
+
+func TestStabilityHealthEndpointIsPublicAndNoStore(t *testing.T) {
+	handler := testServer(t)
+	server, ok := handler.(*Server)
+	if !ok {
+		t.Fatalf("handler=%T", handler)
+	}
+	server.metrics.Record(metrics.Call{Time: time.Now(), Endpoint: "/v1/images/generations", Status: "success"})
+	srv := httptest.NewServer(server)
+	defer srv.Close()
+
+	response, err := http.Get(srv.URL + "/health/stability")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	var stability metrics.Stability
+	if err := json.NewDecoder(response.Body).Decode(&stability); err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusOK || response.Header.Get("Cache-Control") != "no-store" || stability.WindowSeconds != 60 || stability.Total != 1 || stability.Status != "stable" {
+		t.Fatalf("status=%d cache=%q stability=%#v", response.StatusCode, response.Header.Get("Cache-Control"), stability)
 	}
 }
 
