@@ -1,0 +1,475 @@
+"use client";
+
+import { useEffect, useMemo, useState } from "react";
+import {
+  Button,
+  Card,
+  Checkbox,
+  Empty,
+  Modal,
+  Pagination,
+  Select,
+  Space,
+  Spin,
+  Table,
+  Tag,
+  Typography,
+} from "antd";
+import type { ColumnsType } from "antd/es/table";
+import { LoaderCircle, RefreshCw, Search, Trash2 } from "lucide-react";
+import { toast } from "sonner";
+
+import { DateRangeFilter } from "@/components/date-range-filter";
+import { deleteSystemLogs, fetchSystemLogs, type SystemLog } from "@/lib/api";
+import { formatShanghaiDateTime } from "@/lib/datetime";
+import { useAuthGuard } from "@/lib/use-auth-guard";
+
+const LogType = {
+  Call: "call",
+  Account: "account",
+} as const;
+
+const typeLabels: Record<string, string> = {
+  [LogType.Call]: "调用日志",
+  [LogType.Account]: "账号管理日志",
+};
+
+function getDetailText(item: SystemLog, key: string) {
+  const value = item.detail?.[key];
+  return typeof value === "string" || typeof value === "number" || typeof value === "boolean" ? String(value) : "-";
+}
+
+function getRecord(value: unknown) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
+function getRecordList(value: unknown) {
+  return Array.isArray(value) ? value.map(getRecord).filter(Boolean) as Record<string, unknown>[] : [];
+}
+
+function getTextFromRecord(record: Record<string, unknown>, key: string) {
+  const value = record[key];
+  return typeof value === "string" || typeof value === "number" || typeof value === "boolean" ? String(value) : "";
+}
+
+function getStringList(value: unknown) {
+  return Array.isArray(value)
+    ? value
+        .map((item) => typeof item === "string" || typeof item === "number" || typeof item === "boolean" ? String(item) : "")
+        .filter(Boolean)
+    : [];
+}
+
+function formatDuration(item: SystemLog) {
+  if (item.detail?.status === "running") {
+    return "进行中";
+  }
+  const value = item.detail?.duration_ms;
+  return typeof value === "number" ? `${(value / 1000).toFixed(2)} s` : "-";
+}
+
+function getStatus(item: SystemLog) {
+  const status = item.detail?.status;
+  if (status === "success") return "成功";
+  if (status === "failed") return "失败";
+  if (status === "running") return "处理中";
+  if (status === "selected") return "已选账号";
+  return "-";
+}
+
+function getStatusColor(item: SystemLog) {
+  const status = item.detail?.status;
+  if (status === "failed") return "red";
+  if (status === "running") return "processing";
+  if (status === "selected") return "blue";
+  return "green";
+}
+
+function getAccountLogColor(item: SystemLog) {
+  const reason = String(item.detail?.reason || "");
+  if (reason === "error") return "red";
+  if (reason === "refill_started") return "green";
+  if (reason === "register_running" || reason === "already_checking") return "orange";
+  if (reason === "threshold_not_reached" || reason === "checking") return "blue";
+  return "default";
+}
+
+function formatAccountPool(item: SystemLog) {
+  const total = getDetailText(item, "total");
+  const available = getDetailText(item, "available");
+  const percent = getDetailText(item, "available_percent");
+  if (total === "-" && available === "-") {
+    return "-";
+  }
+  return `${available}/${total}${percent !== "-" ? ` (${percent}%)` : ""}`;
+}
+
+function formatAccountTarget(item: SystemLog) {
+  const threshold = getDetailText(item, "threshold_percent");
+  const target = getDetailText(item, "target_available");
+  const interval = getDetailText(item, "interval_minutes");
+  const parts = [];
+  if (threshold !== "-") parts.push(`阈值 ${threshold}%`);
+  if (target !== "-") parts.push(`目标 ${target}`);
+  if (interval !== "-") parts.push(`${interval} 分钟`);
+  return parts.length ? parts.join(" / ") : "-";
+}
+
+function formatImageAccount(item: SystemLog) {
+  const email = getDetailText(item, "account_email");
+  const accountType = getDetailText(item, "account_type");
+  const sourceType = getDetailText(item, "account_source_type");
+  const parts = [];
+  if (email !== "-") parts.push(email);
+  if (accountType !== "-") parts.push(accountType);
+  if (sourceType !== "-") parts.push(sourceType);
+  return parts.length ? parts.join(" / ") : "-";
+}
+
+function formatImageChannel(item: SystemLog) {
+  const channel = getDetailText(item, "image_channel_label");
+  const backendModel = getDetailText(item, "backend_model");
+  if (channel === "-" && backendModel === "-") return "-";
+  if (channel === "-") return backendModel;
+  if (backendModel === "-") return channel;
+  return `${channel} / ${backendModel}`;
+}
+
+function formatImageRequest(item: SystemLog) {
+  const model = getDetailText(item, "model");
+  const resolution = getDetailText(item, "resolution");
+  if (model === "-" && resolution === "-") return "-";
+  if (resolution === "-") return model;
+  if (model === "-") return resolution;
+  return `${model} / ${resolution}`;
+}
+
+function formatRetrySummary(item: SystemLog) {
+  const retry = getDetailText(item, "retry_count");
+  const failed = getDetailText(item, "failed_account_count");
+  const attempts = getDetailText(item, "image_route_attempt_count");
+  if (retry === "-" && failed === "-" && attempts === "-") return "-";
+  return `重试 ${retry === "-" ? "0" : retry} / 失败 ${failed === "-" ? "0" : failed} / 尝试 ${attempts === "-" ? "0" : attempts}`;
+}
+
+function formatFinalResult(item: SystemLog) {
+  const label = getDetailText(item, "final_result_label");
+  return label !== "-" ? label : getStatus(item);
+}
+
+function formatFailedAccounts(item: SystemLog) {
+  const accounts = getStringList(item.detail?.failed_accounts);
+  if (!accounts.length) return "-";
+  return accounts.slice(0, 2).join(" / ") + (accounts.length > 2 ? ` 等 ${accounts.length} 个` : "");
+}
+
+function AccountAttemptList({ title, items }: { title: string; items: Record<string, unknown>[] }) {
+  if (!items.length) return null;
+  return (
+    <div className="rounded-xl border border-slate-200 bg-white p-4">
+      <Typography.Text strong>{title}</Typography.Text>
+      <div className="mt-3 space-y-2">
+        {items.map((item, index) => {
+          const email = getTextFromRecord(item, "email") || "-";
+          const type = getTextFromRecord(item, "type");
+          const sourceType = getTextFromRecord(item, "source_type");
+          const route = getTextFromRecord(item, "route_label") || getTextFromRecord(item, "route");
+          const channel = getTextFromRecord(item, "channel_label") || getTextFromRecord(item, "channel");
+          const status = getTextFromRecord(item, "status");
+          const error = getTextFromRecord(item, "error");
+          return (
+            <div key={`${email}-${index}`} className="rounded-lg border border-slate-100 bg-slate-50 px-3 py-2 text-sm">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="break-all font-medium text-slate-800">{email}</span>
+                {type ? <Tag>{type}</Tag> : null}
+                {sourceType ? <Tag color="blue">{sourceType}</Tag> : null}
+                {status ? <Tag color={status === "success" ? "green" : "red"}>{status}</Tag> : null}
+              </div>
+              <div className="mt-1 text-xs text-slate-500">{[channel, route].filter(Boolean).join(" / ") || "-"}</div>
+              {error ? <div className="mt-1 break-all text-xs text-red-500">{error}</div> : null}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function LogsContent() {
+  const [items, setItems] = useState<SystemLog[]>([]);
+  const [type, setType] = useState<string>(LogType.Call);
+  const [startDate, setStartDate] = useState("");
+  const [endDate, setEndDate] = useState("");
+  const [detailLog, setDetailLog] = useState<SystemLog | null>(null);
+  const [detailOpen, setDetailOpen] = useState(false);
+  const [page, setPage] = useState(1);
+  const [isLoading, setIsLoading] = useState(true);
+  const [isDeleting, setIsDeleting] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [deletingItems, setDeletingItems] = useState<SystemLog[]>([]);
+  const isCallLog = type === LogType.Call;
+  const pageSize = 10;
+  const pageCount = Math.max(1, Math.ceil(items.length / pageSize));
+  const safePage = Math.min(page, pageCount);
+  const currentRows = items.slice((safePage - 1) * pageSize, safePage * pageSize);
+  const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds]);
+  const currentPageSelected = currentRows.length > 0 && currentRows.every((item) => selectedSet.has(item.id));
+  const allSelected = items.length > 0 && items.every((item) => selectedSet.has(item.id));
+
+  const loadLogs = async () => {
+    setIsLoading(true);
+    try {
+      const data = await fetchSystemLogs({ type, start_date: startDate, end_date: endDate });
+      setItems(data.items);
+      setSelectedIds((current) => current.filter((id) => data.items.some((item) => item.id === id)));
+      setPage(1);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "加载日志失败");
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const clearFilters = () => {
+    setStartDate("");
+    setEndDate("");
+  };
+
+  const openDetail = (item: SystemLog) => {
+    setDetailLog(item);
+    setDetailOpen(true);
+  };
+
+  const toggleIds = (ids: string[], checked: boolean) => {
+    setSelectedIds((current) => checked ? Array.from(new Set([...current, ...ids])) : current.filter((id) => !ids.includes(id)));
+  };
+
+  const confirmDelete = async () => {
+    const ids = deletingItems.map((item) => item.id);
+    if (ids.length === 0) return;
+    setIsDeleting(true);
+    try {
+      const data = await deleteSystemLogs(ids);
+      toast.success(`已删除 ${data.removed} 条日志`);
+      setDeletingItems([]);
+      setSelectedIds((current) => current.filter((id) => !ids.includes(id)));
+      if (detailLog && ids.includes(detailLog.id)) {
+        setDetailOpen(false);
+        setDetailLog(null);
+      }
+      await loadLogs();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "删除日志失败");
+    } finally {
+      setIsDeleting(false);
+    }
+  };
+
+  useEffect(() => {
+    void loadLogs();
+  }, [type, startDate, endDate]);
+
+  const columns: ColumnsType<SystemLog> = [
+    {
+      title: "",
+      width: 48,
+      render: (_, item) => (
+        <Checkbox checked={selectedSet.has(item.id)} onChange={(event) => toggleIds([item.id], event.target.checked)} />
+      ),
+    },
+    { title: "时间", dataIndex: "time", width: 180, render: (value: string) => <span className="whitespace-nowrap">{formatShanghaiDateTime(value)}</span> },
+    {
+      title: "类型",
+      dataIndex: "type",
+      width: 130,
+      render: (value: string) => <Tag color="blue">{typeLabels[value] || value}</Tag>,
+    },
+    ...(isCallLog
+      ? [
+          { title: "令牌名称", width: 160, render: (_: unknown, item: SystemLog) => getDetailText(item, "key_name") },
+          { title: "请求模型 / 分辨率", width: 230, render: (_: unknown, item: SystemLog) => <span className="text-slate-600">{formatImageRequest(item)}</span> },
+          { title: "使用账户", width: 240, render: (_: unknown, item: SystemLog) => <span className="break-all">{formatImageAccount(item)}</span> },
+          { title: "最终渠道", width: 220, render: (_: unknown, item: SystemLog) => <span className="text-slate-600">{formatImageChannel(item)}</span> },
+          { title: "重试 / 失败账号", width: 230, render: (_: unknown, item: SystemLog) => <span className="text-slate-600">{formatRetrySummary(item)}<br /><span className="break-all text-xs text-slate-400">{formatFailedAccounts(item)}</span></span> },
+          { title: "调用耗时", width: 120, render: (_: unknown, item: SystemLog) => formatDuration(item) },
+          {
+            title: "状态",
+            width: 90,
+            render: (_: unknown, item: SystemLog) => (
+              <Tag color={getStatusColor(item)}>{formatFinalResult(item)}</Tag>
+            ),
+          },
+        ] satisfies ColumnsType<SystemLog>
+      : [
+          {
+            title: "状态",
+            width: 150,
+            render: (_: unknown, item: SystemLog) => (
+              <Tag color={getAccountLogColor(item)}>{getDetailText(item, "reason_text")}</Tag>
+            ),
+          },
+          {
+            title: "号池",
+            width: 150,
+            render: (_: unknown, item: SystemLog) => formatAccountPool(item),
+          },
+          {
+            title: "策略",
+            width: 210,
+            render: (_: unknown, item: SystemLog) => <span className="text-slate-500">{formatAccountTarget(item)}</span>,
+          },
+        ] satisfies ColumnsType<SystemLog>),
+    {
+      title: "简述",
+      dataIndex: "summary",
+      ellipsis: true,
+      render: (value?: string) => <span className="text-slate-500">{value || "-"}</span>,
+    },
+    {
+      title: "操作",
+      width: 150,
+      fixed: "right",
+      render: (_, item) => (
+        <Space size={4}>
+          <Button type="link" size="small" onClick={() => openDetail(item)}>查看详情</Button>
+          <Button type="link" danger size="small" onClick={() => setDeletingItems([item])}>删除</Button>
+        </Space>
+      ),
+    },
+  ];
+
+  return (
+    <section className="space-y-4">
+      <Card>
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+          <div>
+            <Typography.Text type="secondary" className="text-xs font-semibold uppercase tracking-[0.18em]">Logs</Typography.Text>
+            <Typography.Title level={3} className="!mb-0 !mt-1">日志管理</Typography.Title>
+            <Typography.Text type="secondary">查看调用和账号管理事件，支持日期筛选和批量删除。</Typography.Text>
+          </div>
+          <Space wrap>
+            <Select
+              value={type}
+              onChange={setType}
+              style={{ width: 150 }}
+              options={[
+                { value: LogType.Call, label: "调用日志" },
+                { value: LogType.Account, label: "账号管理日志" },
+              ]}
+            />
+            <DateRangeFilter startDate={startDate} endDate={endDate} onChange={(start, end) => { setStartDate(start); setEndDate(end); }} />
+            <Button onClick={clearFilters}>清除筛选条件</Button>
+            <Button type="primary" icon={isLoading ? <LoaderCircle className="size-4 animate-spin" /> : <Search className="size-4" />} onClick={() => void loadLogs()} disabled={isLoading}>
+              查询
+            </Button>
+          </Space>
+        </div>
+      </Card>
+
+      <Card
+        title={
+          <Space wrap>
+            <span>日志列表</span>
+            <Tag color="default">共 {items.length} 条</Tag>
+            {selectedIds.length > 0 ? <Tag color="blue">已选 {selectedIds.length} 条</Tag> : null}
+          </Space>
+        }
+        extra={
+          <Space wrap>
+            <Checkbox checked={currentPageSelected} onChange={(event) => toggleIds(currentRows.map((item) => item.id), event.target.checked)}>本页全选</Checkbox>
+            <Checkbox checked={allSelected} onChange={(event) => toggleIds(items.map((item) => item.id), event.target.checked)}>全选结果</Checkbox>
+            <Button onClick={() => setSelectedIds([])} disabled={selectedIds.length === 0 || isDeleting}>取消选择</Button>
+            <Button icon={<RefreshCw className={`size-4 ${isLoading ? "animate-spin" : ""}`} />} onClick={() => void loadLogs()} disabled={isLoading}>刷新</Button>
+            <Button danger icon={<Trash2 className="size-4" />} onClick={() => setDeletingItems(items.filter((item) => selectedSet.has(item.id)))} disabled={selectedIds.length === 0 || isDeleting}>
+              删除所选
+            </Button>
+          </Space>
+        }
+        styles={{ body: { padding: 0 } }}
+      >
+        <Table
+          rowKey="id"
+          columns={columns}
+          dataSource={currentRows}
+          loading={isLoading}
+          pagination={false}
+          scroll={{ x: 1680 }}
+          locale={{ emptyText: <Empty description="没有找到日志" /> }}
+        />
+        <div className="flex items-center justify-end border-t border-slate-100 px-4 py-3">
+          <Pagination
+            current={safePage}
+            pageSize={pageSize}
+            total={items.length}
+            showSizeChanger={false}
+            showTotal={(total) => `共 ${total} 条`}
+            onChange={setPage}
+          />
+        </div>
+      </Card>
+
+      <Modal
+        title="日志详情"
+        open={detailOpen}
+        onCancel={() => setDetailOpen(false)}
+        footer={null}
+        width={920}
+        styles={{ body: { maxHeight: "72vh", overflow: "auto" } }}
+      >
+        <div className="space-y-4">
+          <div className="grid gap-3 rounded-xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-600 md:grid-cols-2">
+            {Object.entries(detailLog?.detail || {})
+              .filter(([, value]) => typeof value !== "object")
+              .map(([key, value]) => (
+                <div key={key} className="flex items-start justify-between gap-4">
+                  <span className="text-slate-400">{key}</span>
+                  <span className="text-right font-medium break-all text-slate-700">{String(value)}</span>
+                </div>
+              ))}
+          </div>
+          {getRecord(detailLog?.detail?.request_params) ? (
+            <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-4">
+              <Typography.Text className="!text-emerald-800" strong>请求参数</Typography.Text>
+              <div className="mt-3 grid gap-3 text-sm md:grid-cols-3">
+                {Object.entries(getRecord(detailLog?.detail?.request_params) || {}).map(([key, value]) => (
+                  <div key={key} className="rounded-lg bg-white px-3 py-2 shadow-sm">
+                    <div className="text-xs text-slate-400">{key}</div>
+                    <div className="mt-1 break-all font-semibold text-slate-800">{value === null || value === undefined || value === "" ? "未指定" : String(value)}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : null}
+          <div className="grid gap-3 md:grid-cols-2">
+            <AccountAttemptList title="最终使用账号" items={getRecordList(detailLog?.detail?.final_accounts)} />
+            <AccountAttemptList title="失败账号" items={getRecordList(detailLog?.detail?.failed_account_details)} />
+          </div>
+          <pre className="max-h-[72vh] overflow-auto rounded-xl border border-slate-200 bg-slate-950 p-4 text-xs leading-6 text-slate-100">
+            {JSON.stringify(detailLog?.detail || {}, null, 2)}
+          </pre>
+        </div>
+      </Modal>
+
+      <Modal
+        title={deletingItems.length === 1 ? "删除日志" : "删除所选日志"}
+        open={deletingItems.length > 0}
+        onCancel={() => setDeletingItems([])}
+        onOk={() => void confirmDelete()}
+        okText="确认删除"
+        cancelText="取消"
+        okButtonProps={{ danger: true, loading: isDeleting, disabled: deletingItems.length === 0 }}
+        cancelButtonProps={{ disabled: isDeleting }}
+      >
+        <p>确认删除 {deletingItems.length} 条日志吗？删除后无法恢复。</p>
+      </Modal>
+    </section>
+  );
+}
+
+export default function LogsPage() {
+  const { isCheckingAuth, session } = useAuthGuard(["admin"]);
+  if (isCheckingAuth || !session || session.role !== "admin") {
+    return <div className="flex min-h-[40vh] items-center justify-center"><Spin /></div>;
+  }
+  return <LogsContent />;
+}

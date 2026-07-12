@@ -1,0 +1,20 @@
+{
+  "app_name": "IMAGE POOL",
+  "listen_addr": ":18081",
+  "api_keys": [
+    "dev-key"
+  ],
+  "account_file": "../data/local-test-accounts.json",
+  "auth_key_file": "../data/local-test-auth.json",
+  "call_log_file": "../data/local-test-calls.json",
+  "image_tags_file": "../data/local-test-tags.json",
+  "token_recovery_interval_secs": 60,
+  "token_recovery_max_attempts": 3,
+  "token_recovery_concurrency": 2,
+  "token_recovery_timeout_secs": 60,
+  "image_output_dir": "../data/local-test-images",
+  "web_dist_dir": "../web_dist",
+  "upstream_transport": "tls_client",
+  "storage_backend": "postgres",
+  "database_url": "postgresql://imagepool:imagepool@127.0.0.1:5434/imagepool?sslmode=disable"
+}

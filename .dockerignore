@@ -1,0 +1,11 @@
+.git
+.gitignore
+data
+postgres-data
+web/node_modules
+web/.next
+web/out
+web_dist
+image-pool
+image-pool.exe
+*.log

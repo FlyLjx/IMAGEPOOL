@@ -1,0 +1,10 @@
+{
+  "accounts": [
+    {
+      "email": "user@example.com",
+      "access_token": "replace-with-chatgpt-access-token",
+      "type": "free",
+      "created_at": 0
+    }
+  ]
+}

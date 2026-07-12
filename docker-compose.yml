@@ -1,0 +1,50 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: image-pool-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: imagepool
+      POSTGRES_USER: imagepool
+      POSTGRES_PASSWORD: imagepool
+      TZ: Asia/Shanghai
+    ports:
+      - "127.0.0.1:5434:5432"
+    volumes:
+      - ./postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U imagepool -d imagepool"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  flaresolverr:
+    image: ghcr.io/flaresolverr/flaresolverr:latest
+    container_name: image-pool-flaresolverr
+    restart: unless-stopped
+    environment:
+      LOG_LEVEL: info
+      LOG_HTML: "false"
+      CAPTCHA_SOLVER: none
+      TZ: Asia/Shanghai
+    shm_size: 2gb
+
+  image-pool:
+    image: ${IMAGE_POOL_IMAGE:-ghcr.io/flyljx/imagepool}:${IMAGE_POOL_IMAGE_TAG:-latest}
+    container_name: image-pool
+    restart: unless-stopped
+    ports:
+      - "${IMAGE_POOL_PORT:-8080}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      flaresolverr:
+        condition: service_started
+    environment:
+      DATABASE_URL: postgresql://imagepool:imagepool@postgres:5432/imagepool?sslmode=disable
+      TZ: Asia/Shanghai
+      IMAGE_POOL_YYDS_MAIL_API_KEY: ${IMAGE_POOL_YYDS_MAIL_API_KEY:-}
+      IMAGE_POOL_YYDS_MAIL_API_BASE_URL: ${IMAGE_POOL_YYDS_MAIL_API_BASE_URL:-https://maliapi.215.im/v1}
+    volumes:
+      - ./data:/app/data
+      - ./configs:/app/configs

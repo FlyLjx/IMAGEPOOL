@@ -1,0 +1,16 @@
+/data/
+/postgres-data/
+/.tmp/
+/logs/
+/dist/
+/tmp/
+*.exe
+web/node_modules/
+web/.next/
+web/out/
+web_dist/
+*.tsbuildinfo
+configs/config.json
+.env
+.env.*
+!.env.example
