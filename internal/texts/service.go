@@ -110,8 +110,8 @@ func (s *Service) withAccountRetry(ctx context.Context, fn func(accounts.Account
 		log.Status = "failed"
 		log.Error = err.Error()
 		if openaiweb.IsAuthenticationError(err) {
-			_, queued, _ := s.store.MarkTokenRecoveryPending(account.AccessToken, err.Error())
-			log.RecoveryQueued = queued
+			removed, _ := s.store.RemoveInvalidToken(account.AccessToken, err.Error())
+			log.RemovedAccount = removed
 		}
 		*attempts = append(*attempts, log)
 		if !openaiweb.IsAuthenticationError(err) {

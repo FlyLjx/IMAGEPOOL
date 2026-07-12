@@ -55,7 +55,7 @@ func (s *Service) Search(ctx context.Context, prompt string) (openaiweb.SearchRe
 		lastErr = err
 		_ = s.store.MarkFailure(account.AccessToken, err)
 		if openaiweb.IsAuthenticationError(err) {
-			_, _, _ = s.store.MarkTokenRecoveryPending(account.AccessToken, err.Error())
+			_, _ = s.store.RemoveInvalidToken(account.AccessToken, err.Error())
 			continue
 		}
 		return openaiweb.SearchResult{}, err

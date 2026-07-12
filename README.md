@@ -32,14 +32,7 @@ go run ./cmd/image-pool -config configs/config.json
 
 Docker Compose 默认地址为 `http://127.0.0.1:8080`；本机验证实例使用 `http://127.0.0.1:18081`。样例管理员 Key 为 `dev-key`，首次使用后应在 `configs/config.json` 中替换。管理员登录后可管理账号池、用户 Key、代理和模型 slug；普通用户登录后会进入 `/image` 图片工作台。
 
-当 OpenAI 明确返回 `refresh_token_invalidated` 时，账号会先退出调度，由后台尝试密码重新登录。若登录流程要求邮箱验证码，可通过运行环境配置 YYDS Mail API Key：
-
-```powershell
-$env:IMAGE_POOL_YYDS_MAIL_API_KEY = "your-api-key"
-$env:IMAGE_POOL_YYDS_MAIL_API_BASE_URL = "https://maliapi.215.im/v1"
-```
-
-Docker Compose 可在本地 `.env` 文件中设置相同变量。API Key 不会写入账号、恢复日志、配置接口或版本库；恢复仍遵循配置中的三次后台重试规则。
+当 OpenAI 明确返回 `refresh_token_invalidated` 或任意认证失败（HTTP 401）时，账号会立即从账号池中删除。
 
 前端生产静态文件由 Go 服务直接托管：
 
@@ -59,6 +52,8 @@ docker compose up -d --build
 ```
 
 首次启动时容器会将镜像内的样例配置初始化为 `configs/config.json`，之后管理后台的配置修改会保存到该文件。Compose 会先启动 PostgreSQL（主机端口 `5434`），数据库健康后再启动 IMAGE POOL。`data/`、`configs/` 与 `postgres-data/` 都是独立于原项目的持久化目录。
+
+镜像发布完成后，GitHub Actions 会创建对应版本的 Release。管理员可在控制台版本弹窗中点击“立即升级”；Compose 内部的 `image-pool-updater` 会拉取最新镜像并重建 `image-pool` 容器。首次启用该功能时，拉取本仓库更新后执行一次 `docker compose up -d` 以创建更新器。部署前请在 `.env` 设置随机的 `IMAGE_POOL_UPDATE_TOKEN`，该更新器不对宿主机公开端口。
 
 连接串默认是 `postgresql://imagepool:imagepool@postgres:5432/imagepool?sslmode=disable`；如需接外部 PostgreSQL，可在 `configs/config.json` 修改 `database_url`，或设置 `DATABASE_URL` 环境变量覆盖。仪表盘会显示脱敏后的连接地址和 `postgresql` 健康状态。
 

@@ -34,6 +34,7 @@ import (
 	"imagepool/internal/storage"
 	"imagepool/internal/tasks"
 	"imagepool/internal/texts"
+	"imagepool/internal/updater"
 )
 
 type Server struct {
@@ -53,6 +54,7 @@ type Server struct {
 	oauth           *oauthlogin.Service
 	debugClient     *openaiweb.ReloadableClient
 	register        *registration.Manager
+	updater         *updater.Service
 	state           persistence.Store
 	onConfigUpdated func(config.Config)
 }
@@ -81,7 +83,7 @@ func newServer(cfg config.Config, accountStore *accounts.Store, imageService *im
 		metricService = metrics.NewServiceWithPersistence(state)
 		registerManager = registration.NewManagerWithPersistence(state, accountStore, registerWorker)
 	}
-	return &Server{cfg: cfg, auth: authService, accounts: accountStore, images: imageService, texts: textService, searches: searchService, storage: storageService, tags: tagStore, static: newStaticFiles(cfg.WebDistDir), tasks: taskManager, metrics: metricService, refresh: accounts.NewRefreshManager(accountStore, imageService, cfg.RefreshAccountConcurrency), oauth: oauthlogin.New(), debugClient: openaiweb.NewReloadableClient(cfg), register: registerManager, state: state, onConfigUpdated: onConfigUpdated}
+	return &Server{cfg: cfg, auth: authService, accounts: accountStore, images: imageService, texts: textService, searches: searchService, storage: storageService, tags: tagStore, static: newStaticFiles(cfg.WebDistDir), tasks: taskManager, metrics: metricService, refresh: accounts.NewRefreshManager(accountStore, imageService, cfg.RefreshAccountConcurrency), oauth: oauthlogin.New(), debugClient: openaiweb.NewReloadableClient(cfg), register: registerManager, updater: updater.NewFromEnvironment(), state: state, onConfigUpdated: onConfigUpdated}
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -259,6 +261,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"config": s.currentConfig()})
 	case r.Method == http.MethodPost && r.URL.Path == "/api/settings":
 		s.handleSettingsUpdate(w, r)
+	case r.URL.Path == "/api/system/update":
+		s.handleSystemUpdate(w, r)
 	default:
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": map[string]any{"message": "not found"}})
 	}

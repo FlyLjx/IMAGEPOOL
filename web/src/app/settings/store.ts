@@ -85,10 +85,6 @@ function normalizeConfig(config: SettingsConfig): SettingsConfig {
     image_check_before_hit_enabled: Boolean(config.image_check_before_hit_enabled !== false),
     image_settle_secs: Number(config.image_settle_secs || 2.0),
     image_timeout_retry_secs: Number(config.image_timeout_retry_secs || 30),
-    token_recovery_interval_secs: Number(config.token_recovery_interval_secs || 60),
-    token_recovery_max_attempts: Number(config.token_recovery_max_attempts || 3),
-    token_recovery_concurrency: Number(config.token_recovery_concurrency || 2),
-    token_recovery_timeout_secs: Number(config.token_recovery_timeout_secs || 60),
     auto_remove_invalid_accounts: Boolean(config.auto_remove_invalid_accounts),
     auto_remove_rate_limited_accounts: Boolean(config.auto_remove_rate_limited_accounts),
     auto_relogin_after_refresh: Boolean(config.auto_relogin_after_refresh),
@@ -175,10 +171,6 @@ type SettingsStore = {
   setImageAccountPrecheckIntervalMinutes: (value: string) => void;
   setImageAccountPrecheckConcurrency: (value: string) => void;
   setImageAccountPrecheckTimeoutSecs: (value: string) => void;
-  setTokenRecoveryIntervalSecs: (value: string) => void;
-  setTokenRecoveryMaxAttempts: (value: string) => void;
-  setTokenRecoveryConcurrency: (value: string) => void;
-  setTokenRecoveryTimeoutSecs: (value: string) => void;
   setAutoRemoveInvalidAccounts: (value: boolean) => void;
   setAutoRemoveRateLimitedAccounts: (value: boolean) => void;
   setAutoReloginAfterRefresh: (value: boolean) => void;
@@ -269,10 +261,6 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         image_check_before_hit_enabled: Boolean(config.image_check_before_hit_enabled !== false),
         image_settle_secs: Math.max(0.5, Number(config.image_settle_secs) || 2.0),
         image_timeout_retry_secs: Math.max(1, Number(config.image_timeout_retry_secs) || 30),
-        token_recovery_interval_secs: Math.max(15, Number(config.token_recovery_interval_secs) || 60),
-        token_recovery_max_attempts: Math.min(10, Math.max(1, Number(config.token_recovery_max_attempts) || 3)),
-        token_recovery_concurrency: Math.min(20, Math.max(1, Number(config.token_recovery_concurrency) || 2)),
-        token_recovery_timeout_secs: Math.min(300, Math.max(10, Number(config.token_recovery_timeout_secs) || 60)),
         auto_remove_invalid_accounts: Boolean(config.auto_remove_invalid_accounts),
         auto_remove_rate_limited_accounts: Boolean(config.auto_remove_rate_limited_accounts),
         auto_relogin_after_refresh: Boolean(config.auto_relogin_after_refresh),
@@ -378,22 +366,6 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
 
   setImageAccountPrecheckTimeoutSecs: (value) => {
     set((state) => (state.config ? { config: { ...state.config, image_account_precheck_timeout_secs: value } } : {}));
-  },
-
-  setTokenRecoveryIntervalSecs: (value) => {
-    set((state) => (state.config ? { config: { ...state.config, token_recovery_interval_secs: value } } : {}));
-  },
-
-  setTokenRecoveryMaxAttempts: (value) => {
-    set((state) => (state.config ? { config: { ...state.config, token_recovery_max_attempts: value } } : {}));
-  },
-
-  setTokenRecoveryConcurrency: (value) => {
-    set((state) => (state.config ? { config: { ...state.config, token_recovery_concurrency: value } } : {}));
-  },
-
-  setTokenRecoveryTimeoutSecs: (value) => {
-    set((state) => (state.config ? { config: { ...state.config, token_recovery_timeout_secs: value } } : {}));
   },
 
   setAutoRemoveInvalidAccounts: (value) => {

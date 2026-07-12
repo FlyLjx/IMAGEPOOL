@@ -44,7 +44,6 @@ type AttemptLog struct {
 	Status         string `json:"status"`
 	Error          string `json:"error,omitempty"`
 	RemovedAccount bool   `json:"removed_account,omitempty"`
-	RecoveryQueued bool   `json:"recovery_queued,omitempty"`
 }
 
 type ImageResult struct {
@@ -101,8 +100,7 @@ func IsTokenInvalidError(err error) bool {
 }
 
 // IsAuthenticationError includes explicit OAuth revocation and ordinary
-// upstream 401 responses. Callers must quarantine these accounts for
-// background credential recovery rather than deleting them in-band.
+// upstream 401 responses. Callers remove these accounts from the pool.
 func IsAuthenticationError(err error) bool {
 	if err == nil {
 		return false

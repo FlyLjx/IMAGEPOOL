@@ -177,7 +177,7 @@ export function TopNav({ children }: { children?: React.ReactNode }) {
                 <div className="hidden text-xs text-slate-400 sm:block">当前模块</div>
               </div>
             </div>
-            <HeaderActions className="shrink-0" />
+            <HeaderActions className="shrink-0" canUpdate={session?.role === "admin"} />
           </div>
         </Layout.Header>
         <Layout.Content className="min-h-[calc(100vh-3.5rem)] p-3 sm:p-5">

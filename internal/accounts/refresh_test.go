@@ -17,7 +17,7 @@ func (c refreshChecker) CheckAccount(ctx context.Context, token string) (Account
 	return AccountCheckResult{Models: []string{"gpt-5-5"}, ImageQuotaUnknown: true}, nil
 }
 
-func TestRefreshManagerQueuesAuthenticationFailuresForRecovery(t *testing.T) {
+func TestRefreshManagerRemovesAuthenticationFailures(t *testing.T) {
 	store := NewStore([]Account{{Email: "ok@example", AccessToken: "ok"}, {Email: "bad@example", AccessToken: "bad"}}, "")
 	manager := NewRefreshManager(store, refreshChecker{errors: map[string]error{"bad": errors.New("token_revoked")}}, 2)
 	id, err := manager.Start([]string{"ok", "bad"})
@@ -28,8 +28,8 @@ func TestRefreshManagerQueuesAuthenticationFailuresForRecovery(t *testing.T) {
 	for time.Now().Before(deadline) {
 		progress, ok := manager.Get(id)
 		if ok && progress.Done {
-			bad, found := store.Get("bad")
-			if progress.Processed != 2 || progress.StatusCounts["recovery_pending"] != 1 || !found || bad.Status != StatusCredentialInvalid {
+			_, found := store.Get("bad")
+			if progress.Processed != 2 || progress.StatusCounts["removed"] != 1 || found {
 				t.Fatalf("progress=%#v accounts=%#v", progress, store.List())
 			}
 			return
@@ -46,15 +46,14 @@ func TestRefreshNowValidatesBeforeReturning(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !progress.Done || progress.Processed != 2 || progress.StatusCounts["success"] != 1 || progress.StatusCounts["recovery_pending"] != 1 {
+	if !progress.Done || progress.Processed != 2 || progress.StatusCounts["success"] != 1 || progress.StatusCounts["removed"] != 1 {
 		t.Fatalf("progress=%#v", progress)
 	}
 	items := store.List()
-	if len(items) != 2 {
+	if len(items) != 1 {
 		t.Fatalf("accounts=%#v", items)
 	}
-	bad, found := store.Get("bad")
-	if !found || bad.Status != StatusCredentialInvalid {
+	if _, found := store.Get("bad"); found {
 		t.Fatalf("accounts=%#v", items)
 	}
 }

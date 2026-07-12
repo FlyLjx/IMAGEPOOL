@@ -4,6 +4,10 @@ export type ReleaseInfo = {
   items: { type: string; content: string }[];
 };
 
+export const githubRepositoryURL = "https://github.com/FlyLjx/IMAGEPOOL";
+export const githubLatestReleaseURL = "https://api.github.com/repos/FlyLjx/IMAGEPOOL/releases/latest";
+export const githubChangelogURL = "https://raw.githubusercontent.com/FlyLjx/IMAGEPOOL/main/CHANGELOG.md";
+
 export function parseChangelog(content: string): ReleaseInfo[] {
   return content
     .split(/^## /m)

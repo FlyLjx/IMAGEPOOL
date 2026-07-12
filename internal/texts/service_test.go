@@ -32,7 +32,7 @@ func (f *fakeTextBackend) StreamText(ctx context.Context, account accounts.Accou
 	return "conv", nil
 }
 
-func TestGenerateQueuesInvalidTokenForRecovery(t *testing.T) {
+func TestGenerateRemovesInvalidToken(t *testing.T) {
 	store := accounts.NewStore([]accounts.Account{{Email: "old", AccessToken: "old", CreatedAt: 1}, {Email: "new", AccessToken: "new", CreatedAt: 2}}, "")
 	backend := &fakeTextBackend{errs: []error{errors.New("token invalidated")}}
 	res, err := NewService(config.Default(), store, backend).Generate(context.Background(), openaiweb.ChatRequest{Model: "auto", Prompt: "hi"})
@@ -42,9 +42,8 @@ func TestGenerateQueuesInvalidTokenForRecovery(t *testing.T) {
 	if backend.calls != 2 || res.Text != "ok" {
 		t.Fatalf("calls=%d res=%#v", backend.calls, res)
 	}
-	invalid, found := store.Get("new")
-	if !found || invalid.Status != accounts.StatusCredentialInvalid {
-		t.Fatalf("token not queued for recovery: %#v", store.List())
+	if _, found := store.Get("new"); found {
+		t.Fatalf("token was not removed: %#v", store.List())
 	}
 }
 

@@ -114,26 +114,6 @@ func TestRemoveInvalidTokenPersists(t *testing.T) {
 	}
 }
 
-func TestCredentialRecoveryLogsPersistAfterAccountDeletion(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "accounts.json")
-	store := NewStore([]Account{{Email: "a@example.test", AccessToken: "tok", Status: "正常", Extra: map[string]any{}}}, path)
-	store.now = func() time.Time { return time.Date(2026, 7, 12, 14, 0, 0, 0, time.FixedZone("CST", 8*60*60)) }
-	if _, queued, err := store.MarkTokenRecoveryPending("tok", "upstream status=401"); err != nil || !queued {
-		t.Fatalf("queued=%v err=%v", queued, err)
-	}
-	if removed, err := store.FailTokenRecovery("tok", "invalid_grant", 1, time.Minute); err != nil || !removed {
-		t.Fatalf("removed=%v err=%v", removed, err)
-	}
-	persisted, err := LoadStore(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	logs := persisted.CredentialRecoveryLogs("a@example.test", 20)
-	if len(logs) != 2 || logs[0].Event != "recovery_deleted" || logs[1].Event != "credential_invalid" {
-		t.Fatalf("persisted recovery logs=%#v", logs)
-	}
-}
-
 func TestPublicAccountIncludesDerivedHealth(t *testing.T) {
 	account := Account{AccessToken: "token", Status: "正常", Quota: 25, Extra: map[string]any{}}
 	public := account.Public()

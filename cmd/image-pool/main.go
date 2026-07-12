@@ -16,10 +16,8 @@ import (
 	"imagepool/internal/config"
 	"imagepool/internal/httpapi"
 	"imagepool/internal/images"
-	"imagepool/internal/oauthlogin"
 	"imagepool/internal/openaiweb"
 	"imagepool/internal/persistence"
-	proxyservice "imagepool/internal/proxy"
 	"imagepool/internal/searches"
 	"imagepool/internal/storage"
 	"imagepool/internal/tasks"
@@ -65,16 +63,6 @@ func main() {
 	imageService := images.NewService(cfg, store, webClient, storageService)
 	textService := texts.NewService(cfg, store, webClient)
 	searchService := searches.NewService(cfg, store, webClient)
-	tokenRefresher, refreshClientErr := newOAuthTokenRefresher(cfg)
-	if refreshClientErr != nil {
-		log.Printf("configure OAuth token recovery client: %v", refreshClientErr)
-		tokenRefresher = oauthlogin.New()
-		configureRecoveryMailbox(tokenRefresher, nil)
-	}
-	tokenRecovery := accounts.NewTokenRecoveryManager(cfg, store, imageService, tokenRefresher, tokenRefresher)
-	tokenRecoveryCtx, cancelTokenRecovery := context.WithCancel(context.Background())
-	defer cancelTokenRecovery()
-	go tokenRecovery.Run(tokenRecoveryCtx)
 	taskManager := tasks.NewManager(imageService)
 	if state != nil {
 		taskManager = tasks.NewManagerWithPersistence(imageService, state)
@@ -83,13 +71,6 @@ func main() {
 		setTimezone(next.Timezone)
 		imageService.UpdateConfig(next)
 		webClient.UpdateConfig(next)
-		tokenRecovery.UpdateConfig(next)
-		if nextRefresher, err := newOAuthTokenRefresher(next); err != nil {
-			log.Printf("update OAuth token recovery client: %v", err)
-		} else {
-			tokenRecovery.UpdateRefresher(nextRefresher)
-			tokenRecovery.UpdatePasswordRelogger(nextRefresher)
-		}
 	}
 	handler := httpapi.NewServer(cfg, store, imageService, textService, searchService, storageService, taskManager, configUpdated)
 	if state != nil {
@@ -112,34 +93,9 @@ func main() {
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 	<-stop
-	cancelTokenRecovery()
-
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	_ = srv.Shutdown(ctx)
-}
-
-func newOAuthTokenRefresher(cfg config.Config) (*oauthlogin.Service, error) {
-	client, err := proxyservice.NewHTTPClientForRuntime(cfg.ProxyRuntime, time.Duration(cfg.RequestTimeoutSecs*float64(time.Second)))
-	if err != nil {
-		return nil, err
-	}
-	service := oauthlogin.NewWithClient("https://auth.openai.com", client)
-	configureRecoveryMailbox(service, client)
-	return service, nil
-}
-
-func configureRecoveryMailbox(service *oauthlogin.Service, client *http.Client) {
-	if service == nil {
-		return
-	}
-	apiKey := strings.TrimSpace(os.Getenv("IMAGE_POOL_YYDS_MAIL_API_KEY"))
-	if apiKey == "" {
-		return
-	}
-	apiBase := strings.TrimSpace(os.Getenv("IMAGE_POOL_YYDS_MAIL_API_BASE_URL"))
-	service.SetEmailOTPReader(oauthlogin.NewYYDSMailReader(apiBase, apiKey, client))
-	log.Printf("YYDS Mail has been configured for background password recovery")
 }
 
 func setTimezone(name string) {

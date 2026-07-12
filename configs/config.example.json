@@ -27,10 +27,6 @@
   "max_image_attempts": 3,
   "request_timeout_secs": 120,
   "refresh_account_concurrency": 8,
-  "token_recovery_interval_secs": 60,
-  "token_recovery_max_attempts": 3,
-  "token_recovery_concurrency": 2,
-  "token_recovery_timeout_secs": 60,
   "proxy_runtime": {
     "enabled": true,
     "egress_mode": "direct",

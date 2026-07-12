@@ -43,8 +43,20 @@ services:
     environment:
       DATABASE_URL: postgresql://imagepool:imagepool@postgres:5432/imagepool?sslmode=disable
       TZ: Asia/Shanghai
-      IMAGE_POOL_YYDS_MAIL_API_KEY: ${IMAGE_POOL_YYDS_MAIL_API_KEY:-}
-      IMAGE_POOL_YYDS_MAIL_API_BASE_URL: ${IMAGE_POOL_YYDS_MAIL_API_BASE_URL:-https://maliapi.215.im/v1}
+      IMAGE_POOL_UPDATE_URL: http://image-pool-updater:8080/v1/update
+      IMAGE_POOL_UPDATE_TOKEN: ${IMAGE_POOL_UPDATE_TOKEN:-image-pool-update-local-token}
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
     volumes:
       - ./data:/app/data
       - ./configs:/app/configs
+
+  image-pool-updater:
+    image: containrrr/watchtower:1.7.1
+    container_name: image-pool-updater
+    restart: unless-stopped
+    command: --http-api-update --cleanup --label-enable
+    environment:
+      WATCHTOWER_HTTP_API_TOKEN: ${IMAGE_POOL_UPDATE_TOKEN:-image-pool-update-local-token}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock

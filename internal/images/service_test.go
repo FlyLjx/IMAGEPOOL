@@ -115,7 +115,7 @@ func (f *fakeBackend) Search(ctx context.Context, account accounts.Account, req 
 	return openaiweb.SearchResult{Answer: "ok"}, nil
 }
 
-func TestGenerateQueuesInvalidTokenForRecoveryAndRetriesNextAccount(t *testing.T) {
+func TestGenerateRemovesInvalidTokenAndRetriesNextAccount(t *testing.T) {
 	store := accounts.NewStore([]accounts.Account{{Email: "old", AccessToken: "old", CreatedAt: 1}, {Email: "new", AccessToken: "new", CreatedAt: 2}}, "")
 	fb := &fakeBackend{errs: []error{errors.New("token_revoked")}}
 	resp, err := NewService(config.Default(), store, fb).Generate(context.Background(), Request{Prompt: "draw", Model: "gpt-image-2"})
@@ -128,22 +128,20 @@ func TestGenerateQueuesInvalidTokenForRecoveryAndRetriesNextAccount(t *testing.T
 	if resp.AccountEmail != "old" {
 		t.Fatalf("expected old after removing new, got %s", resp.AccountEmail)
 	}
-	invalid, found := store.Get("new")
-	if !found || invalid.Status != accounts.StatusCredentialInvalid {
-		t.Fatalf("invalid account was not queued for recovery: %#v", store.List())
+	if _, found := store.Get("new"); found {
+		t.Fatalf("invalid account was not removed: %#v", store.List())
 	}
 }
 
-func TestGenerateQueuesGeneric401ForRecovery(t *testing.T) {
+func TestGenerateRemovesGeneric401Account(t *testing.T) {
 	store := accounts.NewStore([]accounts.Account{{Email: "old", AccessToken: "old", CreatedAt: 1}, {Email: "new", AccessToken: "new", CreatedAt: 2}}, "")
 	fb := &fakeBackend{errs: []error{errors.New("upstream /backend-api/me status=401 body=unauthorized")}}
 	response, err := NewService(config.Default(), store, fb).Generate(context.Background(), Request{Prompt: "draw"})
 	if err != nil || response.AccountEmail != "old" || fb.calls != 2 {
 		t.Fatalf("response=%#v err=%v calls=%d", response, err, fb.calls)
 	}
-	invalid, found := store.Get("new")
-	if !found || invalid.Status != accounts.StatusCredentialInvalid {
-		t.Fatalf("generic 401 did not queue recovery: %#v", store.List())
+	if _, found := store.Get("new"); found {
+		t.Fatalf("generic 401 account was not removed: %#v", store.List())
 	}
 }
 
@@ -157,9 +155,8 @@ func TestGeneratePrechecksUnverifiedTokenBeforeImageCall(t *testing.T) {
 	if backend.calls != 1 || response.AccountEmail != "old" {
 		t.Fatalf("calls=%d response=%#v", backend.calls, response)
 	}
-	invalid, found := store.Get("new")
-	if !found || invalid.Status != accounts.StatusCredentialInvalid {
-		t.Fatalf("invalid token not queued for recovery: %#v", store.List())
+	if _, found := store.Get("new"); found {
+		t.Fatalf("invalid token was not removed: %#v", store.List())
 	}
 	if len(backend.readinessTokens) != 2 || backend.readinessTokens[0] != "new" || backend.readinessTokens[1] != "old" {
 		t.Fatalf("readiness checks=%#v", backend.readinessTokens)
@@ -198,9 +195,8 @@ func TestGenerateRevalidatesTokenAndSwitchesWhenItIsInvalidated(t *testing.T) {
 	if got := backend.readinessTokens; len(got) != 3 || got[0] != "new" || got[1] != "new" || got[2] != "old" {
 		t.Fatalf("readiness checks=%#v", got)
 	}
-	invalid, found := store.Get("new")
-	if !found || invalid.Status != accounts.StatusCredentialInvalid {
-		t.Fatalf("invalidated account was not queued for recovery: %#v", store.List())
+	if _, found := store.Get("new"); found {
+		t.Fatalf("invalidated account was not removed: %#v", store.List())
 	}
 }
 

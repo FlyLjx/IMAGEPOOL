@@ -41,10 +41,6 @@ type Config struct {
 	SearchTimeoutSecs                   float64       `json:"search_timeout_secs"`
 	SearchPollIntervalSecs              float64       `json:"search_poll_interval_secs"`
 	RefreshAccountConcurrency           int           `json:"refresh_account_concurrency"`
-	TokenRecoveryIntervalSecs           int           `json:"token_recovery_interval_secs"`
-	TokenRecoveryMaxAttempts            int           `json:"token_recovery_max_attempts"`
-	TokenRecoveryConcurrency            int           `json:"token_recovery_concurrency"`
-	TokenRecoveryTimeoutSecs            int           `json:"token_recovery_timeout_secs"`
 	Proxy                               string        `json:"proxy"`
 	ProxyRuntime                        ProxyRuntime  `json:"proxy_runtime"`
 	Notifications                       Notifications `json:"notifications"`
@@ -127,10 +123,6 @@ func Default() Config {
 		SearchTimeoutSecs:                   300,
 		SearchPollIntervalSecs:              3,
 		RefreshAccountConcurrency:           8,
-		TokenRecoveryIntervalSecs:           60,
-		TokenRecoveryMaxAttempts:            3,
-		TokenRecoveryConcurrency:            2,
-		TokenRecoveryTimeoutSecs:            60,
 		Notifications:                       Notifications{Bark: BarkNotification{ServerURL: "https://api.day.app", TitlePrefix: "IMAGE POOL", Group: "image-pool", Level: "active", TimeoutSecs: 10, MinIntervalSeconds: 60, NotifyFailedCalls: true, NotifyRegister: true, NotifyAutoRefill: true}},
 		ProxyRuntime:                        ProxyRuntime{Enabled: true, EgressMode: "direct", ResetSessionStatusCodes: []int{403}, Clearance: ClearanceRuntime{Enabled: false, Mode: "none", Browser: "chrome", TimeoutSec: 60, RefreshInterval: 3600}},
 		Models:                              []string{"gpt-image-2", "codex-gpt-image-2", "plus-codex-gpt-image-2", "team-codex-gpt-image-2", "pro-codex-gpt-image-2"},
@@ -322,18 +314,6 @@ func (c Config) Normalize() Config {
 	}
 	if c.RefreshAccountConcurrency <= 0 {
 		c.RefreshAccountConcurrency = d.RefreshAccountConcurrency
-	}
-	if c.TokenRecoveryIntervalSecs <= 0 {
-		c.TokenRecoveryIntervalSecs = d.TokenRecoveryIntervalSecs
-	}
-	if c.TokenRecoveryMaxAttempts <= 0 {
-		c.TokenRecoveryMaxAttempts = d.TokenRecoveryMaxAttempts
-	}
-	if c.TokenRecoveryConcurrency <= 0 {
-		c.TokenRecoveryConcurrency = d.TokenRecoveryConcurrency
-	}
-	if c.TokenRecoveryTimeoutSecs <= 0 {
-		c.TokenRecoveryTimeoutSecs = d.TokenRecoveryTimeoutSecs
 	}
 	c.Proxy = strings.TrimSpace(c.Proxy)
 	if proxyRuntimeEmpty(c.ProxyRuntime) {

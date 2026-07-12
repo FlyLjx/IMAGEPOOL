@@ -321,7 +321,7 @@ func (s *Service) GenerateWithAccount(ctx context.Context, token string, req Req
 			_ = s.store.MarkFailure(account.AccessToken, err)
 		}
 		if openaiweb.IsAuthenticationError(err) {
-			_, _, _ = s.store.MarkTokenRecoveryPending(account.AccessToken, err.Error())
+			_, _ = s.store.RemoveInvalidToken(account.AccessToken, err.Error())
 		} else if openaiweb.IsNoFreeImageQuotaError(err) {
 			_ = s.store.MarkImageQuotaExhausted(account.AccessToken, err)
 		}
@@ -359,7 +359,10 @@ func (s *Service) generateOne(ctx context.Context, req Request) (openaiweb.Image
 			lastErr = err
 			log.Status = "failed"
 			log.Error = err.Error()
-			log.RecoveryQueued = openaiweb.IsAuthenticationError(err)
+			if openaiweb.IsAuthenticationError(err) {
+				removed, _ := s.store.RemoveInvalidToken(account.AccessToken, err.Error())
+				log.RemovedAccount = removed
+			}
 			if openaiweb.IsNoFreeImageQuotaError(err) {
 				_ = s.store.MarkImageQuotaExhausted(account.AccessToken, err)
 			}
@@ -395,8 +398,8 @@ func (s *Service) generateOne(ctx context.Context, req Request) (openaiweb.Image
 			_ = s.store.MarkFailure(account.AccessToken, err)
 		}
 		if openaiweb.IsAuthenticationError(err) {
-			_, queued, _ := s.store.MarkTokenRecoveryPending(account.AccessToken, err.Error())
-			log.RecoveryQueued = queued
+			removed, _ := s.store.RemoveInvalidToken(account.AccessToken, err.Error())
+			log.RemovedAccount = removed
 		} else if openaiweb.IsNoFreeImageQuotaError(err) {
 			_ = s.store.MarkImageQuotaExhausted(account.AccessToken, err)
 		}
@@ -515,7 +518,7 @@ func (s *Service) handleAccountPrecheckError(account accounts.Account, err error
 	}
 	if !openaiweb.IsInteractiveChallengeError(err) {
 		if openaiweb.IsAuthenticationError(err) {
-			_, _, _ = s.store.MarkTokenRecoveryPending(account.AccessToken, err.Error())
+			_, _ = s.store.RemoveInvalidToken(account.AccessToken, err.Error())
 		} else {
 			_, _, _ = s.store.RecordRefresh(account.AccessToken, accounts.AccountCheckResult{}, err)
 		}

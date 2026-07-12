@@ -23,7 +23,7 @@ func (f *fakeSearchBackend) Search(ctx context.Context, account accounts.Account
 	return openaiweb.SearchResult{Answer: "answer", AccountEmail: account.Email, Model: req.Model}, nil
 }
 
-func TestSearchQueuesInvalidTokenForRecovery(t *testing.T) {
+func TestSearchRemovesInvalidToken(t *testing.T) {
 	store := accounts.NewStore([]accounts.Account{{Email: "old", AccessToken: "old", CreatedAt: 1}, {Email: "new", AccessToken: "new", CreatedAt: 2}}, "")
 	backend := &fakeSearchBackend{errs: []error{errors.New("token_revoked")}}
 	got, err := NewService(config.Default(), store, backend).Search(context.Background(), "query")
@@ -33,8 +33,7 @@ func TestSearchQueuesInvalidTokenForRecovery(t *testing.T) {
 	if backend.calls != 2 || got.Answer != "answer" {
 		t.Fatalf("calls=%d got=%#v", backend.calls, got)
 	}
-	invalid, found := store.Get("new")
-	if !found || invalid.Status != accounts.StatusCredentialInvalid {
-		t.Fatalf("token not queued for recovery: %#v", store.List())
+	if _, found := store.Get("new"); found {
+		t.Fatalf("token was not removed: %#v", store.List())
 	}
 }

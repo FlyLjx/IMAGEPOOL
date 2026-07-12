@@ -243,10 +243,6 @@ export type SettingsConfig = {
   image_check_before_hit_enabled?: boolean;
   image_settle_secs?: number | string;
   image_timeout_retry_secs?: number | string;
-  token_recovery_interval_secs?: number | string;
-  token_recovery_max_attempts?: number | string;
-  token_recovery_concurrency?: number | string;
-  token_recovery_timeout_secs?: number | string;
   auto_remove_invalid_accounts?: boolean;
   auto_remove_rate_limited_accounts?: boolean;
   auto_relogin_after_refresh?: boolean;
@@ -286,6 +282,13 @@ export type SystemLog = {
 export type ImageResponse = {
   created: number;
   data: Array<{ b64_json?: string; url?: string; revised_prompt?: string }>;
+};
+
+export type SystemUpdateStatus = {
+  enabled: boolean;
+  updating: boolean;
+  target_version?: string;
+  last_error?: string;
 };
 
 export type CredentialRecoveryLog = {
@@ -752,6 +755,17 @@ export async function cancelImageTask(taskId: string) {
 
 export async function fetchSettingsConfig() {
   return httpRequest<{ config: SettingsConfig }>("/api/settings");
+}
+
+export async function fetchSystemUpdateStatus() {
+  return httpRequest<SystemUpdateStatus>("/api/system/update");
+}
+
+export async function startSystemUpdate(version: string) {
+  return httpRequest<{ started: boolean; update: SystemUpdateStatus }>("/api/system/update", {
+    method: "POST",
+    body: { version },
+  });
 }
 
 export async function updateSettingsConfig(settings: Partial<SettingsConfig>) {

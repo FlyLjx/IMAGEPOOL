@@ -997,62 +997,6 @@ func (s *Store) MarkFailure(token string, err error) error {
 	})
 }
 
-// MarkTokenRecoveryPending removes an authentication-failed account from the
-// dispatch pool while keeping its OAuth credentials for the background
-// recovery worker. It deliberately does not delete the account.
-func (s *Store) MarkTokenRecoveryPending(token, reason string) (Account, bool, error) {
-	token = strings.TrimSpace(token)
-	if token == "" {
-		return Account{}, false, nil
-	}
-	reason = strings.TrimSpace(reason)
-	if reason == "" {
-		reason = "OAuth credential rejected"
-	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for index := range s.accounts {
-		account := &s.accounts[index]
-		if account.AccessToken != token {
-			continue
-		}
-		if account.Extra == nil {
-			account.Extra = map[string]any{}
-		}
-		now := s.now().In(time.Local).Format(time.RFC3339)
-		state := strings.TrimSpace(fmt.Sprint(account.Extra[tokenRecoveryStateKey]))
-		newlyQueued := state != tokenRecoveryPending && state != tokenRecoveryRunning
-		if newlyQueued {
-			account.Extra[tokenRecoveryAttemptsKey] = 0
-		}
-		account.Status = StatusCredentialInvalid
-		account.LastError = reason
-		account.Extra[tokenRecoveryStateKey] = tokenRecoveryPending
-		account.Extra[tokenRecoveryNextAtKey] = now
-		account.Extra["token_recovery_reason"] = reason
-		account.Extra["token_recovery_marked_at"] = now
-		delete(account.Extra, "token_recovery_last_started_at")
-		if newlyQueued {
-			s.appendCredentialRecoveryLogLocked(
-				*account,
-				"warning",
-				"credential_invalid",
-				"上游认证失败，账号已标记失效并退出调度，等待后台凭证恢复",
-				reason,
-				0,
-			)
-		}
-		delete(s.imageLeases, token)
-		s.signalImageAvailabilityLocked()
-		if err := s.saveLocked(); err != nil {
-			return *account, true, err
-		}
-		return *account, true, nil
-	}
-	return Account{}, false, nil
-}
-
 // PendingTokenRecoveries returns accounts whose failed credentials are ready
 // for an asynchronous OAuth refresh attempt.
 func (s *Store) PendingTokenRecoveries(now time.Time) []Account {

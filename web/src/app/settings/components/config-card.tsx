@@ -103,10 +103,6 @@ export function ConfigCard() {
   const setImageAccountPrecheckIntervalMinutes = useSettingsStore((state) => state.setImageAccountPrecheckIntervalMinutes);
   const setImageAccountPrecheckConcurrency = useSettingsStore((state) => state.setImageAccountPrecheckConcurrency);
   const setImageAccountPrecheckTimeoutSecs = useSettingsStore((state) => state.setImageAccountPrecheckTimeoutSecs);
-  const setTokenRecoveryIntervalSecs = useSettingsStore((state) => state.setTokenRecoveryIntervalSecs);
-  const setTokenRecoveryMaxAttempts = useSettingsStore((state) => state.setTokenRecoveryMaxAttempts);
-  const setTokenRecoveryConcurrency = useSettingsStore((state) => state.setTokenRecoveryConcurrency);
-  const setTokenRecoveryTimeoutSecs = useSettingsStore((state) => state.setTokenRecoveryTimeoutSecs);
   const setLogLevel = useSettingsStore((state) => state.setLogLevel);
   const setProxy = useSettingsStore((state) => state.setProxy);
   const setBaseUrl = useSettingsStore((state) => state.setBaseUrl);
@@ -298,47 +294,6 @@ export function ConfigCard() {
                 placeholder="gpt-5-5"
               />
             </Form.Item>
-          </Col>
-        </Row>
-
-        <Divider />
-        <SectionTitle title="凭证恢复" description="401 账号会先退出调度，由后台刷新 OAuth Token 并验证后再恢复；达到最大恢复次数仍失败则删除。" />
-        <Row gutter={[16, 16]}>
-          <Col xs={24} md={12} xl={6}>
-            <NumberInput
-              label="恢复扫描间隔"
-              value={String(config.token_recovery_interval_secs || "")}
-              onChange={setTokenRecoveryIntervalSecs}
-              placeholder="60"
-              help="单位秒。失效账号不会阻塞当前任务。"
-            />
-          </Col>
-          <Col xs={24} md={12} xl={6}>
-            <NumberInput
-              label="最大自动恢复次数"
-              value={String(config.token_recovery_max_attempts || "")}
-              onChange={setTokenRecoveryMaxAttempts}
-              placeholder="3"
-              help="达到此次数仍无法恢复时自动删除账号。"
-            />
-          </Col>
-          <Col xs={24} md={12} xl={6}>
-            <NumberInput
-              label="恢复并发数"
-              value={String(config.token_recovery_concurrency || "")}
-              onChange={setTokenRecoveryConcurrency}
-              placeholder="2"
-              help="同时刷新 OAuth 凭证的账号数量。"
-            />
-          </Col>
-          <Col xs={24} md={12} xl={6}>
-            <NumberInput
-              label="单次恢复超时"
-              value={String(config.token_recovery_timeout_secs || "")}
-              onChange={setTokenRecoveryTimeoutSecs}
-              placeholder="60"
-              help="单位秒，超时会计入一次恢复失败。"
-            />
           </Col>
         </Row>
 

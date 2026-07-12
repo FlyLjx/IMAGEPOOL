@@ -162,15 +162,15 @@ func (m *RefreshManager) refreshOne(token string) RefreshItem {
 	check, err := m.checker.CheckAccount(context.Background(), token)
 	if err != nil {
 		if isAuthenticationFailureMessage(err.Error()) {
-			_, queued, queueErr := m.store.MarkTokenRecoveryPending(token, err.Error())
-			if queueErr != nil {
-				item.Error = queueErr.Error()
+			removed, removeErr := m.store.RemoveInvalidToken(token, err.Error())
+			if removeErr != nil {
+				item.Error = removeErr.Error()
 				item.Status = "error"
 				return item
 			}
-			if queued {
-				item.Status = "recovery_pending"
-				item.Error = "账号凭证已标记失效，等待后台恢复"
+			if removed {
+				item.Status = "removed"
+				item.Error = compactRefreshError(err)
 				return item
 			}
 		}

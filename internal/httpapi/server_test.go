@@ -24,6 +24,7 @@ import (
 	"imagepool/internal/storage"
 	"imagepool/internal/tasks"
 	"imagepool/internal/texts"
+	"imagepool/internal/updater"
 )
 
 type apiBackend struct{}
@@ -109,6 +110,46 @@ func TestHealthAndAuth(t *testing.T) {
 	resp, err = http.DefaultClient.Do(req)
 	if err != nil || resp.StatusCode != 401 {
 		t.Fatalf("auth status=%v err=%v", resp.StatusCode, err)
+	}
+}
+
+func TestSystemUpdateEndpointTriggersInternalUpdater(t *testing.T) {
+	triggered := make(chan struct{}, 1)
+	updaterServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/update" {
+			t.Fatalf("request=%s %s", r.Method, r.URL.Path)
+		}
+		if r.Header.Get("Authorization") != "Bearer test-token" {
+			t.Fatalf("authorization=%q", r.Header.Get("Authorization"))
+		}
+		triggered <- struct{}{}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer updaterServer.Close()
+
+	handler := testServer(t)
+	server, ok := handler.(*Server)
+	if !ok {
+		t.Fatalf("handler=%T", handler)
+	}
+	server.updater = updater.New(updaterServer.URL+"/v1/update", "test-token")
+	srv := httptest.NewServer(server)
+	defer srv.Close()
+
+	request, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/system/update", strings.NewReader(`{"version":"0.1.3"}`))
+	request.Header.Set("Authorization", "Bearer k")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusAccepted {
+		t.Fatalf("status=%d", response.StatusCode)
+	}
+	select {
+	case <-triggered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("updater was not triggered")
 	}
 }
 
@@ -255,35 +296,6 @@ func TestCallLogsUseLogTypeAndDetailShape(t *testing.T) {
 	}
 }
 
-func TestAccountCredentialRecoveryLogsEndpoint(t *testing.T) {
-	handler := testServer(t)
-	server, ok := handler.(*Server)
-	if !ok {
-		t.Fatalf("handler=%T", handler)
-	}
-	if _, queued, err := server.accounts.MarkTokenRecoveryPending("tok", "upstream status=401 body=unauthorized"); err != nil || !queued {
-		t.Fatalf("queued=%v err=%v", queued, err)
-	}
-	srv := httptest.NewServer(handler)
-	defer srv.Close()
-	request, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/accounts/recovery-logs?email=a&limit=10", nil)
-	request.Header.Set("Authorization", "Bearer k")
-	response, err := http.DefaultClient.Do(request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer response.Body.Close()
-	var payload struct {
-		Items []accounts.CredentialRecoveryLog `json:"items"`
-	}
-	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
-		t.Fatal(err)
-	}
-	if response.StatusCode != http.StatusOK || len(payload.Items) != 1 || payload.Items[0].Event != "credential_invalid" || payload.Items[0].AccountEmail != "a" {
-		t.Fatalf("status=%d payload=%#v", response.StatusCode, payload)
-	}
-}
-
 func TestAccountImageTestCreatesTrackedTask(t *testing.T) {
 	srv := httptest.NewServer(testServer(t))
 	defer srv.Close()
@@ -322,7 +334,7 @@ func TestAccountImageTestCreatesTrackedTask(t *testing.T) {
 	}
 }
 
-func TestAccountImportQueuesInvalidTokensForRecovery(t *testing.T) {
+func TestAccountImportRemovesInvalidTokens(t *testing.T) {
 	cfg := config.Default()
 	cfg.AuthKeyFile = filepath.Join(t.TempDir(), "auth-keys.json")
 	cfg.ImageOutputDir = filepath.Join(t.TempDir(), "images")
@@ -349,24 +361,20 @@ func TestAccountImportQueuesInvalidTokensForRecovery(t *testing.T) {
 	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
 		t.Fatal(err)
 	}
-	if response.StatusCode != http.StatusOK || payload.Added != 2 || payload.Refreshed != 1 || len(payload.Errors) != 1 || len(payload.Items) != 3 {
+	if response.StatusCode != http.StatusOK || payload.Added != 2 || payload.Refreshed != 1 || len(payload.Errors) != 1 || len(payload.Items) != 2 {
 		t.Fatalf("status=%d payload=%#v", response.StatusCode, payload)
 	}
 	valid := 0
-	invalid := 0
 	for _, item := range payload.Items {
 		if item["access_token"] == "good" {
 			valid++
 		}
 		if item["access_token"] == "bad" {
-			if item["status"] != accounts.StatusCredentialInvalid {
-				t.Fatalf("invalid account status=%#v", item)
-			}
-			invalid++
+			t.Fatalf("invalid account remained in pool: %#v", item)
 		}
 	}
-	if valid != 1 || invalid != 1 || backend.readinessCheckCount() != 2 {
-		t.Fatalf("valid=%d invalid=%d readinessChecks=%d payload=%#v", valid, invalid, backend.readinessCheckCount(), payload)
+	if valid != 1 || backend.readinessCheckCount() != 2 {
+		t.Fatalf("valid=%d readinessChecks=%d payload=%#v", valid, backend.readinessCheckCount(), payload)
 	}
 }
 
