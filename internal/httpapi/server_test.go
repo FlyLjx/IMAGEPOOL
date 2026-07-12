@@ -727,22 +727,22 @@ func TestSettingsPersistAndNotify(t *testing.T) {
 	var updated config.Config
 	srv := httptest.NewServer(newTestServer(cfg, func(next config.Config) { updated = next }))
 	defer srv.Close()
-	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/settings", strings.NewReader(`{"image_web_model_slug":"gpt-5-6"}`))
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/settings", strings.NewReader(`{"image_web_model_slug":"gpt-5-6","refresh_account_interval_minute":2,"refresh_account_concurrency":3}`))
 	req.Header.Set("Authorization", "Bearer k")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
-	if resp.StatusCode != http.StatusOK || updated.ImageWebModelSlug != "gpt-5-6" {
+	if resp.StatusCode != http.StatusOK || updated.ImageWebModelSlug != "gpt-5-6" || updated.RefreshAccountIntervalMinutes != 2 || updated.RefreshAccountConcurrency != 3 {
 		t.Fatalf("status=%d updated=%#v", resp.StatusCode, updated)
 	}
 	reloaded, err := config.Load(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reloaded.ImageWebModelSlug != "gpt-5-6" {
-		t.Fatalf("persisted slug=%q", reloaded.ImageWebModelSlug)
+	if reloaded.ImageWebModelSlug != "gpt-5-6" || reloaded.RefreshAccountIntervalMinutes != 2 || reloaded.RefreshAccountConcurrency != 3 {
+		t.Fatalf("persisted config=%#v", reloaded)
 	}
 }
 

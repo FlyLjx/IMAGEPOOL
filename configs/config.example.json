@@ -26,6 +26,7 @@
   "image_settle_enabled": true,
   "max_image_attempts": 3,
   "request_timeout_secs": 120,
+  "refresh_account_interval_minute": 5,
   "refresh_account_concurrency": 8,
   "proxy_runtime": {
     "enabled": true,

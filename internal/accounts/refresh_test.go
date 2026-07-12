@@ -17,6 +17,38 @@ func (c refreshChecker) CheckAccount(ctx context.Context, token string) (Account
 	return AccountCheckResult{Models: []string{"gpt-5-5"}, ImageQuotaUnknown: true}, nil
 }
 
+type notifyingRefreshChecker struct{ called chan<- struct{} }
+
+func (c notifyingRefreshChecker) CheckAccount(ctx context.Context, token string) (AccountCheckResult, error) {
+	select {
+	case c.called <- struct{}{}:
+	default:
+	}
+	return AccountCheckResult{Models: []string{"gpt-5-5"}}, nil
+}
+
+func TestAutoRefreshSchedulerResetsAfterIntervalUpdate(t *testing.T) {
+	called := make(chan struct{}, 1)
+	store := NewStore([]Account{{Email: "ok@example", AccessToken: "ok"}}, "")
+	manager := NewRefreshManager(store, notifyingRefreshChecker{called: called}, 1)
+	scheduler := NewAutoRefreshScheduler(store, manager, 1)
+	scheduler.duration = func(minutes int) time.Duration {
+		if minutes == 1 {
+			return time.Hour
+		}
+		return time.Millisecond
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	scheduler.Start(ctx)
+	scheduler.UpdateInterval(2)
+	select {
+	case <-called:
+	case <-time.After(time.Second):
+		t.Fatal("automatic refresh did not run after interval update")
+	}
+}
+
 func TestRefreshManagerRemovesAuthenticationFailures(t *testing.T) {
 	store := NewStore([]Account{{Email: "ok@example", AccessToken: "ok"}, {Email: "bad@example", AccessToken: "bad"}}, "")
 	manager := NewRefreshManager(store, refreshChecker{errors: map[string]error{"bad": errors.New("token_revoked")}}, 2)

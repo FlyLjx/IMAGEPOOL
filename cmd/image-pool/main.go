@@ -82,6 +82,9 @@ func main() {
 		Handler:           handler,
 		ReadHeaderTimeout: 15 * time.Second,
 	}
+	backgroundCtx, stopBackground := context.WithCancel(context.Background())
+	defer stopBackground()
+	handler.StartBackground(backgroundCtx)
 
 	go func() {
 		log.Printf("IMAGE POOL listening on %s", cfg.ListenAddr)
@@ -93,6 +96,7 @@ func main() {
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 	<-stop
+	stopBackground()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	_ = srv.Shutdown(ctx)

@@ -52,10 +52,16 @@ type RefreshManager struct {
 }
 
 func NewRefreshManager(store *Store, checker AccountChecker, concurrency int) *RefreshManager {
-	if concurrency <= 0 {
-		concurrency = 8
+	return &RefreshManager{store: store, checker: checker, concurrency: normalizeRefreshConcurrency(concurrency), progress: map[string]*RefreshProgress{}}
+}
+
+func (m *RefreshManager) SetConcurrency(concurrency int) {
+	if m == nil {
+		return
 	}
-	return &RefreshManager{store: store, checker: checker, concurrency: concurrency, progress: map[string]*RefreshProgress{}}
+	m.mu.Lock()
+	m.concurrency = normalizeRefreshConcurrency(concurrency)
+	m.mu.Unlock()
 }
 
 func (m *RefreshManager) Start(tokens []string) (string, error) {
@@ -131,7 +137,9 @@ func (m *RefreshManager) run(id string, tokens []string) {
 func (m *RefreshManager) refreshResults(tokens []string) <-chan RefreshItem {
 	jobs := make(chan string)
 	results := make(chan RefreshItem, len(tokens))
+	m.mu.RLock()
 	workers := m.concurrency
+	m.mu.RUnlock()
 	if workers > len(tokens) {
 		workers = len(tokens)
 	}
@@ -154,6 +162,16 @@ func (m *RefreshManager) refreshResults(tokens []string) <-chan RefreshItem {
 		close(results)
 	}()
 	return results
+}
+
+func normalizeRefreshConcurrency(concurrency int) int {
+	if concurrency <= 0 {
+		return 8
+	}
+	if concurrency > 100 {
+		return 100
+	}
+	return concurrency
 }
 
 func (m *RefreshManager) refreshOne(token string) RefreshItem {

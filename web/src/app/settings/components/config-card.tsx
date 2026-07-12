@@ -186,7 +186,7 @@ export function ConfigCard() {
               value={String(config.refresh_account_interval_minute || "")}
               onChange={setRefreshAccountIntervalMinute}
               placeholder="60"
-              help="单位分钟，控制账号自动刷新的频率。"
+              help="单位分钟；保存后会重置下一轮自动刷新倒计时。"
             />
           </Col>
           <Col xs={24} md={12} xl={6}>

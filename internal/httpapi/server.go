@@ -51,6 +51,7 @@ type Server struct {
 	tasks           *tasks.Manager
 	metrics         *metrics.Service
 	refresh         *accounts.RefreshManager
+	autoRefresh     *accounts.AutoRefreshScheduler
 	oauth           *oauthlogin.Service
 	debugClient     *openaiweb.ReloadableClient
 	register        *registration.Manager
@@ -59,15 +60,15 @@ type Server struct {
 	onConfigUpdated func(config.Config)
 }
 
-func NewServer(cfg config.Config, accountStore *accounts.Store, imageService *images.Service, textService *texts.Service, searchService *searches.Service, storageService *storage.Service, taskManager *tasks.Manager, configUpdated ...func(config.Config)) http.Handler {
+func NewServer(cfg config.Config, accountStore *accounts.Store, imageService *images.Service, textService *texts.Service, searchService *searches.Service, storageService *storage.Service, taskManager *tasks.Manager, configUpdated ...func(config.Config)) *Server {
 	return newServer(cfg, accountStore, imageService, textService, searchService, storageService, taskManager, nil, registration.NewWorker(registration.WorkerOptions{}), configUpdated...)
 }
 
-func NewServerWithPersistence(cfg config.Config, accountStore *accounts.Store, imageService *images.Service, textService *texts.Service, searchService *searches.Service, storageService *storage.Service, taskManager *tasks.Manager, state persistence.Store, configUpdated ...func(config.Config)) http.Handler {
+func NewServerWithPersistence(cfg config.Config, accountStore *accounts.Store, imageService *images.Service, textService *texts.Service, searchService *searches.Service, storageService *storage.Service, taskManager *tasks.Manager, state persistence.Store, configUpdated ...func(config.Config)) *Server {
 	return newServer(cfg, accountStore, imageService, textService, searchService, storageService, taskManager, state, registration.NewWorker(registration.WorkerOptions{}), configUpdated...)
 }
 
-func newServer(cfg config.Config, accountStore *accounts.Store, imageService *images.Service, textService *texts.Service, searchService *searches.Service, storageService *storage.Service, taskManager *tasks.Manager, state persistence.Store, registerWorker registration.Worker, configUpdated ...func(config.Config)) http.Handler {
+func newServer(cfg config.Config, accountStore *accounts.Store, imageService *images.Service, textService *texts.Service, searchService *searches.Service, storageService *storage.Service, taskManager *tasks.Manager, state persistence.Store, registerWorker registration.Worker, configUpdated ...func(config.Config)) *Server {
 	cfg = cfg.Normalize()
 	var onConfigUpdated func(config.Config)
 	if len(configUpdated) > 0 {
@@ -83,7 +84,15 @@ func newServer(cfg config.Config, accountStore *accounts.Store, imageService *im
 		metricService = metrics.NewServiceWithPersistence(state)
 		registerManager = registration.NewManagerWithPersistence(state, accountStore, registerWorker)
 	}
-	return &Server{cfg: cfg, auth: authService, accounts: accountStore, images: imageService, texts: textService, searches: searchService, storage: storageService, tags: tagStore, static: newStaticFiles(cfg.WebDistDir), tasks: taskManager, metrics: metricService, refresh: accounts.NewRefreshManager(accountStore, imageService, cfg.RefreshAccountConcurrency), oauth: oauthlogin.New(), debugClient: openaiweb.NewReloadableClient(cfg), register: registerManager, updater: updater.NewFromEnvironment(), state: state, onConfigUpdated: onConfigUpdated}
+	refreshManager := accounts.NewRefreshManager(accountStore, imageService, cfg.RefreshAccountConcurrency)
+	return &Server{cfg: cfg, auth: authService, accounts: accountStore, images: imageService, texts: textService, searches: searchService, storage: storageService, tags: tagStore, static: newStaticFiles(cfg.WebDistDir), tasks: taskManager, metrics: metricService, refresh: refreshManager, autoRefresh: accounts.NewAutoRefreshScheduler(accountStore, refreshManager, cfg.RefreshAccountIntervalMinutes), oauth: oauthlogin.New(), debugClient: openaiweb.NewReloadableClient(cfg), register: registerManager, updater: updater.NewFromEnvironment(), state: state, onConfigUpdated: onConfigUpdated}
+}
+
+func (s *Server) StartBackground(ctx context.Context) {
+	if s == nil {
+		return
+	}
+	s.autoRefresh.Start(ctx)
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -1679,6 +1688,8 @@ func (s *Server) applyConfigPatch(patch map[string]any) (config.Config, error) {
 	}
 	s.auth.UpdateAdminKeys(next.APIKeys)
 	s.setConfig(next)
+	s.refresh.SetConcurrency(next.RefreshAccountConcurrency)
+	s.autoRefresh.UpdateInterval(next.RefreshAccountIntervalMinutes)
 	s.debugClient.UpdateConfig(next)
 	if s.onConfigUpdated != nil {
 		s.onConfigUpdated(next)

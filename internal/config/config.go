@@ -40,6 +40,7 @@ type Config struct {
 	SearchModel                         string        `json:"search_model"`
 	SearchTimeoutSecs                   float64       `json:"search_timeout_secs"`
 	SearchPollIntervalSecs              float64       `json:"search_poll_interval_secs"`
+	RefreshAccountIntervalMinutes       int           `json:"refresh_account_interval_minute"`
 	RefreshAccountConcurrency           int           `json:"refresh_account_concurrency"`
 	Proxy                               string        `json:"proxy"`
 	ProxyRuntime                        ProxyRuntime  `json:"proxy_runtime"`
@@ -122,6 +123,7 @@ func Default() Config {
 		SearchModel:                         "gpt-5-5",
 		SearchTimeoutSecs:                   300,
 		SearchPollIntervalSecs:              3,
+		RefreshAccountIntervalMinutes:       5,
 		RefreshAccountConcurrency:           8,
 		Notifications:                       Notifications{Bark: BarkNotification{ServerURL: "https://api.day.app", TitlePrefix: "IMAGE POOL", Group: "image-pool", Level: "active", TimeoutSecs: 10, MinIntervalSeconds: 60, NotifyFailedCalls: true, NotifyRegister: true, NotifyAutoRefill: true}},
 		ProxyRuntime:                        ProxyRuntime{Enabled: true, EgressMode: "direct", ResetSessionStatusCodes: []int{403}, Clearance: ClearanceRuntime{Enabled: false, Mode: "none", Browser: "chrome", TimeoutSec: 60, RefreshInterval: 3600}},
@@ -311,6 +313,12 @@ func (c Config) Normalize() Config {
 	}
 	if c.SearchPollIntervalSecs <= 0 {
 		c.SearchPollIntervalSecs = d.SearchPollIntervalSecs
+	}
+	if c.RefreshAccountIntervalMinutes <= 0 {
+		c.RefreshAccountIntervalMinutes = d.RefreshAccountIntervalMinutes
+	}
+	if c.RefreshAccountIntervalMinutes > 525600 {
+		c.RefreshAccountIntervalMinutes = 525600
 	}
 	if c.RefreshAccountConcurrency <= 0 {
 		c.RefreshAccountConcurrency = d.RefreshAccountConcurrency
