@@ -5,8 +5,12 @@ export type ReleaseInfo = {
 };
 
 export const githubRepositoryURL = "https://github.com/FlyLjx/IMAGEPOOL";
+export const releaseVersionResolverURL = "https://data.jsdelivr.com/v1/packages/gh/FlyLjx/IMAGEPOOL/resolved?specifier=latest";
 export const githubLatestReleaseURL = "https://api.github.com/repos/FlyLjx/IMAGEPOOL/releases/latest";
-export const githubChangelogURL = "https://raw.githubusercontent.com/FlyLjx/IMAGEPOOL/main/CHANGELOG.md";
+
+export function releaseChangelogURL(version: string) {
+  return `https://cdn.jsdelivr.net/gh/FlyLjx/IMAGEPOOL@v${encodeURIComponent(version)}/CHANGELOG.md`;
+}
 
 export function parseChangelog(content: string): ReleaseInfo[] {
   return content

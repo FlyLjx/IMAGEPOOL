@@ -5,7 +5,13 @@ import { toast } from "sonner";
 
 import webConfig from "@/constants/common-env";
 import { fetchSystemUpdateStatus, startSystemUpdate, type SystemUpdateStatus } from "@/lib/api";
-import { githubChangelogURL, githubLatestReleaseURL, parseChangelog, type ReleaseInfo } from "@/lib/release";
+import {
+  githubLatestReleaseURL,
+  parseChangelog,
+  releaseChangelogURL,
+  releaseVersionResolverURL,
+  type ReleaseInfo,
+} from "@/lib/release";
 
 function readLocalReleases(): ReleaseInfo[] {
   return JSON.parse(process.env.NEXT_PUBLIC_APP_RELEASES || "[]");
@@ -42,19 +48,16 @@ export function useVersionCheck(canUpdate = false) {
     async (showMessage = false) => {
       setChecking(true);
       try {
-        const releaseResponse = await fetch(githubLatestReleaseURL);
-        if (releaseResponse.status === 404) {
+        const version = await fetchLatestPublishedVersion();
+        if (!version) {
           setLatestVersion(currentVersion);
           setReleases(localReleases);
           if (showMessage) toast.info("暂无已完成发布的版本");
           return;
         }
-        if (!releaseResponse.ok) throw new Error();
-        const release = await (releaseResponse.json() as Promise<{ tag_name?: string }>);
-        const version = String(release.tag_name || "").trim().replace(/^v/, "");
-        setLatestVersion(version || currentVersion);
+        setLatestVersion(version);
         try {
-          const changelogResponse = await fetch(githubChangelogURL);
+          const changelogResponse = await fetch(releaseChangelogURL(version), { cache: "no-store" });
           if (changelogResponse.ok) {
             const changelog = await changelogResponse.text();
             if (changelog.trim()) setReleases(parseChangelog(changelog));
@@ -127,4 +130,24 @@ export function useVersionCheck(canUpdate = false) {
     startUpdate,
     refreshUpdateStatus,
   };
+}
+
+async function fetchLatestPublishedVersion() {
+  try {
+    const resolverURL = `${releaseVersionResolverURL}&_t=${Date.now()}`;
+    const response = await fetch(resolverURL, { cache: "no-store" });
+    if (response.ok) {
+      const payload = await (response.json() as Promise<{ version?: string }>);
+      const version = String(payload.version || "").trim().replace(/^v/, "");
+      if (toVersionParts(version)) return version;
+    }
+  } catch {
+    // Fall through to GitHub when jsDelivr is unavailable.
+  }
+
+  const response = await fetch(githubLatestReleaseURL, { cache: "no-store" });
+  if (response.status === 404) return "";
+  if (!response.ok) throw new Error(`release lookup failed: HTTP ${response.status}`);
+  const release = await (response.json() as Promise<{ tag_name?: string }>);
+  return String(release.tag_name || "").trim().replace(/^v/, "");
 }
