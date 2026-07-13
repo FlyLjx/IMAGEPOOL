@@ -110,7 +110,7 @@ func Default() Config {
 		ChatGPTBaseURL:                      "https://chatgpt.com",
 		UpstreamTransport:                   "standard",
 		ImageWebModelSlug:                   "gpt-5-5",
-		ImagePollTimeoutSecs:                60,
+		ImagePollTimeoutSecs:                180,
 		ImagePollIntervalSecs:               3,
 		ImagePollInitialWaitSecs:            0,
 		ImageTaskTimeoutSecs:                0,
@@ -274,11 +274,11 @@ func (c Config) Normalize() Config {
 	if strings.TrimSpace(c.ImageWebModelSlug) == "" {
 		c.ImageWebModelSlug = d.ImageWebModelSlug
 	}
-	if c.ImagePollTimeoutSecs <= 0 {
+	if c.ImagePollTimeoutSecs <= 0 || c.ImagePollTimeoutSecs == 60 {
 		c.ImagePollTimeoutSecs = d.ImagePollTimeoutSecs
 	}
-	if c.ImagePollTimeoutSecs > 60 {
-		c.ImagePollTimeoutSecs = 60
+	if c.ImagePollTimeoutSecs > 180 {
+		c.ImagePollTimeoutSecs = 180
 	}
 	if c.ImagePollIntervalSecs <= 0 {
 		c.ImagePollIntervalSecs = d.ImagePollIntervalSecs

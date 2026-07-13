@@ -20,7 +20,7 @@ func TestDefaultNormalize(t *testing.T) {
 	if cfg.ImageAccountPrecheckConcurrency != 6 || cfg.ImageAccountPrecheckTimeoutSecs != 75 {
 		t.Fatalf("precheck limits=%d/%.0f", cfg.ImageAccountPrecheckConcurrency, cfg.ImageAccountPrecheckTimeoutSecs)
 	}
-	if cfg.ImagePollTimeoutSecs != 60 {
+	if cfg.ImagePollTimeoutSecs != 180 {
 		t.Fatalf("image poll timeout=%.0f", cfg.ImagePollTimeoutSecs)
 	}
 	if cfg.ImageTaskTimeoutSecs != 0 {
@@ -36,8 +36,14 @@ func TestDefaultNormalize(t *testing.T) {
 
 func TestNormalizeCapsImageWaits(t *testing.T) {
 	cfg := Config{ImagePollTimeoutSecs: 300, ImageTaskTimeoutSecs: 600}.Normalize()
-	if cfg.ImagePollTimeoutSecs != 60 || cfg.ImageTaskTimeoutSecs != 300 {
+	if cfg.ImagePollTimeoutSecs != 180 || cfg.ImageTaskTimeoutSecs != 300 {
 		t.Fatalf("image timeouts=%.0f/%.0f", cfg.ImagePollTimeoutSecs, cfg.ImageTaskTimeoutSecs)
+	}
+}
+
+func TestNormalizeMigratesLegacyImagePollTimeout(t *testing.T) {
+	if timeout := (Config{ImagePollTimeoutSecs: 60}).Normalize().ImagePollTimeoutSecs; timeout != 180 {
+		t.Fatalf("image poll timeout=%.0f", timeout)
 	}
 }
 

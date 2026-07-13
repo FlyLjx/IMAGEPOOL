@@ -210,8 +210,8 @@ export function ConfigCard() {
               label="图片轮询上限"
               value={String(config.image_poll_timeout_secs || "")}
               onChange={setImagePollTimeoutSecs}
-              placeholder="60"
-			  help="单位秒，最高 60 秒。图片已提交后超过该时间才会切换账号。"
+              placeholder="180"
+			  help="单位秒，最高 180 秒。图片已提交后超过该时间才会切换账号。"
             />
           </Col>
           <Col xs={24} md={12} xl={6}>
