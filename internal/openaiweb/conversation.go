@@ -19,7 +19,7 @@ import (
 const (
 	maxSSEDataLineSize     = 16 * 1024 * 1024
 	maxImageStartAttempts  = 3
-	maxImageResumeAttempts = 2
+	maxImageResumeAttempts = 1
 )
 
 type imageStreamState struct {

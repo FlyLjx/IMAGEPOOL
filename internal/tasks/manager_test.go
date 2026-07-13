@@ -2,6 +2,7 @@ package tasks
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -11,6 +12,19 @@ import (
 )
 
 type taskSvc struct{ ch chan struct{} }
+
+type failedAttemptTaskSvc struct{}
+
+func (failedAttemptTaskSvc) Generate(context.Context, images.Request) (images.Response, error) {
+	return images.Response{Attempts: []openaiweb.AttemptLog{
+		{Attempt: 1, AccountEmail: "first@example.test", Status: "failed"},
+		{Attempt: 2, AccountEmail: "second@example.test", Status: "failed"},
+	}}, errors.New("generation failed")
+}
+
+func (s failedAttemptTaskSvc) GenerateWithAccount(ctx context.Context, _ string, req images.Request) (images.Response, error) {
+	return s.Generate(ctx, req)
+}
 
 type queuedTaskSvc struct {
 	waiting chan struct{}
@@ -155,6 +169,17 @@ func TestRunGenerationCreatesTrackedTask(t *testing.T) {
 	stored, ok := m.StatusForOwner(task.ID, "user-a", false)
 	if !ok || stored.Status != StatusSucceeded || stored.StatusLogCount == 0 {
 		t.Fatalf("stored=%#v ok=%v", stored, ok)
+	}
+}
+
+func TestFailedTaskKeepsAttemptStatistics(t *testing.T) {
+	m := NewManager(failedAttemptTaskSvc{})
+	task, _, err := m.RunGenerationForOwner(context.Background(), "user-a", images.Request{Prompt: "draw"})
+	if err == nil || task.Status != StatusFailed {
+		t.Fatalf("task=%#v err=%v", task, err)
+	}
+	if task.ImageRouteAttemptCount != 2 || task.UsedAccountCount != 2 || task.FailedAccountCount != 2 {
+		t.Fatalf("attempt statistics missing: %#v", task)
 	}
 }
 

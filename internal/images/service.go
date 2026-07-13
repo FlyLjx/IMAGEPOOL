@@ -107,7 +107,7 @@ func (s *Service) Generate(ctx context.Context, req Request) (Response, error) {
 	if req.N == 1 {
 		result, err := s.generateOne(ctx, req)
 		if err != nil {
-			return Response{}, err
+			return responseFromResult(result), err
 		}
 		return responseFromResult(result), nil
 	}
@@ -126,12 +126,12 @@ func (s *Service) Generate(ctx context.Context, req Request) (Response, error) {
 	wg.Wait()
 	combined := Response{Created: time.Now().Unix()}
 	for i, err := range errs {
-		if err != nil {
-			return Response{}, err
-		}
 		part := responseFromResult(results[i])
-		combined.Data = append(combined.Data, part.Data...)
 		combined.Attempts = append(combined.Attempts, part.Attempts...)
+		if err != nil {
+			return combined, err
+		}
+		combined.Data = append(combined.Data, part.Data...)
 		if combined.AccountEmail == "" {
 			combined.AccountEmail = part.AccountEmail
 		}
@@ -300,6 +300,7 @@ func (s *Service) generateOne(ctx context.Context, req Request) (openaiweb.Image
 	}
 	var lastErr error
 	imageAttempts := 0
+	authenticationRetries := 0
 	for imageAttempts < maxAttempts {
 		account, err := s.store.AcquireForImage(ctx, exclude, func() {
 			reportAccountWait(req, accounts.Account{})
@@ -348,7 +349,8 @@ func (s *Service) generateOne(ctx context.Context, req Request) (openaiweb.Image
 		if !openaiweb.IsInteractiveChallengeError(err) {
 			_ = s.store.MarkFailure(account.AccessToken, err)
 		}
-		if openaiweb.IsAuthenticationError(err) {
+		authenticationError := openaiweb.IsAuthenticationError(err)
+		if authenticationError {
 			removed, _ := s.store.RemoveInvalidToken(account.AccessToken, err.Error())
 			log.RemovedAccount = removed
 		} else if openaiweb.IsNoFreeImageQuotaError(err) {
@@ -358,6 +360,17 @@ func (s *Service) generateOne(ctx context.Context, req Request) (openaiweb.Image
 		attempts = append(attempts, log)
 		if openaiweb.IsInteractiveChallengeError(err) {
 			return openaiweb.ImageResult{Attempts: attempts}, err
+		}
+		if authenticationError {
+			if authenticationRetries >= 1 {
+				return openaiweb.ImageResult{Attempts: attempts}, err
+			}
+			authenticationRetries++
+			if imageAttempts >= maxAttempts {
+				maxAttempts++
+			}
+			reportAuthenticationRetry(req, account, err)
+			continue
 		}
 		if !openaiweb.IsRetryableImageError(err) {
 			return openaiweb.ImageResult{Attempts: attempts}, err
@@ -398,6 +411,21 @@ func reportAccountProgress(req Request, progress, message string, account accoun
 
 func reportAccountWait(req Request, account accounts.Account) {
 	reportAccountProgress(req, "waiting_account", "暂无空闲账号，任务排队等待", account)
+}
+
+func reportAuthenticationRetry(req Request, account accounts.Account, err error) {
+	if req.Progress == nil {
+		return
+	}
+	details := map[string]any{"retry": 1, "max_retries": 1, "error": err.Error()}
+	if account.Email != "" {
+		details["account_email"] = account.Email
+	}
+	req.Progress(openaiweb.ProgressEvent{
+		Progress: "retrying_account",
+		Message:  "账号凭证失效，已删除账号并切换账号重试（1/1）",
+		Details:  details,
+	})
 }
 
 type imageDownloader interface {

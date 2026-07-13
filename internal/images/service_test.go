@@ -169,6 +169,62 @@ func TestGenerateRemovesGeneric401Account(t *testing.T) {
 	}
 }
 
+func TestGenerateAuthenticationFailureRetriesAtMostOnce(t *testing.T) {
+	store := accounts.NewStore([]accounts.Account{
+		{Email: "old", AccessToken: "old", CreatedAt: 1},
+		{Email: "middle", AccessToken: "middle", CreatedAt: 2},
+		{Email: "new", AccessToken: "new", CreatedAt: 3},
+	}, "")
+	revoked := &openaiweb.UpstreamError{Path: "/backend-api/conversation/test", StatusCode: 401, Body: `{"error":{"code":"token_revoked"}}`}
+	backend := &fakeBackend{errs: []error{revoked, revoked}}
+	_, err := NewService(config.Default(), store, backend).Generate(context.Background(), Request{Prompt: "draw"})
+	if err == nil || backend.calls != 2 {
+		t.Fatalf("err=%v calls=%d", err, backend.calls)
+	}
+	if _, found := store.Get("new"); found {
+		t.Fatal("first revoked account was not removed")
+	}
+	if _, found := store.Get("middle"); found {
+		t.Fatal("second revoked account was not removed")
+	}
+	if _, found := store.Get("old"); !found {
+		t.Fatal("authentication failure retried more than once")
+	}
+}
+
+func TestGenerateAllowsAuthenticationRetryAfterOrdinaryAttemptLimit(t *testing.T) {
+	cfg := config.Default()
+	cfg.MaxImageAttempts = 2
+	store := accounts.NewStore([]accounts.Account{
+		{Email: "success", AccessToken: "success", CreatedAt: 1},
+		{Email: "revoked", AccessToken: "revoked", CreatedAt: 2},
+		{Email: "gateway", AccessToken: "gateway", CreatedAt: 3},
+	}, "")
+	revoked := &openaiweb.UpstreamError{Path: "/backend-api/conversation/test", StatusCode: 401, Body: `{"error":{"code":"token_revoked"}}`}
+	backend := &fakeBackend{errs: []error{&openaiweb.UpstreamError{Path: "/backend-api/f/conversation", StatusCode: 502}, revoked}}
+	retryEvents := 0
+	response, err := NewService(cfg, store, backend).Generate(context.Background(), Request{Prompt: "draw", Progress: func(event openaiweb.ProgressEvent) {
+		if event.Progress == "retrying_account" {
+			retryEvents++
+		}
+	}})
+	if err != nil || backend.calls != 3 || response.AccountEmail != "success" {
+		t.Fatalf("response=%#v err=%v calls=%d", response, err, backend.calls)
+	}
+	if retryEvents != 1 {
+		t.Fatalf("authentication retry events=%d", retryEvents)
+	}
+}
+
+func TestGenerateSwitchesAccountsAfterConversationPollTimeout(t *testing.T) {
+	store := accounts.NewStore([]accounts.Account{{Email: "old", AccessToken: "old", CreatedAt: 1}, {Email: "new", AccessToken: "new", CreatedAt: 2}}, "")
+	backend := &fakeBackend{errs: []error{fmt.Errorf("wait failed: %w", openaiweb.ErrPollTimeout)}}
+	response, err := NewService(config.Default(), store, backend).Generate(context.Background(), Request{Prompt: "draw"})
+	if err != nil || backend.calls != 2 || response.AccountEmail != "old" {
+		t.Fatalf("response=%#v err=%v calls=%d", response, err, backend.calls)
+	}
+}
+
 func TestGenerateAppliesSingleTaskDeadlineAcrossRetries(t *testing.T) {
 	cfg := config.Default()
 	cfg.ImageTaskTimeoutSecs = 0.02

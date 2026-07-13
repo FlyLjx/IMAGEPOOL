@@ -113,7 +113,7 @@ func Default() Config {
 		ImagePollTimeoutSecs:                60,
 		ImagePollIntervalSecs:               3,
 		ImagePollInitialWaitSecs:            0,
-		ImageTaskTimeoutSecs:                120,
+		ImageTaskTimeoutSecs:                0,
 		ImageSettleSecs:                     2,
 		ImageAccountPrecheckIntervalMinutes: 10,
 		ImageAccountPrecheckConcurrency:     6,
@@ -286,8 +286,8 @@ func (c Config) Normalize() Config {
 	if c.ImagePollInitialWaitSecs < 0 {
 		c.ImagePollInitialWaitSecs = 0
 	}
-	if c.ImageTaskTimeoutSecs <= 0 {
-		c.ImageTaskTimeoutSecs = d.ImageTaskTimeoutSecs
+	if c.ImageTaskTimeoutSecs < 0 {
+		c.ImageTaskTimeoutSecs = 0
 	}
 	if c.ImageTaskTimeoutSecs > 300 {
 		c.ImageTaskTimeoutSecs = 300

@@ -240,6 +240,7 @@ func (m *Manager) runWith(ctx context.Context, id string, req images.Request, ge
 		return result, ctx.Err()
 	}
 	if err != nil {
+		applyAttemptStats(task, result)
 		task.Status = StatusFailed
 		task.Progress = "failed"
 		task.ProgressPercent = 100
@@ -254,8 +255,19 @@ func (m *Manager) runWith(ctx context.Context, id string, req images.Request, ge
 	task.RealtimeStatus = "任务处理完成"
 	task.Result = &result
 	task.Data = append([]images.Data(nil), result.Data...)
+	applyAttemptStats(task, result)
+	appendLog(task, LogEntry{Time: now, Level: "success", Event: "completed", Progress: "succeeded", Message: "任务处理完成"})
+	return result, nil
+}
+
+func applyAttemptStats(task *Task, result images.Response) {
+	if task == nil {
+		return
+	}
 	task.ConversationID = result.ConversationID
 	task.ImageRouteAttemptCount = len(result.Attempts)
+	task.UsedAccountCount = 0
+	task.FailedAccountCount = 0
 	used := map[string]bool{}
 	for _, attempt := range result.Attempts {
 		if attempt.AccountEmail != "" {
@@ -266,8 +278,6 @@ func (m *Manager) runWith(ctx context.Context, id string, req images.Request, ge
 		}
 	}
 	task.UsedAccountCount = len(used)
-	appendLog(task, LogEntry{Time: now, Level: "success", Event: "completed", Progress: "succeeded", Message: "任务处理完成"})
-	return result, nil
 }
 
 func (m *Manager) List(ids []string) []Task {
@@ -547,6 +557,8 @@ func progressPercent(progress string) int {
 		return 22
 	case "account_precheck_failed":
 		return 18
+	case "retrying_account":
+		return 20
 	case "uploading":
 		return 15
 	case "bootstrapping":

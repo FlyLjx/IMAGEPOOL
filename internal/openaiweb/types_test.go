@@ -36,3 +36,9 @@ func TestAuthenticationErrorIncludesGenericUpstream401(t *testing.T) {
 		t.Fatal("non-401 upstream error must not be treated as credential failure")
 	}
 }
+
+func TestImagePollTimeoutSwitchesAccounts(t *testing.T) {
+	if !IsRetryableImageError(fmt.Errorf("poll failed: %w", ErrPollTimeout)) {
+		t.Fatal("poll timeout must switch to another account")
+	}
+}

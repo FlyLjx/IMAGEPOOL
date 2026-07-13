@@ -18,7 +18,7 @@
   "image_poll_timeout_secs": 60,
   "image_poll_interval_secs": 3,
   "image_poll_initial_wait_secs": 0,
-  "image_task_timeout_secs": 120,
+  "image_task_timeout_secs": 0,
   "image_settle_secs": 2,
   "image_account_precheck_interval_minutes": 10,
   "image_account_precheck_concurrency": 6,

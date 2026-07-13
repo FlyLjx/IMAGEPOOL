@@ -188,7 +188,7 @@ func TestStartImageGenerationResumesIdleToolStream(t *testing.T) {
 	cfg := config.Default()
 	cfg.ChatGPTBaseURL = srv.URL
 	client := NewClient(cfg, WithHTTPClient(srv.Client()))
-	client.imageStreamIdleTimeout = 10 * time.Millisecond
+	client.imageStreamIdleTimeout = 100 * time.Millisecond
 	conversationID, fileIDs, sedimentIDs, err := client.startImageGeneration(context.Background(), accounts.Account{AccessToken: "token"}, "draw", "auto", chatRequirements{}, "conduit", "trace", "parent-stable", nil)
 	if err != nil {
 		t.Fatal(err)

@@ -217,10 +217,10 @@ export function ConfigCard() {
           <Col xs={24} md={12} xl={6}>
             <NumberInput
               label="生图总超时"
-              value={String(config.image_task_timeout_secs || "")}
+              value={String(config.image_task_timeout_secs ?? "")}
               onChange={setImageTaskTimeoutSecs}
-              placeholder="120"
-			  help="单位秒，默认 120 秒、最高 300 秒。达到总上限后立即终止所有重试。"
+              placeholder="0"
+              help="单位秒；0 表示不设置任务总时限，单个账号超时后立即切换账号。"
             />
           </Col>
           <Col xs={24} lg={12}>
