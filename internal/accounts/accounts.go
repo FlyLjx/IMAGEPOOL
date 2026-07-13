@@ -1284,6 +1284,7 @@ func (s *Store) RemoveInvalidToken(token, reason string) (bool, error) {
 	for _, a := range s.accounts {
 		if a.AccessToken == token {
 			removed = true
+			s.appendCredentialRecoveryLogLocked(a, "warning", "account_deleted", "账号因凭证验证失败被自动移除", reason, 0)
 			continue
 		}
 		next = append(next, a)

@@ -13,6 +13,12 @@ type AccountChecker interface {
 	CheckAccount(ctx context.Context, token string) (AccountCheckResult, error)
 }
 
+// LightweightAccountChecker is used by the periodic scheduler. It confirms
+// account metadata and quota without exercising image-generation-only flows.
+type LightweightAccountChecker interface {
+	CheckAccountLight(ctx context.Context, token string) (AccountCheckResult, error)
+}
+
 type AccountCheckResult struct {
 	Models            []string         `json:"models"`
 	Email             string           `json:"email,omitempty"`
@@ -105,7 +111,29 @@ func (m *RefreshManager) RefreshNow(tokens []string) (RefreshProgress, error) {
 		return RefreshProgress{}, fmt.Errorf("access_tokens is required")
 	}
 	progress := RefreshProgress{Total: len(tokens), StatusCounts: map[string]int{}, Results: []RefreshItem{}}
-	for result := range m.refreshResults(tokens) {
+	for result := range m.refreshResults(tokens, false) {
+		progress.Processed++
+		progress.Results = append(progress.Results, result)
+		progress.StatusCounts[result.Status]++
+		progress.TotalQuota += result.Quota
+	}
+	progress.Done = true
+	return progress, nil
+}
+
+// RefreshScheduled performs a lower-impact refresh suitable for the periodic
+// background job. Checkers without a lightweight implementation retain the
+// full validation behavior.
+func (m *RefreshManager) RefreshScheduled(tokens []string) (RefreshProgress, error) {
+	if m == nil || m.store == nil || m.checker == nil {
+		return RefreshProgress{}, fmt.Errorf("account refresh is not configured")
+	}
+	tokens = uniqueTokens(tokens)
+	if len(tokens) == 0 {
+		return RefreshProgress{}, fmt.Errorf("access_tokens is required")
+	}
+	progress := RefreshProgress{Total: len(tokens), StatusCounts: map[string]int{}, Results: []RefreshItem{}}
+	for result := range m.refreshResults(tokens, true) {
 		progress.Processed++
 		progress.Results = append(progress.Results, result)
 		progress.StatusCounts[result.Status]++
@@ -116,7 +144,7 @@ func (m *RefreshManager) RefreshNow(tokens []string) (RefreshProgress, error) {
 }
 
 func (m *RefreshManager) run(id string, tokens []string) {
-	for result := range m.refreshResults(tokens) {
+	for result := range m.refreshResults(tokens, false) {
 		m.mu.Lock()
 		progress := m.progress[id]
 		if progress != nil {
@@ -134,7 +162,7 @@ func (m *RefreshManager) run(id string, tokens []string) {
 	m.mu.Unlock()
 }
 
-func (m *RefreshManager) refreshResults(tokens []string) <-chan RefreshItem {
+func (m *RefreshManager) refreshResults(tokens []string, lightweight bool) <-chan RefreshItem {
 	jobs := make(chan string)
 	results := make(chan RefreshItem, len(tokens))
 	m.mu.RLock()
@@ -149,7 +177,7 @@ func (m *RefreshManager) refreshResults(tokens []string) <-chan RefreshItem {
 		go func() {
 			defer wg.Done()
 			for token := range jobs {
-				results <- m.refreshOne(token)
+				results <- m.refreshOne(token, lightweight)
 			}
 		}()
 	}
@@ -174,10 +202,20 @@ func normalizeRefreshConcurrency(concurrency int) int {
 	return concurrency
 }
 
-func (m *RefreshManager) refreshOne(token string) RefreshItem {
+func (m *RefreshManager) refreshOne(token string, lightweight bool) RefreshItem {
 	account, _ := m.store.Get(token)
 	item := RefreshItem{Token: token, Email: account.Email}
-	check, err := m.checker.CheckAccount(context.Background(), token)
+	var check AccountCheckResult
+	var err error
+	if lightweight {
+		if checker, ok := m.checker.(LightweightAccountChecker); ok {
+			check, err = checker.CheckAccountLight(context.Background(), token)
+		} else {
+			check, err = m.checker.CheckAccount(context.Background(), token)
+		}
+	} else {
+		check, err = m.checker.CheckAccount(context.Background(), token)
+	}
 	if err != nil {
 		if isAuthenticationFailureMessage(err.Error()) {
 			removed, removeErr := m.store.RemoveInvalidToken(token, err.Error())

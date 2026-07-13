@@ -26,6 +26,15 @@ type fakeBackend struct {
 	readinessFn     func(string) error
 }
 
+type accountInfoRefreshBackend struct {
+	*fakeBackend
+	info openaiweb.AccountInfo
+}
+
+func (b *accountInfoRefreshBackend) GetAccountInfo(context.Context, string) (openaiweb.AccountInfo, error) {
+	return b.info, nil
+}
+
 type cacheBackend struct {
 	*fakeBackend
 	downloadedAccount accounts.Account
@@ -115,6 +124,21 @@ func (f *fakeBackend) Search(ctx context.Context, account accounts.Account, req 
 	return openaiweb.SearchResult{Answer: "ok"}, nil
 }
 
+func TestCheckAccountRefreshSkipsImageSpecificHandshake(t *testing.T) {
+	store := accounts.NewStore([]accounts.Account{{Email: "a@example.com", AccessToken: "token"}}, "")
+	backend := &accountInfoRefreshBackend{
+		fakeBackend: &fakeBackend{},
+		info:        openaiweb.AccountInfo{Email: "a@example.com", Type: "free", Quota: 5},
+	}
+	result, err := NewService(config.Default(), store, backend).CheckAccountLight(context.Background(), "token")
+	if err != nil || result.Email != "a@example.com" || result.Quota != 5 {
+		t.Fatalf("result=%#v err=%v", result, err)
+	}
+	if len(backend.readinessTokens) != 0 || len(backend.modelTokens) != 0 {
+		t.Fatalf("refresh should not run image handshake or model listing: readiness=%#v models=%#v", backend.readinessTokens, backend.modelTokens)
+	}
+}
+
 func TestGenerateRemovesInvalidTokenAndRetriesNextAccount(t *testing.T) {
 	store := accounts.NewStore([]accounts.Account{{Email: "old", AccessToken: "old", CreatedAt: 1}, {Email: "new", AccessToken: "new", CreatedAt: 2}}, "")
 	fb := &fakeBackend{errs: []error{errors.New("token_revoked")}}
@@ -142,6 +166,17 @@ func TestGenerateRemovesGeneric401Account(t *testing.T) {
 	}
 	if _, found := store.Get("new"); found {
 		t.Fatalf("generic 401 account was not removed: %#v", store.List())
+	}
+}
+
+func TestGenerateAppliesSingleTaskDeadlineAcrossRetries(t *testing.T) {
+	cfg := config.Default()
+	cfg.ImageTaskTimeoutSecs = 0.02
+	store := accounts.NewStore([]accounts.Account{{Email: "a@example", AccessToken: "token"}}, "")
+	backend := &serialImageBackend{fakeBackend: &fakeBackend{}, started: make(chan struct{}, 1), release: make(chan struct{})}
+	_, err := NewService(cfg, store, backend).Generate(context.Background(), Request{Prompt: "draw"})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err=%v", err)
 	}
 }
 

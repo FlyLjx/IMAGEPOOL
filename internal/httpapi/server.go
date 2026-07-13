@@ -65,6 +65,8 @@ type stabilityResponse struct {
 	Runtime map[string]any `json:"runtime"`
 }
 
+const statusClientClosedRequest = 499
+
 func NewServer(cfg config.Config, accountStore *accounts.Store, imageService *images.Service, textService *texts.Service, searchService *searches.Service, storageService *storage.Service, taskManager *tasks.Manager, configUpdated ...func(config.Config)) *Server {
 	return newServer(cfg, accountStore, imageService, textService, searchService, storageService, taskManager, nil, registration.NewWorker(registration.WorkerOptions{}), configUpdated...)
 }
@@ -110,11 +112,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		r = r.WithContext(metrics.WithCallMeta(r.Context(), metrics.NewCallMeta(r.URL.Path)))
 		defer func() {
 			endpoint, model := metrics.MetaValues(r.Context())
-			status := "success"
-			if recorder.status >= http.StatusBadRequest {
-				status = "failed"
-			}
-			s.metrics.Record(metrics.Call{Time: startedAt, Endpoint: endpoint, Model: model, Status: status, StatusCode: recorder.status, DurationMS: time.Since(startedAt).Milliseconds(), Error: recorder.ErrorMessage()})
+			errorMessage := recorder.ErrorMessage()
+			s.metrics.Record(metrics.Call{Time: startedAt, Endpoint: endpoint, Model: model, Status: metricCallStatus(recorder.status, errorMessage), StatusCode: recorder.status, DurationMS: time.Since(startedAt).Milliseconds(), Error: errorMessage})
 		}()
 	}
 	if r.URL.Path == "/health" {
@@ -516,6 +515,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) streamChatCompletion(w http.ResponseWriter, r *http.Request, body openaiweb.ChatRequest) {
 	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("X-Accel-Buffering", "no")
 	flusher, _ := w.(http.Flusher)
 	id := responseID("chatcmpl")
 	created := time.Now().Unix()
@@ -575,6 +575,7 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) streamResponses(w http.ResponseWriter, r *http.Request, req openaiweb.ChatRequest) {
 	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("X-Accel-Buffering", "no")
 	flusher, _ := w.(http.Flusher)
 	id := responseID("resp")
 	model := req.Model
@@ -666,6 +667,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) streamAnthropicMessages(w http.ResponseWriter, r *http.Request, req openaiweb.ChatRequest) {
 	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("X-Accel-Buffering", "no")
 	flusher, _ := w.(http.Flusher)
 	id := responseID("msg")
 	model := req.Model
@@ -697,6 +699,7 @@ func (s *Server) streamAnthropicMessages(w http.ResponseWriter, r *http.Request,
 
 func (s *Server) streamImage(w http.ResponseWriter, r *http.Request, req images.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("X-Accel-Buffering", "no")
 	flusher, _ := w.(http.Flusher)
 	req.Stream = false
 	identity, _ := auth.IdentityFromContext(r.Context())
@@ -1621,6 +1624,7 @@ func (s *Server) handleRegisterEvents(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-Accel-Buffering", "no")
 	w.Header().Set("Connection", "keep-alive")
 	emit := func() bool {
 		payload, err := json.Marshal(s.register.Get())
@@ -2002,9 +2006,27 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 	_ = json.NewEncoder(w).Encode(payload)
 }
 func writeError(w http.ResponseWriter, status int, err error) {
-	writeJSON(w, status, map[string]any{"error": map[string]any{"message": err.Error(), "type": "server_error", "code": "upstream_error"}})
+	errType, code := "server_error", "upstream_error"
+	switch {
+	case errors.Is(err, context.Canceled):
+		errType, code = "request_canceled", "request_canceled"
+	case errors.Is(err, openaiweb.ErrContentPolicy):
+		errType, code = "invalid_request_error", "content_policy_violation"
+	case errors.Is(err, context.DeadlineExceeded):
+		errType, code = "timeout_error", "upstream_timeout"
+	}
+	writeJSON(w, status, map[string]any{"error": map[string]any{"message": err.Error(), "type": errType, "code": code}})
 }
 func statusFromError(err error) int {
+	if errors.Is(err, context.Canceled) {
+		return statusClientClosedRequest
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return http.StatusGatewayTimeout
+	}
+	if errors.Is(err, openaiweb.ErrContentPolicy) {
+		return http.StatusBadRequest
+	}
 	var quota *auth.QuotaError
 	if errors.As(err, &quota) {
 		return quota.StatusCode
@@ -2019,5 +2041,18 @@ func statusFromError(err error) int {
 		return http.StatusPreconditionRequired
 	}
 	return http.StatusBadGateway
+}
+
+func metricCallStatus(statusCode int, errorMessage string) string {
+	if statusCode == statusClientClosedRequest || strings.Contains(strings.ToLower(errorMessage), "context canceled") {
+		return "canceled"
+	}
+	if statusCode >= http.StatusBadRequest && statusCode < http.StatusInternalServerError {
+		return "rejected"
+	}
+	if statusCode >= http.StatusInternalServerError {
+		return "failed"
+	}
+	return "success"
 }
 func mustJSON(v any) string { data, _ := json.Marshal(v); return string(data) }

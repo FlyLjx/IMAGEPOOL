@@ -3,8 +3,10 @@ package openaiweb
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -94,5 +96,198 @@ func TestPollImageResultsEmitsHeartbeatAndRetriesSlowPoll(t *testing.T) {
 	}
 	if len(events) == 0 || events[0].Progress != "polling_image" || events[0].Details["conversation_id"] != "conv-1" {
 		t.Fatalf("events=%#v", events)
+	}
+}
+
+func TestStartImageGenerationReadsImageReferenceAfterConversationID(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/backend-api/f/conversation" {
+			t.Errorf("request=%s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"conversation_id\":\"conv-1\"}\n\n"))
+		_, _ = w.Write([]byte("data: {\"message\":{\"author\":{\"role\":\"tool\"},\"content\":{\"parts\":[{\"asset_pointer\":\"file-service://file_00000000aaaaaaaaaaaaaaaaaaaaaaaa\"}]}}}\n\n"))
+	}))
+	defer srv.Close()
+
+	cfg := config.Default()
+	cfg.ChatGPTBaseURL = srv.URL
+	client := NewClient(cfg, WithHTTPClient(srv.Client()))
+	conversationID, fileIDs, sedimentIDs, err := client.startImageGeneration(context.Background(), accounts.Account{AccessToken: "token"}, "draw", "gpt-image-2", chatRequirements{}, "conduit", "trace", "parent", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if conversationID != "conv-1" || len(fileIDs) != 1 || fileIDs[0] != "file_00000000aaaaaaaaaaaaaaaaaaaaaaaa" || len(sedimentIDs) != 0 {
+		t.Fatalf("conversation=%q files=%#v sediments=%#v", conversationID, fileIDs, sedimentIDs)
+	}
+}
+
+func TestStartImageGenerationParsesMultilineSSEEvent(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/backend-api/f/conversation" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(": keepalive\r\nevent: message\r\ndata: {\"conversation_id\":\"conv-1\",\"message\":{\"author\":{\"role\":\"tool\"},\r\ndata: \"content\":{\"parts\":[{\"asset_pointer\":\"file-service://file_00000000aaaaaaaaaaaaaaaaaaaaaaaa\"}]}}}\r\n\r\n"))
+	}))
+	defer srv.Close()
+
+	cfg := config.Default()
+	cfg.ChatGPTBaseURL = srv.URL
+	client := NewClient(cfg, WithHTTPClient(srv.Client()))
+	conversationID, fileIDs, _, err := client.startImageGeneration(context.Background(), accounts.Account{AccessToken: "token"}, "draw", "gpt-image-2", chatRequirements{}, "conduit", "trace", "parent", nil)
+	if err != nil || conversationID != "conv-1" || len(fileIDs) != 1 || fileIDs[0] != "file_00000000aaaaaaaaaaaaaaaaaaaaaaaa" {
+		t.Fatalf("conversation=%q files=%#v err=%v", conversationID, fileIDs, err)
+	}
+}
+
+func TestStartImageGenerationResumesIdleToolStream(t *testing.T) {
+	var resumeSeen atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/backend-api/f/conversation":
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Error(err)
+			}
+			if body["parent_message_id"] != "parent-stable" {
+				t.Errorf("start parent_message_id=%#v", body["parent_message_id"])
+			}
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte("data: {\"type\":\"resume_conversation_token\",\"token\":\"resume-token\",\"conversation_id\":\"conv-1\"}\n\n"))
+			if flusher, ok := w.(http.Flusher); ok {
+				flusher.Flush()
+			}
+			select {
+			case <-r.Context().Done():
+			case <-time.After(time.Second):
+			}
+		case "/backend-api/f/conversation/resume":
+			resumeSeen.Store(true)
+			if r.Header.Get("X-Conduit-Token") != "resume-token" || r.Header.Get("X-Oai-Turn-Trace-Id") != "trace" {
+				t.Errorf("bad resume headers: %v", r.Header)
+			}
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Error(err)
+			}
+			if body["conversation_id"] != "conv-1" || body["offset"] != float64(0) {
+				t.Errorf("bad resume payload: %#v", body)
+			}
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte("data: {\"conversation_id\":\"conv-1\",\"message\":{\"author\":{\"role\":\"tool\"},\"content\":{\"parts\":[{\"asset_pointer\":\"file-service://file_00000000aaaaaaaaaaaaaaaaaaaaaaaa\"}]}}}\n\n"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	cfg := config.Default()
+	cfg.ChatGPTBaseURL = srv.URL
+	client := NewClient(cfg, WithHTTPClient(srv.Client()))
+	client.imageStreamIdleTimeout = 10 * time.Millisecond
+	conversationID, fileIDs, sedimentIDs, err := client.startImageGeneration(context.Background(), accounts.Account{AccessToken: "token"}, "draw", "auto", chatRequirements{}, "conduit", "trace", "parent-stable", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !resumeSeen.Load() || conversationID != "conv-1" || len(fileIDs) != 1 || fileIDs[0] != "file_00000000aaaaaaaaaaaaaaaaaaaaaaaa" || len(sedimentIDs) != 0 {
+		t.Fatalf("resumed=%t conversation=%q files=%#v sediments=%#v", resumeSeen.Load(), conversationID, fileIDs, sedimentIDs)
+	}
+}
+
+func TestStartImageGenerationRetriesTransientStartError(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/backend-api/f/conversation" {
+			http.NotFound(w, r)
+			return
+		}
+		if hits.Add(1) == 1 {
+			http.Error(w, "temporary gateway error", http.StatusBadGateway)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"conversation_id\":\"conv-1\",\"message\":{\"author\":{\"role\":\"tool\"},\"content\":{\"parts\":[{\"asset_pointer\":\"file-service://file_00000000aaaaaaaaaaaaaaaaaaaaaaaa\"}]}}}\n\n"))
+	}))
+	defer srv.Close()
+
+	cfg := config.Default()
+	cfg.ChatGPTBaseURL = srv.URL
+	client := NewClient(cfg, WithHTTPClient(srv.Client()), WithSleep(func(context.Context, time.Duration) error { return nil }))
+	conversationID, fileIDs, _, err := client.startImageGeneration(context.Background(), accounts.Account{AccessToken: "token"}, "draw", "auto", chatRequirements{}, "conduit", "trace", "parent", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hits.Load() != 2 || conversationID != "conv-1" || len(fileIDs) != 1 {
+		t.Fatalf("hits=%d conversation=%q files=%#v", hits.Load(), conversationID, fileIDs)
+	}
+}
+
+func TestImageResumeRetryPolicy(t *testing.T) {
+	if !isRetryableResumeError(errors.New("connection reset")) {
+		t.Fatal("network errors must be retryable")
+	}
+	if isRetryableResumeError(context.Canceled) || isRetryableResumeError(context.DeadlineExceeded) {
+		t.Fatal("context termination must not be retryable")
+	}
+	if !isRetryableResumeError(&UpstreamError{StatusCode: http.StatusBadGateway}) {
+		t.Fatal("502 must be retryable")
+	}
+	if isRetryableResumeError(&UpstreamError{StatusCode: http.StatusInternalServerError}) {
+		t.Fatal("unlisted HTTP errors must not be retryable")
+	}
+	if !isResumePollingFallback(&UpstreamError{StatusCode: http.StatusNotFound}) {
+		t.Fatal("resume 404 must fall back to conversation polling")
+	}
+	if got := imageResumeRetryDelay(0); got != 300*time.Millisecond {
+		t.Fatalf("first retry delay=%s", got)
+	}
+	if got := imageResumeRetryDelay(20); got != 5*time.Second {
+		t.Fatalf("retry delay cap=%s", got)
+	}
+}
+
+func TestResolveConversationImageURLsUsesInitialReferenceBeforePolling(t *testing.T) {
+	var conversationHits atomic.Int32
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/backend-api/files/file_00000000aaaaaaaaaaaaaaaaaaaaaaaa/download":
+			_ = json.NewEncoder(w).Encode(map[string]any{"download_url": srv.URL + "/image.png"})
+		case "/image.png":
+			_, _ = w.Write([]byte("PNG"))
+		case "/backend-api/conversation/conv-1":
+			conversationHits.Add(1)
+			http.NotFound(w, r)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	cfg := config.Default()
+	cfg.ChatGPTBaseURL = srv.URL
+	client := NewClient(cfg, WithHTTPClient(srv.Client()))
+	urls, err := client.resolveConversationImageURLs(context.Background(), accounts.Account{AccessToken: "token"}, "conv-1", []string{"file_00000000aaaaaaaaaaaaaaaaaaaaaaaa"}, nil, true, nil)
+	if err != nil || len(urls) != 1 || urls[0] != srv.URL+"/image.png" || conversationHits.Load() != 0 {
+		t.Fatalf("urls=%#v err=%v polls=%d", urls, err, conversationHits.Load())
+	}
+}
+
+func TestResolveImageURLsReturnsReferenceDownloadError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "expired reference", http.StatusForbidden)
+	}))
+	defer srv.Close()
+
+	cfg := config.Default()
+	cfg.ChatGPTBaseURL = srv.URL
+	client := NewClient(cfg, WithHTTPClient(srv.Client()))
+	urls, err := client.resolveImageURLs(context.Background(), accounts.Account{AccessToken: "token"}, "conv-1", []string{"file_00000000aaaaaaaaaaaaaaaaaaaaaaaa"}, nil)
+	if len(urls) != 0 || err == nil || !strings.Contains(err.Error(), "resolve file") || !strings.Contains(err.Error(), "status=403") {
+		t.Fatalf("urls=%#v err=%v", urls, err)
 	}
 }

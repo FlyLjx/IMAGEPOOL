@@ -105,6 +105,10 @@ func TestRemoveInvalidTokenPersists(t *testing.T) {
 	if _, err := store.SelectForImage(nil); !errors.Is(err, ErrNoAvailableAccount) {
 		t.Fatalf("want no account got %v", err)
 	}
+	logs := store.CredentialRecoveryLogs("", 10)
+	if len(logs) != 1 || logs[0].Event != "account_deleted" || logs[0].Error != "token_revoked" {
+		t.Fatalf("logs=%#v", logs)
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)

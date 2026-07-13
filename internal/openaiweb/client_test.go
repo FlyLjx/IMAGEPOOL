@@ -3,6 +3,7 @@ package openaiweb
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -58,9 +59,12 @@ func TestExtractGeneratedImageReferenceIDsSkipsUserAttachments(t *testing.T) {
 }
 
 func TestGenerateImageReverseProtocol(t *testing.T) {
-	var prepareSeen atomic.Bool
+	var prepareCount atomic.Int32
 	var startSeen atomic.Bool
+	var turnTraceID string
 	const expectedTurnstileToken = "dHVybnN0aWxlLXByb29m"
+	expectedPrepareStates := []string{"none", "sent", "success"}
+	expectedConduitHeaders := []string{"no-token", "conduit-1", "conduit-2"}
 	var srv *httptest.Server
 	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -80,34 +84,65 @@ func TestGenerateImageReverseProtocol(t *testing.T) {
 			}
 			json.NewEncoder(w).Encode(map[string]any{"token": "sentinel"})
 		case r.Method == http.MethodPost && r.URL.Path == "/backend-api/f/conversation/prepare":
-			prepareSeen.Store(true)
+			prepareIndex := int(prepareCount.Add(1)) - 1
+			if prepareIndex >= len(expectedPrepareStates) {
+				t.Errorf("too many prepare requests: %d", prepareIndex+1)
+				http.Error(w, "too many prepare requests", http.StatusBadRequest)
+				return
+			}
 			if r.Header.Get("OpenAI-Sentinel-Chat-Requirements-Token") != "sentinel" {
 				t.Errorf("missing sentinel header")
 			}
+			if r.Header.Get("OpenAI-Sentinel-Chat-Requirements-Prepare-Token") != "prep" {
+				t.Errorf("missing sentinel prepare header")
+			}
 			if r.Header.Get("OpenAI-Sentinel-Turnstile-Token") != expectedTurnstileToken {
 				t.Errorf("missing turnstile header")
 			}
+			if got := r.Header.Get("X-Conduit-Token"); got != expectedConduitHeaders[prepareIndex] {
+				t.Errorf("prepare %d conduit header=%q", prepareIndex, got)
+			}
+			if got := r.Header.Get("X-Oai-Turn-Trace-Id"); got == "" {
+				t.Errorf("prepare %d missing turn trace ID", prepareIndex)
+			} else if turnTraceID == "" {
+				turnTraceID = got
+			} else if got != turnTraceID {
+				t.Errorf("prepare %d turn trace ID=%q want=%q", prepareIndex, got, turnTraceID)
+			}
 			var body map[string]any
 			json.NewDecoder(r.Body).Decode(&body)
-			if body["model"] != "gpt-5-5" || body["client_prepare_state"] != "success" {
+			if body["model"] != "auto" || body["client_prepare_state"] != expectedPrepareStates[prepareIndex] || body["thinking_effort"] != "standard" {
 				t.Errorf("bad prepare payload: %#v", body)
 			}
 			hints, _ := body["system_hints"].([]any)
-			if len(hints) != 1 || hints[0] != "picture_v2" {
+			if len(hints) != 0 {
 				t.Errorf("bad hints: %#v", hints)
 			}
-			json.NewEncoder(w).Encode(map[string]any{"conduit_token": "conduit"})
+			_, hasPartialQuery := body["partial_query"]
+			if hasPartialQuery != (prepareIndex > 0) {
+				t.Errorf("prepare %d partial_query presence=%t", prepareIndex, hasPartialQuery)
+			}
+			json.NewEncoder(w).Encode(map[string]any{"conduit_token": fmt.Sprintf("conduit-%d", prepareIndex+1)})
 		case r.Method == http.MethodPost && r.URL.Path == "/backend-api/f/conversation":
 			startSeen.Store(true)
-			if r.Header.Get("X-Conduit-Token") != "conduit" || !strings.Contains(r.Header.Get("Accept"), "text/event-stream") {
+			if r.Header.Get("X-Conduit-Token") != "conduit-3" || !strings.Contains(r.Header.Get("Accept"), "text/event-stream") {
 				t.Errorf("bad start headers: %v", r.Header)
+			}
+			if r.Header.Get("X-Oai-Turn-Trace-Id") != turnTraceID || turnTraceID == "" {
+				t.Errorf("start turn trace ID=%q want=%q", r.Header.Get("X-Oai-Turn-Trace-Id"), turnTraceID)
+			}
+			if r.Header.Get("OAI-Echo-Logs") != "0,943,1,65876,0,68124,1,68930" || r.Header.Get("OAI-Telemetry") != "[1,null]" {
+				t.Errorf("missing start telemetry headers: %v", r.Header)
+			}
+			if r.Header.Get("OpenAI-Sentinel-Chat-Requirements-Prepare-Token") != "prep" {
+				t.Errorf("missing start sentinel prepare header")
 			}
 			if r.Header.Get("OpenAI-Sentinel-Turnstile-Token") != expectedTurnstileToken {
 				t.Errorf("missing turnstile header")
 			}
 			var body map[string]any
 			json.NewDecoder(r.Body).Decode(&body)
-			if body["model"] != "gpt-5-5" || body["client_prepare_state"] != "sent" {
+			if body["model"] != "auto" || body["client_prepare_state"] != "success" || body["thinking_effort"] != "standard" {
 				t.Errorf("bad start payload: %#v", body)
 			}
 			w.Header().Set("Content-Type", "text/event-stream")
@@ -135,11 +170,65 @@ func TestGenerateImageReverseProtocol(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !prepareSeen.Load() || !startSeen.Load() {
+	if prepareCount.Load() != 3 || !startSeen.Load() {
 		t.Fatal("protocol requests were not seen")
 	}
 	if result.ConversationID != "conv-1" || len(result.URLs) != 1 || result.URLs[0] != srv.URL+"/image.png" {
 		t.Fatalf("bad result: %#v", result)
+	}
+}
+
+func TestPrepareImageConversationIncludesReferenceMetadata(t *testing.T) {
+	var prepareCount int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/backend-api/f/conversation/prepare" {
+			http.NotFound(w, r)
+			return
+		}
+		prepareCount++
+		expectedConduit := "no-token"
+		if prepareCount == 3 {
+			expectedConduit = "conduit-2"
+		}
+		if got := r.Header.Get("X-Conduit-Token"); got != expectedConduit {
+			t.Errorf("prepare %d conduit header=%q want=%q", prepareCount, got, expectedConduit)
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Error(err)
+			return
+		}
+		mimeTypes, _ := body["attachment_mime_types"].([]any)
+		if len(mimeTypes) != 1 || mimeTypes[0] != "image/png" {
+			t.Errorf("prepare %d attachment_mime_types=%#v", prepareCount, mimeTypes)
+		}
+		if body["client_prepare_state"] != "none" {
+			partialQuery, _ := body["partial_query"].(map[string]any)
+			content, _ := partialQuery["content"].(map[string]any)
+			parts, _ := content["parts"].([]any)
+			firstPart, _ := parts[0].(map[string]any)
+			if content["content_type"] != "multimodal_text" || len(parts) != 2 || firstPart["asset_pointer"] != "file-service://file-reference" || parts[1] != "edit it" {
+				t.Errorf("prepare %d partial query=%#v", prepareCount, partialQuery)
+			}
+		}
+		conduit := ""
+		if prepareCount > 1 {
+			conduit = fmt.Sprintf("conduit-%d", prepareCount)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"conduit_token": conduit})
+	}))
+	defer srv.Close()
+
+	cfg := config.Default()
+	cfg.ChatGPTBaseURL = srv.URL
+	client := NewClient(cfg, WithHTTPClient(srv.Client()), WithIDGenerator(func() string { return "00000000-0000-4000-8000-000000000001" }))
+	refs := []uploadMeta{{FileID: "file-reference", FileName: "reference.png", FileSize: 128, MIMEType: "image/png", Width: 16, Height: 16}}
+	conduit, traceID, parentMessageID, err := client.prepareImageConversation(context.Background(), accounts.Account{AccessToken: "token"}, "edit it", "auto", chatRequirements{}, refs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prepareCount != 3 || conduit != "conduit-3" || traceID == "" || parentMessageID == "" {
+		t.Fatalf("prepare count=%d conduit=%q trace=%q parent=%q", prepareCount, conduit, traceID, parentMessageID)
 	}
 }
 

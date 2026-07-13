@@ -99,6 +99,7 @@ export function ConfigCard() {
   const setRefreshAccountConcurrency = useSettingsStore((state) => state.setRefreshAccountConcurrency);
   const setImageRetentionDays = useSettingsStore((state) => state.setImageRetentionDays);
   const setImagePollTimeoutSecs = useSettingsStore((state) => state.setImagePollTimeoutSecs);
+  const setImageTaskTimeoutSecs = useSettingsStore((state) => state.setImageTaskTimeoutSecs);
   const setImageWebModelSlug = useSettingsStore((state) => state.setImageWebModelSlug);
   const setImageAccountPrecheckIntervalMinutes = useSettingsStore((state) => state.setImageAccountPrecheckIntervalMinutes);
   const setImageAccountPrecheckConcurrency = useSettingsStore((state) => state.setImageAccountPrecheckConcurrency);
@@ -221,8 +222,17 @@ export function ConfigCard() {
               label="图片轮询上限"
               value={String(config.image_poll_timeout_secs || "")}
               onChange={setImagePollTimeoutSecs}
-              placeholder="90"
-              help="单位秒。图片已提交后最长等待时间，超时才会切换账号重试。"
+              placeholder="60"
+			  help="单位秒，最高 60 秒。图片已提交后超过该时间才会切换账号。"
+            />
+          </Col>
+          <Col xs={24} md={12} xl={6}>
+            <NumberInput
+              label="生图总超时"
+              value={String(config.image_task_timeout_secs || "")}
+              onChange={setImageTaskTimeoutSecs}
+              placeholder="120"
+			  help="单位秒，默认 120 秒、最高 300 秒。达到总上限后立即终止所有重试。"
             />
           </Col>
           <Col xs={24} md={12} xl={6}>

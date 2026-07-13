@@ -179,7 +179,7 @@ func (s *Service) Summary(window time.Duration) map[string]any {
 	byEndpoint := map[string]int{}
 	byModel := map[string]int{}
 	byReason := map[string]int{}
-	totals := map[string]int{"success": 0, "failed": 0, "running": 0, "other": 0}
+	totals := map[string]int{"success": 0, "failed": 0, "canceled": 0, "rejected": 0, "running": 0, "other": 0}
 	bucketCounts := map[string]map[string]int{}
 	recentFailed := []map[string]any{}
 	for _, call := range items {
@@ -225,17 +225,18 @@ func (s *Service) Summary(window time.Duration) map[string]any {
 		series = append(series, map[string]any{"time": at, "label": runtimeBucketLabel(at, window, bucket), "success": counts["success"], "failed": counts["failed"]})
 	}
 	statusPie := []map[string]any{}
-	for _, status := range []string{"success", "failed", "running", "other"} {
+	for _, status := range []string{"success", "failed", "canceled", "rejected", "running", "other"} {
 		if totals[status] > 0 {
 			statusPie = append(statusPie, map[string]any{"label": status, "value": totals[status], "status": status})
 		}
 	}
 	reasons := sortedCounts(byReason, "label")
-	total := totals["success"] + totals["failed"] + totals["running"] + totals["other"]
+	total := totals["success"] + totals["failed"] + totals["canceled"] + totals["rejected"] + totals["running"] + totals["other"]
+	availabilityTotal := totals["success"] + totals["failed"]
 	successRate, errorRate := 0.0, 0.0
-	if total > 0 {
-		successRate = float64(totals["success"]) * 100 / float64(total)
-		errorRate = float64(totals["failed"]) * 100 / float64(total)
+	if availabilityTotal > 0 {
+		successRate = float64(totals["success"]) * 100 / float64(availabilityTotal)
+		errorRate = float64(totals["failed"]) * 100 / float64(availabilityTotal)
 	}
 	return map[string]any{
 		"date": now.Local().Format("2006-01-02"), "total": len(items), "by_status": byStatus, "by_endpoint": byEndpoint, "by_model": byModel,
@@ -396,6 +397,10 @@ func normalizeStatus(value string) string {
 		return "success"
 	case "failed", "error":
 		return "failed"
+	case "canceled", "cancelled":
+		return "canceled"
+	case "rejected", "denied", "blocked":
+		return "rejected"
 	case "running", "queued":
 		return "running"
 	default:

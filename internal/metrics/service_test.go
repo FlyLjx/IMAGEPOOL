@@ -73,3 +73,19 @@ func TestStabilityUsesRollingSixtySecondWindow(t *testing.T) {
 		t.Fatalf("stability=%#v", stability)
 	}
 }
+
+func TestSummaryExcludesCanceledAndRejectedFromAvailabilityRate(t *testing.T) {
+	svc := NewService("")
+	now := time.Date(2026, 7, 13, 16, 0, 0, 0, time.UTC)
+	svc.now = func() time.Time { return now }
+	svc.Record(Call{Time: now, Endpoint: "/v1/images/generations", Status: "success"})
+	svc.Record(Call{Time: now, Endpoint: "/v1/images/generations", Status: "failed"})
+	svc.Record(Call{Time: now, Endpoint: "/v1/images/generations", Status: "canceled"})
+	svc.Record(Call{Time: now, Endpoint: "/v1/images/generations", Status: "rejected"})
+
+	runtime := svc.Summary(time.Hour)["runtime"].(map[string]any)
+	totals := runtime["totals"].(map[string]int)
+	if totals["canceled"] != 1 || totals["rejected"] != 1 || runtime["success_rate"] != float64(50) || runtime["error_rate"] != float64(50) {
+		t.Fatalf("runtime=%#v", runtime)
+	}
+}

@@ -133,7 +133,7 @@ func (c *Client) runSearchConversation(ctx context.Context, account accounts.Acc
 	if err != nil {
 		return "", err
 	}
-	for k, v := range c.headers(account, path, path, c.imageHeaders(requirements, conduit, "text/event-stream")) {
+	for k, v := range c.headers(account, path, path, c.imageHeaders(requirements, conduit, "text/event-stream", c.newID())) {
 		request.Header.Set(k, v)
 	}
 	resp, err := c.clientFor(account, false).Do(request)

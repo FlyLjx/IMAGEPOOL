@@ -231,6 +231,7 @@ function TasksContent() {
         ),
       },
       { title: "耗时", dataIndex: "duration_ms", width: 110, render: (value) => typeof value === "number" ? `${(value / 1000).toFixed(1)}s` : "-" },
+      { title: "创建时间", dataIndex: "created_at", width: 180, render: (value) => formatShanghaiDateTime(value) },
       { title: "更新时间", dataIndex: "updated_at", width: 180, render: (value) => formatShanghaiDateTime(value) },
       {
         title: "操作",
@@ -290,7 +291,7 @@ function TasksContent() {
           loading={isLoading}
           size="small"
           pagination={{ pageSize: 20, showSizeChanger: true }}
-          scroll={{ x: 1300 }}
+          scroll={{ x: 1480 }}
           locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无任务" /> }}
         />
       </Card>
@@ -325,8 +326,9 @@ function TasksContent() {
             </div>
             <div className="mt-3 grid gap-2 text-sm sm:grid-cols-2">
               <div>当前状态：<Typography.Text>{statusTask?.realtime_status || "-"}</Typography.Text></div>
-              <div>更新时间：<Typography.Text>{formatShanghaiDateTime(statusTask?.updated_at)}</Typography.Text></div>
+              <div>创建时间：<Typography.Text>{formatShanghaiDateTime(statusTask?.created_at)}</Typography.Text></div>
               <div>模型：<Typography.Text>{statusTask?.model || "-"}</Typography.Text></div>
+              <div>更新时间：<Typography.Text>{formatShanghaiDateTime(statusTask?.updated_at)}</Typography.Text></div>
               <div>会话：<Typography.Text copyable={Boolean(statusTask?.conversation_id)}>{statusTask?.conversation_id || "-"}</Typography.Text></div>
               <div>进度：<Typography.Text>{statusTask?.progress_percent ?? 0}%</Typography.Text></div>
               <div>账号：<Typography.Text>{statusTask?.used_account_count ?? 0} 个 / 失败 {statusTask?.failed_account_count ?? 0}</Typography.Text></div>

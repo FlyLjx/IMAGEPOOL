@@ -92,7 +92,7 @@ func (s *AutoRefreshScheduler) refreshAll() {
 		log.Printf("automatic account refresh skipped: no accounts")
 		return
 	}
-	progress, err := s.refresh.RefreshNow(tokens)
+	progress, err := s.refresh.RefreshScheduled(tokens)
 	if err != nil {
 		log.Printf("automatic account refresh failed: %v", err)
 		return
@@ -102,7 +102,7 @@ func (s *AutoRefreshScheduler) refreshAll() {
 
 func normalizeRefreshInterval(intervalMinutes int) int {
 	if intervalMinutes <= 0 {
-		return 5
+		return 60
 	}
 	if intervalMinutes > 525600 {
 		return 525600

@@ -56,7 +56,7 @@ func TestSolveTurnstileTokenWithStringMapKeys(t *testing.T) {
 func TestTurnstileHeaders(t *testing.T) {
 	client := &Client{}
 	requirements := chatRequirements{TurnstileToken: "turnstile-proof"}
-	if got := client.imageHeaders(requirements, "", "application/json")["OpenAI-Sentinel-Turnstile-Token"]; got != "turnstile-proof" {
+	if got := client.imageHeaders(requirements, "", "application/json", "")["OpenAI-Sentinel-Turnstile-Token"]; got != "turnstile-proof" {
 		t.Fatalf("image header=%q", got)
 	}
 	if got := client.conversationHeaders(requirements)["OpenAI-Sentinel-Turnstile-Token"]; got != "turnstile-proof" {

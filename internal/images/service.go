@@ -158,6 +158,8 @@ func (s *Service) currentConfig() config.Config {
 }
 
 func (s *Service) Generate(ctx context.Context, req Request) (Response, error) {
+	ctx, cancel := s.taskContext(ctx)
+	defer cancel()
 	if req.N <= 0 {
 		req.N = 1
 	}
@@ -231,6 +233,26 @@ func (s *Service) CheckAccount(ctx context.Context, token string) (accounts.Acco
 	return s.checkAccountDetails(ctx, account, result, true)
 }
 
+// CheckAccountLight is used by scheduled refreshes. The Sentinel handshake is
+// image-generation-specific and is performed by the dispatch precheck before
+// a real image request.
+func (s *Service) CheckAccountLight(ctx context.Context, token string) (accounts.AccountCheckResult, error) {
+	result := accounts.AccountCheckResult{ImageQuotaUnknown: true}
+	account, found := s.store.Get(token)
+	if !found {
+		return result, fmt.Errorf("account not found")
+	}
+	var err error
+	account, err = s.ensureBrowserIdentity(account)
+	if err != nil {
+		return result, err
+	}
+	// Scheduled refreshes only need to confirm the account and its quota. The
+	// Sentinel handshake is image-generation-specific and is performed by the
+	// dispatch precheck immediately before a real image request.
+	return s.checkAccountDetails(ctx, account, result, false)
+}
+
 func (s *Service) ensureBrowserIdentity(account accounts.Account) (accounts.Account, error) {
 	updated, found, err := s.store.EnsureBrowserIdentity(account.AccessToken)
 	if err != nil {
@@ -295,6 +317,8 @@ func (s *Service) checkAccountDetails(ctx context.Context, account accounts.Acco
 }
 
 func (s *Service) GenerateWithAccount(ctx context.Context, token string, req Request) (Response, error) {
+	ctx, cancel := s.taskContext(ctx)
+	defer cancel()
 	account, ok := s.store.Get(token)
 	if !ok {
 		return Response{}, fmt.Errorf("account not found")
@@ -330,6 +354,17 @@ func (s *Service) GenerateWithAccount(ctx context.Context, token string, req Req
 	result = s.cacheResult(ctx, account, result, req.OutputBaseURL)
 	_ = s.store.MarkImageSuccess(account.AccessToken)
 	return responseFromResult(result), nil
+}
+
+func (s *Service) taskContext(parent context.Context) (context.Context, context.CancelFunc) {
+	if parent == nil {
+		parent = context.Background()
+	}
+	timeout := time.Duration(s.currentConfig().ImageTaskTimeoutSecs * float64(time.Second))
+	if timeout <= 0 {
+		return context.WithCancel(parent)
+	}
+	return context.WithTimeout(parent, timeout)
 }
 
 func (s *Service) generateOne(ctx context.Context, req Request) (openaiweb.ImageResult, error) {

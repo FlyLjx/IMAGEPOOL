@@ -72,10 +72,11 @@ function normalizeConfig(config: SettingsConfig): SettingsConfig {
 
   return {
     ...config,
-    refresh_account_interval_minute: Number(config.refresh_account_interval_minute || 5),
+    refresh_account_interval_minute: Number(config.refresh_account_interval_minute || 60),
     refresh_account_concurrency: Number(config.refresh_account_concurrency || 20),
     image_retention_days: Number(config.image_retention_days || 30),
-    image_poll_timeout_secs: Number(config.image_poll_timeout_secs || 90),
+    image_poll_timeout_secs: Math.min(60, Number(config.image_poll_timeout_secs) || 60),
+    image_task_timeout_secs: Math.min(300, Number(config.image_task_timeout_secs) || 120),
     image_web_model_slug: String(config.image_web_model_slug || "gpt-5-5"),
     image_account_concurrency: Number(config.image_account_concurrency || 3),
     image_account_precheck_interval_minutes: Number(config.image_account_precheck_interval_minutes || 10),
@@ -167,6 +168,7 @@ type SettingsStore = {
   setRefreshAccountConcurrency: (value: string) => void;
   setImageRetentionDays: (value: string) => void;
   setImagePollTimeoutSecs: (value: string) => void;
+  setImageTaskTimeoutSecs: (value: string) => void;
   setImageWebModelSlug: (value: string) => void;
   setImageAccountPrecheckIntervalMinutes: (value: string) => void;
   setImageAccountPrecheckConcurrency: (value: string) => void;
@@ -251,7 +253,8 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         refresh_account_interval_minute: Math.max(1, Number(config.refresh_account_interval_minute) || 1),
         refresh_account_concurrency: Math.min(100, Math.max(1, Number(config.refresh_account_concurrency) || 20)),
         image_retention_days: Math.max(1, Number(config.image_retention_days) || 30),
-        image_poll_timeout_secs: Math.min(300, Math.max(15, Number(config.image_poll_timeout_secs) || 90)),
+        image_poll_timeout_secs: Math.min(60, Math.max(15, Number(config.image_poll_timeout_secs) || 60)),
+        image_task_timeout_secs: Math.min(300, Math.max(30, Number(config.image_task_timeout_secs) || 120)),
         image_web_model_slug: String(config.image_web_model_slug || "gpt-5-5").trim() || "gpt-5-5",
         image_account_concurrency: Math.max(1, Number(config.image_account_concurrency) || 3),
         image_account_precheck_interval_minutes: Math.max(1, Number(config.image_account_precheck_interval_minutes) || 10),
@@ -350,6 +353,10 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
 
   setImagePollTimeoutSecs: (value) => {
     set((state) => (state.config ? { config: { ...state.config, image_poll_timeout_secs: value } } : {}));
+  },
+
+  setImageTaskTimeoutSecs: (value) => {
+    set((state) => (state.config ? { config: { ...state.config, image_task_timeout_secs: value } } : {}));
   },
 
   setImageWebModelSlug: (value) => {

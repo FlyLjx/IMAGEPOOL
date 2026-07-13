@@ -36,6 +36,7 @@ type Client struct {
 	pollInitialWait           time.Duration
 	pollHeartbeatInterval     time.Duration
 	pollRequestTimeout        time.Duration
+	imageStreamIdleTimeout    time.Duration
 	settle                    time.Duration
 	checkBeforeHit            bool
 	settleEnabled             bool
@@ -83,7 +84,7 @@ func NewClient(cfg config.Config, opts ...ClientOption) *Client {
 	}
 	c := &Client{
 		baseURL: strings.TrimRight(cfg.ChatGPTBaseURL, "/"), imageModelSlug: cfg.ImageWebModelSlug,
-		pollTimeout: seconds(cfg.ImagePollTimeoutSecs), pollInterval: seconds(cfg.ImagePollIntervalSecs), pollInitialWait: seconds(cfg.ImagePollInitialWaitSecs), pollHeartbeatInterval: 15 * time.Second, pollRequestTimeout: 20 * time.Second, settle: seconds(cfg.ImageSettleSecs),
+		pollTimeout: seconds(cfg.ImagePollTimeoutSecs), pollInterval: seconds(cfg.ImagePollIntervalSecs), pollInitialWait: seconds(cfg.ImagePollInitialWaitSecs), pollHeartbeatInterval: 15 * time.Second, pollRequestTimeout: 20 * time.Second, imageStreamIdleTimeout: 60 * time.Second, settle: seconds(cfg.ImageSettleSecs),
 		checkBeforeHit: cfg.ImageCheckBeforeHitEnabled, settleEnabled: cfg.ImageSettleEnabled,
 		httpClient: httpClient, resourceClient: resourceClient, proxyRuntime: cfg.ProxyRuntime, transport: cfg.UpstreamTransport, timeout: seconds(cfg.RequestTimeoutSecs), tlsClients: map[string]*http.Client{}, tlsResources: map[string]*http.Client{}, newID: newUUID,
 		sleep: func(ctx context.Context, d time.Duration) error {
@@ -124,7 +125,7 @@ func seconds(v float64) time.Duration {
 	return time.Duration(v * float64(time.Second))
 }
 
-type chatRequirements struct{ Token, ProofToken, TurnstileToken, SOToken string }
+type chatRequirements struct{ Token, PrepareToken, ProofToken, TurnstileToken, SOToken string }
 type uploadMeta struct {
 	FileID, FileName string
 	FileSize         int
@@ -295,12 +296,12 @@ func (c *Client) GenerateImage(ctx context.Context, account accounts.Account, re
 		return ImageResult{}, err
 	}
 	progress(ProgressEvent{Progress: "preparing_conversation", Message: "准备生图会话"})
-	conduit, err := c.prepareImageConversation(ctx, account, req.Prompt, backendModel, requirements)
+	conduit, turnTraceID, parentMessageID, err := c.prepareImageConversation(ctx, account, req.Prompt, backendModel, requirements, refs)
 	if err != nil {
 		return ImageResult{}, err
 	}
 	progress(ProgressEvent{Progress: "starting_generation", Message: "提交生图请求"})
-	conversationID, fileIDs, sedimentIDs, err := c.startImageGeneration(ctx, account, req.Prompt, backendModel, requirements, conduit, refs)
+	conversationID, fileIDs, sedimentIDs, err := c.startImageGeneration(ctx, account, req.Prompt, backendModel, requirements, conduit, turnTraceID, parentMessageID, refs)
 	if err != nil {
 		return ImageResult{}, err
 	}
@@ -333,7 +334,7 @@ func (c *Client) GenerateImage(ctx context.Context, account accounts.Account, re
 func (c *Client) imageSlug(model string) string {
 	model = strings.TrimSpace(model)
 	if model == "" || model == "gpt-image-2" {
-		return c.imageModelSlug
+		return "auto"
 	}
 	if model == "codex-gpt-image-2" || strings.HasSuffix(model, "-codex-gpt-image-2") {
 		return model
@@ -424,7 +425,8 @@ func (c *Client) chatRequirements(ctx context.Context, account accounts.Account,
 		}
 	}
 	var finalize map[string]any
-	body := map[string]any{"prepare_token": str(prepare["prepare_token"]), "proof_token": proofToken, "turnstile_token": turnstileToken}
+	prepareToken := str(prepare["prepare_token"])
+	body := map[string]any{"prepare_token": prepareToken, "proof_token": proofToken, "turnstile_token": turnstileToken}
 	if err := c.doJSON(ctx, account, http.MethodPost, base+"/finalize", base+"/finalize", body, map[string]string{"Content-Type": "application/json"}, &finalize); err != nil {
 		return chatRequirements{}, err
 	}
@@ -432,7 +434,7 @@ func (c *Client) chatRequirements(ctx context.Context, account accounts.Account,
 	if token == "" {
 		return chatRequirements{}, fmt.Errorf("missing chat requirements token: %#v", finalize)
 	}
-	return chatRequirements{Token: token, ProofToken: proofToken, TurnstileToken: turnstileToken, SOToken: str(finalize["so_token"])}, nil
+	return chatRequirements{Token: token, PrepareToken: prepareToken, ProofToken: proofToken, TurnstileToken: turnstileToken, SOToken: str(finalize["so_token"])}, nil
 }
 
 func requiredBool(payload map[string]any, key string) bool {
@@ -450,19 +452,50 @@ func str(v any) string {
 	return fmt.Sprint(v)
 }
 
-func (c *Client) prepareImageConversation(ctx context.Context, account accounts.Account, prompt, model string, requirements chatRequirements) (string, error) {
+func (c *Client) prepareImageConversation(ctx context.Context, account accounts.Account, prompt, model string, requirements chatRequirements, refs []uploadMeta) (string, string, string, error) {
 	path := "/backend-api/f/conversation/prepare"
-	payload := map[string]any{"action": "next", "fork_from_shared_post": false, "parent_message_id": c.newID(), "model": model, "client_prepare_state": "success", "timezone_offset_min": -480, "timezone": "Asia/Shanghai", "conversation_mode": map[string]any{"kind": "primary_assistant"}, "system_hints": []string{"picture_v2"}, "partial_query": map[string]any{"id": c.newID(), "author": map[string]any{"role": "user"}, "content": map[string]any{"content_type": "text", "parts": []string{prompt}}}, "supports_buffering": true, "supported_encodings": []string{"v1"}, "client_contextual_info": map[string]any{"app_name": "chatgpt.com"}}
-	var out struct {
-		ConduitToken string `json:"conduit_token"`
+	turnTraceID := c.newID()
+	parentMessageID := c.newID()
+	conduit := ""
+	for _, state := range []string{"none", "sent", "success"} {
+		payload := map[string]any{
+			"action":                 "next",
+			"fork_from_shared_post":  false,
+			"parent_message_id":      parentMessageID,
+			"model":                  model,
+			"client_prepare_state":   state,
+			"timezone_offset_min":    -480,
+			"timezone":               "Asia/Shanghai",
+			"conversation_mode":      map[string]any{"kind": "primary_assistant"},
+			"system_hints":           []string{},
+			"supports_buffering":     true,
+			"supported_encodings":    []string{"v1"},
+			"client_contextual_info": map[string]any{"app_name": "chatgpt.com"},
+			"thinking_effort":        "standard",
+		}
+		if state != "none" {
+			payload["partial_query"] = map[string]any{
+				"id":      c.newID(),
+				"author":  map[string]any{"role": "user"},
+				"content": imageMessageContent(prompt, refs),
+			}
+		}
+		if mimeTypes := imageAttachmentMIMETypes(refs); len(mimeTypes) > 0 {
+			payload["attachment_mime_types"] = mimeTypes
+		}
+		var out struct {
+			ConduitToken string `json:"conduit_token"`
+		}
+		requestConduit := conduit
+		if requestConduit == "" {
+			requestConduit = "no-token"
+		}
+		if err := c.doJSON(ctx, account, http.MethodPost, path, path, payload, c.imageHeaders(requirements, requestConduit, "*/*", turnTraceID), &out); err != nil {
+			return "", "", "", fmt.Errorf("prepare conversation(%s): %w", state, err)
+		}
+		conduit = strings.TrimSpace(out.ConduitToken)
 	}
-	if err := c.doJSON(ctx, account, http.MethodPost, path, path, payload, c.imageHeaders(requirements, "", "*/*"), &out); err != nil {
-		return "", err
-	}
-	if out.ConduitToken == "" {
-		return "", fmt.Errorf("missing conduit_token")
-	}
-	return out.ConduitToken, nil
+	return conduit, turnTraceID, parentMessageID, nil
 }
 
 func (c *Client) downloadBase64(ctx context.Context, account accounts.Account, urls []string) ([]string, error) {

@@ -29,6 +29,7 @@ type Config struct {
 	ImagePollTimeoutSecs                float64       `json:"image_poll_timeout_secs"`
 	ImagePollIntervalSecs               float64       `json:"image_poll_interval_secs"`
 	ImagePollInitialWaitSecs            float64       `json:"image_poll_initial_wait_secs"`
+	ImageTaskTimeoutSecs                float64       `json:"image_task_timeout_secs"`
 	ImageSettleSecs                     float64       `json:"image_settle_secs"`
 	ImageAccountPrecheckIntervalMinutes int           `json:"image_account_precheck_interval_minutes"`
 	ImageAccountPrecheckConcurrency     int           `json:"image_account_precheck_concurrency"`
@@ -109,9 +110,10 @@ func Default() Config {
 		ChatGPTBaseURL:                      "https://chatgpt.com",
 		UpstreamTransport:                   "standard",
 		ImageWebModelSlug:                   "gpt-5-5",
-		ImagePollTimeoutSecs:                90,
+		ImagePollTimeoutSecs:                60,
 		ImagePollIntervalSecs:               3,
 		ImagePollInitialWaitSecs:            0,
+		ImageTaskTimeoutSecs:                120,
 		ImageSettleSecs:                     2,
 		ImageAccountPrecheckIntervalMinutes: 10,
 		ImageAccountPrecheckConcurrency:     6,
@@ -123,7 +125,7 @@ func Default() Config {
 		SearchModel:                         "gpt-5-5",
 		SearchTimeoutSecs:                   300,
 		SearchPollIntervalSecs:              3,
-		RefreshAccountIntervalMinutes:       5,
+		RefreshAccountIntervalMinutes:       60,
 		RefreshAccountConcurrency:           8,
 		Notifications:                       Notifications{Bark: BarkNotification{ServerURL: "https://api.day.app", TitlePrefix: "IMAGE POOL", Group: "image-pool", Level: "active", TimeoutSecs: 10, MinIntervalSeconds: 60, NotifyFailedCalls: true, NotifyRegister: true, NotifyAutoRefill: true}},
 		ProxyRuntime:                        ProxyRuntime{Enabled: true, EgressMode: "direct", ResetSessionStatusCodes: []int{403}, Clearance: ClearanceRuntime{Enabled: false, Mode: "none", Browser: "chrome", TimeoutSec: 60, RefreshInterval: 3600}},
@@ -275,11 +277,20 @@ func (c Config) Normalize() Config {
 	if c.ImagePollTimeoutSecs <= 0 {
 		c.ImagePollTimeoutSecs = d.ImagePollTimeoutSecs
 	}
+	if c.ImagePollTimeoutSecs > 60 {
+		c.ImagePollTimeoutSecs = 60
+	}
 	if c.ImagePollIntervalSecs <= 0 {
 		c.ImagePollIntervalSecs = d.ImagePollIntervalSecs
 	}
 	if c.ImagePollInitialWaitSecs < 0 {
 		c.ImagePollInitialWaitSecs = 0
+	}
+	if c.ImageTaskTimeoutSecs <= 0 {
+		c.ImageTaskTimeoutSecs = d.ImageTaskTimeoutSecs
+	}
+	if c.ImageTaskTimeoutSecs > 300 {
+		c.ImageTaskTimeoutSecs = 300
 	}
 	if c.ImageSettleSecs < 0 {
 		c.ImageSettleSecs = 0

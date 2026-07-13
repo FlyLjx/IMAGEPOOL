@@ -141,6 +141,21 @@ func TestStabilityHealthEndpointIsPublicAndNoStore(t *testing.T) {
 	}
 }
 
+func TestErrorClassificationDoesNotTreatCanceledOrRejectedRequestsAsFailures(t *testing.T) {
+	if got := statusFromError(context.Canceled); got != statusClientClosedRequest {
+		t.Fatalf("canceled status=%d", got)
+	}
+	if got := statusFromError(openaiweb.ErrContentPolicy); got != http.StatusBadRequest {
+		t.Fatalf("policy status=%d", got)
+	}
+	if got := metricCallStatus(statusClientClosedRequest, "context canceled"); got != "canceled" {
+		t.Fatalf("canceled metric status=%q", got)
+	}
+	if got := metricCallStatus(http.StatusBadRequest, "content policy violation"); got != "rejected" {
+		t.Fatalf("rejected metric status=%q", got)
+	}
+}
+
 func TestSystemUpdateEndpointTriggersInternalUpdater(t *testing.T) {
 	triggered := make(chan struct{}, 1)
 	updaterServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
