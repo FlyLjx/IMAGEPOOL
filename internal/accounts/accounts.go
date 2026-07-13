@@ -55,6 +55,7 @@ type Account struct {
 	Quota             int               `json:"-"`
 	ImageQuotaUnknown bool              `json:"-"`
 	CreatedAt         int64             `json:"-"`
+	ImportedAt        int64             `json:"-"`
 	LastUsedAt        int64             `json:"-"`
 	LastError         string            `json:"-"`
 	ImageOK           int               `json:"-"`
@@ -105,6 +106,7 @@ func (a *Account) UnmarshalJSON(data []byte) error {
 	a.Quota = rawInt(raw, "quota")
 	a.ImageQuotaUnknown = rawBool(raw, "image_quota_unknown")
 	a.CreatedAt = rawUnix(raw, "created_at")
+	a.ImportedAt = rawUnix(raw, "imported_at")
 	a.LastUsedAt = rawUnix(raw, "last_used_at")
 	a.LastError = rawString(raw, "last_error", "last_refresh_error")
 	a.ImageOK = rawInt(raw, "success", "image_ok")
@@ -144,6 +146,9 @@ func (a Account) MarshalJSON() ([]byte, error) {
 	}
 	if a.CreatedAt > 0 {
 		out["created_at"] = timestampValue(out["created_at"], a.CreatedAt)
+	}
+	if a.ImportedAt > 0 {
+		out["imported_at"] = timestampValue(out["imported_at"], a.ImportedAt)
 	}
 	if a.LastUsedAt > 0 {
 		out["last_used_at"] = timestampValue(out["last_used_at"], a.LastUsedAt)
@@ -425,6 +430,7 @@ func (s *Store) Add(items []Account) error {
 func (s *Store) AddWithResult(items []Account) (added, skipped int, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	importedAt := s.now().Unix()
 	byToken := map[string]bool{}
 	for _, a := range s.accounts {
 		if a.AccessToken != "" {
@@ -443,8 +449,9 @@ func (s *Store) AddWithResult(items []Account) (added, skipped int, err error) {
 		}
 		item.loadedOrder = len(s.accounts)
 		if item.CreatedAt == 0 {
-			item.CreatedAt = s.now().Unix()
+			item.CreatedAt = importedAt
 		}
+		item.ImportedAt = importedAt
 		s.accounts = append(s.accounts, item)
 		byToken[item.AccessToken] = true
 		added++
@@ -838,6 +845,17 @@ func (s *Store) selectForImageLocked(exclude map[string]bool, skipOccupied bool)
 		return Account{}, false
 	}
 	sort.SliceStable(candidates, func(i, j int) bool {
+		leftImported := candidates[i].ImportedAt > 0
+		rightImported := candidates[j].ImportedAt > 0
+		if leftImported != rightImported {
+			return leftImported
+		}
+		if leftImported && candidates[i].ImportedAt != candidates[j].ImportedAt {
+			return candidates[i].ImportedAt > candidates[j].ImportedAt
+		}
+		if leftImported && candidates[i].LastUsedAt != candidates[j].LastUsedAt {
+			return candidates[i].LastUsedAt < candidates[j].LastUsedAt
+		}
 		if candidates[i].CreatedAt != candidates[j].CreatedAt {
 			return candidates[i].CreatedAt > candidates[j].CreatedAt
 		}

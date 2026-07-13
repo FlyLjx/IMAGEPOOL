@@ -25,6 +25,42 @@ func TestSelectNewestAccountFirst(t *testing.T) {
 	}
 }
 
+func TestSelectRecentlyImportedAccountsFirst(t *testing.T) {
+	store := NewStore([]Account{{Email: "legacy@example.com", AccessToken: "legacy", CreatedAt: 9999}}, "")
+	store.now = func() time.Time { return time.Unix(100, 0) }
+	if _, _, err := store.AddWithResult([]Account{{Email: "fresh@example.com", AccessToken: "fresh", CreatedAt: 1}}); err != nil {
+		t.Fatal(err)
+	}
+
+	fresh, found := store.Get("fresh")
+	if !found || fresh.ImportedAt != 100 || fresh.CreatedAt != 1 {
+		t.Fatalf("fresh=%#v found=%v", fresh, found)
+	}
+	selected, err := store.SelectForImage(nil)
+	if err != nil || selected.AccessToken != "fresh" {
+		t.Fatalf("selected=%#v err=%v", selected, err)
+	}
+}
+
+func TestSelectUnusedAccountsFirstWithinNewestImportBatch(t *testing.T) {
+	store := NewStore(nil, "")
+	store.now = func() time.Time { return time.Unix(100, 0) }
+	if _, _, err := store.AddWithResult([]Account{{AccessToken: "first"}, {AccessToken: "second"}}); err != nil {
+		t.Fatal(err)
+	}
+	first, err := store.SelectForImage(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkImageSuccess(first.AccessToken); err != nil {
+		t.Fatal(err)
+	}
+	second, err := store.SelectForImage(nil)
+	if err != nil || second.AccessToken == first.AccessToken {
+		t.Fatalf("first=%#v second=%#v err=%v", first, second, err)
+	}
+}
+
 func TestAcquireForImageWaitsForOccupiedAccount(t *testing.T) {
 	store := NewStore([]Account{{Email: "one@example.com", AccessToken: "one", CreatedAt: 1}}, "")
 	first, err := store.AcquireForImage(context.Background(), nil, nil)
