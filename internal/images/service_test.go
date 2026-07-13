@@ -169,26 +169,37 @@ func TestGenerateRemovesGeneric401Account(t *testing.T) {
 	}
 }
 
-func TestGenerateAuthenticationFailureRetriesAtMostOnce(t *testing.T) {
-	store := accounts.NewStore([]accounts.Account{
-		{Email: "old", AccessToken: "old", CreatedAt: 1},
-		{Email: "middle", AccessToken: "middle", CreatedAt: 2},
-		{Email: "new", AccessToken: "new", CreatedAt: 3},
-	}, "")
+func TestGenerateAuthenticationFailureRetriesAtMostTenTimes(t *testing.T) {
+	accountList := make([]accounts.Account, 0, 12)
+	revokedErrors := make([]error, 0, 11)
 	revoked := &openaiweb.UpstreamError{Path: "/backend-api/conversation/test", StatusCode: 401, Body: `{"error":{"code":"token_revoked"}}`}
-	backend := &fakeBackend{errs: []error{revoked, revoked}}
-	_, err := NewService(config.Default(), store, backend).Generate(context.Background(), Request{Prompt: "draw"})
-	if err == nil || backend.calls != 2 {
+	for index := 0; index < 12; index++ {
+		accountList = append(accountList, accounts.Account{Email: fmt.Sprintf("account-%02d", index), AccessToken: fmt.Sprintf("token-%02d", index), CreatedAt: int64(index + 1)})
+		if index < 11 {
+			revokedErrors = append(revokedErrors, revoked)
+		}
+	}
+	store := accounts.NewStore(accountList, "")
+	backend := &fakeBackend{errs: revokedErrors}
+	retryEvents := make([]openaiweb.ProgressEvent, 0, maxAuthenticationRetries)
+	_, err := NewService(config.Default(), store, backend).Generate(context.Background(), Request{Prompt: "draw", Progress: func(event openaiweb.ProgressEvent) {
+		if event.Progress == "retrying_account" {
+			retryEvents = append(retryEvents, event)
+		}
+	}})
+	if err == nil || backend.calls != 11 {
 		t.Fatalf("err=%v calls=%d", err, backend.calls)
 	}
-	if _, found := store.Get("new"); found {
-		t.Fatal("first revoked account was not removed")
+	if len(retryEvents) != maxAuthenticationRetries {
+		t.Fatalf("retry events=%d", len(retryEvents))
 	}
-	if _, found := store.Get("middle"); found {
-		t.Fatal("second revoked account was not removed")
+	lastEvent := retryEvents[len(retryEvents)-1]
+	if lastEvent.Message != "账号凭证失效，已删除账号并切换账号重试（10/10）" || lastEvent.Details["retry"] != 10 || lastEvent.Details["max_retries"] != 10 {
+		t.Fatalf("last retry event=%#v", lastEvent)
 	}
-	if _, found := store.Get("old"); !found {
-		t.Fatal("authentication failure retried more than once")
+	remaining := store.List()
+	if len(remaining) != 1 || remaining[0].Email != "account-00" {
+		t.Fatalf("expected only the untried account to remain: %#v", remaining)
 	}
 }
 

@@ -16,6 +16,8 @@ import (
 	"imagepool/internal/storage"
 )
 
+const maxAuthenticationRetries = 10
+
 type Service struct {
 	cfgMu   sync.RWMutex
 	cfg     config.Config
@@ -362,14 +364,14 @@ func (s *Service) generateOne(ctx context.Context, req Request) (openaiweb.Image
 			return openaiweb.ImageResult{Attempts: attempts}, err
 		}
 		if authenticationError {
-			if authenticationRetries >= 1 {
+			if authenticationRetries >= maxAuthenticationRetries {
 				return openaiweb.ImageResult{Attempts: attempts}, err
 			}
 			authenticationRetries++
 			if imageAttempts >= maxAttempts {
 				maxAttempts++
 			}
-			reportAuthenticationRetry(req, account, err)
+			reportAuthenticationRetry(req, account, err, authenticationRetries)
 			continue
 		}
 		if !openaiweb.IsRetryableImageError(err) {
@@ -413,17 +415,17 @@ func reportAccountWait(req Request, account accounts.Account) {
 	reportAccountProgress(req, "waiting_account", "暂无空闲账号，任务排队等待", account)
 }
 
-func reportAuthenticationRetry(req Request, account accounts.Account, err error) {
+func reportAuthenticationRetry(req Request, account accounts.Account, err error, retry int) {
 	if req.Progress == nil {
 		return
 	}
-	details := map[string]any{"retry": 1, "max_retries": 1, "error": err.Error()}
+	details := map[string]any{"retry": retry, "max_retries": maxAuthenticationRetries, "error": err.Error()}
 	if account.Email != "" {
 		details["account_email"] = account.Email
 	}
 	req.Progress(openaiweb.ProgressEvent{
 		Progress: "retrying_account",
-		Message:  "账号凭证失效，已删除账号并切换账号重试（1/1）",
+		Message:  fmt.Sprintf("账号凭证失效，已删除账号并切换账号重试（%d/%d）", retry, maxAuthenticationRetries),
 		Details:  details,
 	})
 }
