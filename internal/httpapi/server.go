@@ -60,6 +60,11 @@ type Server struct {
 	onConfigUpdated func(config.Config)
 }
 
+type stabilityResponse struct {
+	metrics.Stability
+	Runtime map[string]any `json:"runtime"`
+}
+
 func NewServer(cfg config.Config, accountStore *accounts.Store, imageService *images.Service, textService *texts.Service, searchService *searches.Service, storageService *storage.Service, taskManager *tasks.Manager, configUpdated ...func(config.Config)) *Server {
 	return newServer(cfg, accountStore, imageService, textService, searchService, storageService, taskManager, nil, registration.NewWorker(registration.WorkerOptions{}), configUpdated...)
 }
@@ -118,7 +123,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.Method == http.MethodGet && r.URL.Path == "/health/stability" {
 		w.Header().Set("Cache-Control", "no-store")
-		writeJSON(w, http.StatusOK, s.metrics.Stability(time.Minute))
+		summary := s.metrics.Summary(time.Hour)
+		runtime, _ := summary["runtime"].(map[string]any)
+		writeJSON(w, http.StatusOK, stabilityResponse{Stability: s.metrics.Stability(time.Minute), Runtime: runtime})
 		return
 	}
 	if r.Method == http.MethodGet && r.URL.Path == "/version" {

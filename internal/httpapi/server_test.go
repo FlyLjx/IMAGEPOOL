@@ -129,11 +129,14 @@ func TestStabilityHealthEndpointIsPublicAndNoStore(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer response.Body.Close()
-	var stability metrics.Stability
+	var stability struct {
+		metrics.Stability
+		Runtime map[string]any `json:"runtime"`
+	}
 	if err := json.NewDecoder(response.Body).Decode(&stability); err != nil {
 		t.Fatal(err)
 	}
-	if response.StatusCode != http.StatusOK || response.Header.Get("Cache-Control") != "no-store" || stability.WindowSeconds != 60 || stability.Total != 1 || stability.Status != "stable" {
+	if response.StatusCode != http.StatusOK || response.Header.Get("Cache-Control") != "no-store" || stability.WindowSeconds != 60 || stability.Total != 1 || stability.Status != "stable" || stability.Runtime["window_minutes"] != float64(60) {
 		t.Fatalf("status=%d cache=%q stability=%#v", response.StatusCode, response.Header.Get("Cache-Control"), stability)
 	}
 }
