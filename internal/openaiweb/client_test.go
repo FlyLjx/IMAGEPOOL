@@ -3,12 +3,15 @@ package openaiweb
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"imagepool/internal/accounts"
 	"imagepool/internal/config"
@@ -63,8 +66,8 @@ func TestGenerateImageReverseProtocol(t *testing.T) {
 	var startSeen atomic.Bool
 	var turnTraceID string
 	const expectedTurnstileToken = "dHVybnN0aWxlLXByb29m"
-	expectedPrepareStates := []string{"none", "sent", "success"}
-	expectedConduitHeaders := []string{"no-token", "conduit-1", "conduit-2"}
+	expectedPrepareStates := []string{"none"}
+	expectedConduitHeaders := []string{"no-token"}
 	var srv *httptest.Server
 	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -99,6 +102,9 @@ func TestGenerateImageReverseProtocol(t *testing.T) {
 			if r.Header.Get("OpenAI-Sentinel-Turnstile-Token") != expectedTurnstileToken {
 				t.Errorf("missing turnstile header")
 			}
+			if r.Header.Get("OAI-Client-Version") != "prod-de97061a1c9aff3931a7342defd6241031cd316a" || r.Header.Get("OAI-Client-Build-Number") != "8160987" {
+				t.Errorf("outdated client identity headers: version=%q build=%q", r.Header.Get("OAI-Client-Version"), r.Header.Get("OAI-Client-Build-Number"))
+			}
 			if got := r.Header.Get("X-Conduit-Token"); got != expectedConduitHeaders[prepareIndex] {
 				t.Errorf("prepare %d conduit header=%q", prepareIndex, got)
 			}
@@ -118,14 +124,13 @@ func TestGenerateImageReverseProtocol(t *testing.T) {
 			if len(hints) != 0 {
 				t.Errorf("bad hints: %#v", hints)
 			}
-			_, hasPartialQuery := body["partial_query"]
-			if hasPartialQuery != (prepareIndex > 0) {
-				t.Errorf("prepare %d partial_query presence=%t", prepareIndex, hasPartialQuery)
+			if _, hasPartialQuery := body["partial_query"]; hasPartialQuery {
+				t.Errorf("prepare %d unexpectedly included partial_query", prepareIndex)
 			}
 			json.NewEncoder(w).Encode(map[string]any{"conduit_token": fmt.Sprintf("conduit-%d", prepareIndex+1)})
 		case r.Method == http.MethodPost && r.URL.Path == "/backend-api/f/conversation":
 			startSeen.Store(true)
-			if r.Header.Get("X-Conduit-Token") != "conduit-3" || !strings.Contains(r.Header.Get("Accept"), "text/event-stream") {
+			if r.Header.Get("X-Conduit-Token") != "conduit-1" || !strings.Contains(r.Header.Get("Accept"), "text/event-stream") {
 				t.Errorf("bad start headers: %v", r.Header)
 			}
 			if r.Header.Get("X-Oai-Turn-Trace-Id") != turnTraceID || turnTraceID == "" {
@@ -142,7 +147,7 @@ func TestGenerateImageReverseProtocol(t *testing.T) {
 			}
 			var body map[string]any
 			json.NewDecoder(r.Body).Decode(&body)
-			if body["model"] != "auto" || body["client_prepare_state"] != "success" || body["thinking_effort"] != "standard" {
+			if body["model"] != "auto" || body["client_prepare_state"] != "sent" || body["thinking_effort"] != "standard" {
 				t.Errorf("bad start payload: %#v", body)
 			}
 			w.Header().Set("Content-Type", "text/event-stream")
@@ -170,11 +175,185 @@ func TestGenerateImageReverseProtocol(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if prepareCount.Load() != 3 || !startSeen.Load() {
+	if prepareCount.Load() != 1 || !startSeen.Load() {
 		t.Fatal("protocol requests were not seen")
 	}
 	if result.ConversationID != "conv-1" || len(result.URLs) != 1 || result.URLs[0] != srv.URL+"/image.png" {
 		t.Fatalf("bad result: %#v", result)
+	}
+}
+
+func TestGenerateImageUsesOneBudgetForStreamAndPolling(t *testing.T) {
+	pollStarted := make(chan struct{}, 1)
+	pollDone := make(chan struct{}, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			_, _ = w.Write([]byte("<html></html>"))
+		case "/backend-api/sentinel/chat-requirements/prepare":
+			_ = json.NewEncoder(w).Encode(map[string]any{"prepare_token": "prep", "proofofwork": map[string]any{"required": false}})
+		case "/backend-api/sentinel/chat-requirements/finalize":
+			_ = json.NewEncoder(w).Encode(map[string]any{"token": "sentinel"})
+		case "/backend-api/f/conversation/prepare":
+			_ = json.NewEncoder(w).Encode(map[string]any{"conduit_token": "conduit"})
+		case "/backend-api/f/conversation":
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte("data: {\"type\":\"resume_conversation_token\",\"token\":\"resume-token\",\"conversation_id\":\"conv-1\"}\n\ndata: [DONE]\n\n"))
+		case "/backend-api/conversation/conv-1":
+			select {
+			case pollStarted <- struct{}{}:
+			default:
+			}
+			<-r.Context().Done()
+			select {
+			case pollDone <- struct{}{}:
+			default:
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	cfg := config.Default()
+	cfg.ChatGPTBaseURL = srv.URL
+	client := NewClient(cfg, WithHTTPClient(srv.Client()))
+	client.pollTimeout = 40 * time.Millisecond
+	started := time.Now()
+	_, err := client.GenerateImage(context.Background(), accounts.Account{AccessToken: "token"}, ImageRequest{Prompt: "draw"})
+	if !errors.Is(err, ErrPollTimeout) {
+		t.Fatalf("err=%v", err)
+	}
+	if elapsed := time.Since(started); elapsed > 250*time.Millisecond {
+		t.Fatalf("generation exceeded its shared budget for %s", elapsed)
+	}
+	select {
+	case <-pollStarted:
+	case <-time.After(time.Second):
+		t.Fatal("conversation poll did not start")
+	}
+	select {
+	case <-pollDone:
+	case <-time.After(time.Second):
+		t.Fatal("conversation poll context was not canceled")
+	}
+}
+
+func TestGenerateImageBoundsPreparationBeforeSubmittingConversation(t *testing.T) {
+	bootstrapCanceled := make(chan struct{}, 1)
+	var starts atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			select {
+			case <-r.Context().Done():
+				select {
+				case bootstrapCanceled <- struct{}{}:
+				default:
+				}
+			case <-time.After(time.Second):
+			}
+		case "/backend-api/f/conversation":
+			starts.Add(1)
+			http.Error(w, "should not submit after preparation timeout", http.StatusInternalServerError)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	cfg := config.Default()
+	cfg.ChatGPTBaseURL = srv.URL
+	client := NewClient(cfg, WithHTTPClient(srv.Client()))
+	client.imagePreparationTimeout = 35 * time.Millisecond
+	client.pollTimeout = 80 * time.Millisecond
+	started := time.Now()
+	_, err := client.GenerateImage(context.Background(), accounts.Account{AccessToken: "token"}, ImageRequest{Prompt: "draw"})
+	if !errors.Is(err, ErrImagePreparationTimeout) {
+		t.Fatalf("err=%v", err)
+	}
+	if elapsed := time.Since(started); elapsed > 250*time.Millisecond {
+		t.Fatalf("preparation exceeded its bounded budget: %s", elapsed)
+	}
+	if starts.Load() != 0 {
+		t.Fatalf("submitted %d conversations after preparation timeout", starts.Load())
+	}
+	select {
+	case <-bootstrapCanceled:
+	case <-time.After(time.Second):
+		t.Fatal("bootstrap request was not canceled")
+	}
+}
+
+func TestImagePreparationErrorPreservesTurnstileVMCapacity(t *testing.T) {
+	client := NewClient(config.Default())
+	capacity := fmt.Errorf("%w: %w", ErrTurnstileVMCapacity, context.DeadlineExceeded)
+	err := client.imagePreparationError(context.Background(), capacity)
+	if !errors.Is(err, ErrTurnstileVMCapacity) {
+		t.Fatalf("capacity sentinel was lost: %v", err)
+	}
+	if errors.Is(err, ErrImagePreparationTimeout) {
+		t.Fatalf("capacity congestion was relabeled as account preparation timeout: %v", err)
+	}
+}
+
+func TestGenerateImagePreservesFullGenerationBudgetAfterPreparation(t *testing.T) {
+	generationStarted := make(chan time.Time, 1)
+	generationCanceled := make(chan time.Time, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			time.Sleep(20 * time.Millisecond)
+			_, _ = w.Write([]byte("<html></html>"))
+		case "/backend-api/sentinel/chat-requirements/prepare":
+			_ = json.NewEncoder(w).Encode(map[string]any{"prepare_token": "prep", "proofofwork": map[string]any{"required": false}})
+		case "/backend-api/sentinel/chat-requirements/finalize":
+			_ = json.NewEncoder(w).Encode(map[string]any{"token": "sentinel"})
+		case "/backend-api/f/conversation/prepare":
+			_ = json.NewEncoder(w).Encode(map[string]any{"conduit_token": "conduit"})
+		case "/backend-api/f/conversation":
+			w.Header().Set("Content-Type", "text/event-stream")
+			if flusher, ok := w.(http.Flusher); ok {
+				flusher.Flush()
+			}
+			select {
+			case generationStarted <- time.Now():
+			default:
+			}
+			<-r.Context().Done()
+			select {
+			case generationCanceled <- time.Now():
+			default:
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	cfg := config.Default()
+	cfg.ChatGPTBaseURL = srv.URL
+	client := NewClient(cfg, WithHTTPClient(srv.Client()))
+	client.imagePreparationTimeout = 45 * time.Millisecond
+	client.pollTimeout = 75 * time.Millisecond
+	client.imageStreamIdleTimeout = time.Second
+	_, err := client.GenerateImage(context.Background(), accounts.Account{AccessToken: "token"}, ImageRequest{Prompt: "draw"})
+	if !errors.Is(err, ErrPollTimeout) {
+		t.Fatalf("err=%v", err)
+	}
+	var began time.Time
+	select {
+	case began = <-generationStarted:
+	case <-time.After(time.Second):
+		t.Fatal("generation request did not start")
+	}
+	select {
+	case canceled := <-generationCanceled:
+		if elapsed := canceled.Sub(began); elapsed < 55*time.Millisecond || elapsed > 180*time.Millisecond {
+			t.Fatalf("generation window=%s, want approximately 75ms", elapsed)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("generation stream was not canceled")
 	}
 }
 
@@ -186,12 +365,8 @@ func TestPrepareImageConversationIncludesReferenceMetadata(t *testing.T) {
 			return
 		}
 		prepareCount++
-		expectedConduit := "no-token"
-		if prepareCount == 3 {
-			expectedConduit = "conduit-2"
-		}
-		if got := r.Header.Get("X-Conduit-Token"); got != expectedConduit {
-			t.Errorf("prepare %d conduit header=%q want=%q", prepareCount, got, expectedConduit)
+		if got := r.Header.Get("X-Conduit-Token"); got != "no-token" {
+			t.Errorf("prepare %d conduit header=%q want=%q", prepareCount, got, "no-token")
 		}
 		var body map[string]any
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -203,19 +378,12 @@ func TestPrepareImageConversationIncludesReferenceMetadata(t *testing.T) {
 			t.Errorf("prepare %d attachment_mime_types=%#v", prepareCount, mimeTypes)
 		}
 		if body["client_prepare_state"] != "none" {
-			partialQuery, _ := body["partial_query"].(map[string]any)
-			content, _ := partialQuery["content"].(map[string]any)
-			parts, _ := content["parts"].([]any)
-			firstPart, _ := parts[0].(map[string]any)
-			if content["content_type"] != "multimodal_text" || len(parts) != 2 || firstPart["asset_pointer"] != "file-service://file-reference" || parts[1] != "edit it" {
-				t.Errorf("prepare %d partial query=%#v", prepareCount, partialQuery)
-			}
+			t.Errorf("prepare state=%#v", body["client_prepare_state"])
 		}
-		conduit := ""
-		if prepareCount > 1 {
-			conduit = fmt.Sprintf("conduit-%d", prepareCount)
+		if _, hasPartialQuery := body["partial_query"]; hasPartialQuery {
+			t.Errorf("prepare unexpectedly included partial_query: %#v", body)
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"conduit_token": conduit})
+		_ = json.NewEncoder(w).Encode(map[string]any{"conduit_token": "conduit-1"})
 	}))
 	defer srv.Close()
 
@@ -227,7 +395,7 @@ func TestPrepareImageConversationIncludesReferenceMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if prepareCount != 3 || conduit != "conduit-3" || traceID == "" || parentMessageID == "" {
+	if prepareCount != 1 || conduit != "conduit-1" || traceID == "" || parentMessageID == "" {
 		t.Fatalf("prepare count=%d conduit=%q trace=%q parent=%q", prepareCount, conduit, traceID, parentMessageID)
 	}
 }
@@ -306,6 +474,23 @@ func TestDownloadImageForSameUpstreamUsesAccountHeaders(t *testing.T) {
 	data, err := client.DownloadImageFor(context.Background(), accounts.Account{AccessToken: "token"}, srv.URL+"/image.png")
 	if err != nil || string(data) != "image-data" {
 		t.Fatalf("data=%q err=%v", data, err)
+	}
+}
+
+func TestDownloadImageForSameUpstreamPreservesAuthenticationFailure(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer token" {
+			t.Errorf("authorization=%q", r.Header.Get("Authorization"))
+		}
+		http.Error(w, `{"error":{"code":"token_revoked"}}`, http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+	cfg := config.Default()
+	cfg.ChatGPTBaseURL = srv.URL
+	_, err := NewClient(cfg, WithHTTPClient(srv.Client())).DownloadImageFor(context.Background(), accounts.Account{AccessToken: "token"}, srv.URL+"/image.png")
+	var upstream *UpstreamError
+	if !errors.As(err, &upstream) || upstream.StatusCode != http.StatusUnauthorized || !IsAuthenticationError(err) {
+		t.Fatalf("err=%#v", err)
 	}
 }
 
@@ -500,5 +685,126 @@ func TestAccountProxyOverridesRuntimeClient(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusNoContent || hits.Load() != 1 {
 		t.Fatalf("status=%d proxyHits=%d", resp.StatusCode, hits.Load())
+	}
+}
+
+func TestBootstrapResourcesCacheReusesAndExpiresPerAccount(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/" {
+			http.NotFound(w, r)
+			return
+		}
+		build := hits.Add(1)
+		_, _ = fmt.Fprintf(w, `<html data-build="build-%d"><script src="/assets/%d.js"></script></html>`, build, build)
+	}))
+	defer srv.Close()
+
+	cfg := config.Default()
+	cfg.ChatGPTBaseURL = srv.URL
+	client := NewClient(cfg, WithHTTPClient(srv.Client()))
+	clock := time.Date(2026, time.July, 14, 12, 0, 0, 0, time.UTC)
+	client.now = func() time.Time { return clock }
+	account := accounts.Account{AccessToken: "account-a"}
+
+	firstScripts, firstBuild, err := client.bootstrapWithResources(context.Background(), account)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstScripts[0] = "mutated-by-caller"
+	secondScripts, secondBuild, err := client.bootstrapWithResources(context.Background(), account)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hits.Load() != 1 || firstBuild != "build-1" || secondBuild != "build-1" || len(secondScripts) != 1 || secondScripts[0] != "/assets/1.js" {
+		t.Fatalf("hits=%d first=%#v/%q second=%#v/%q", hits.Load(), firstScripts, firstBuild, secondScripts, secondBuild)
+	}
+
+	if _, _, err := client.bootstrapWithResources(context.Background(), accounts.Account{AccessToken: "account-b"}); err != nil {
+		t.Fatal(err)
+	}
+	if hits.Load() != 2 {
+		t.Fatalf("different account reused cache: hits=%d", hits.Load())
+	}
+	if bootstrapResourcesKey(accounts.Account{AccessToken: "account-a", Proxy: "http://proxy-one"}) == bootstrapResourcesKey(accounts.Account{AccessToken: "account-a", Proxy: "http://proxy-two"}) {
+		t.Fatal("bootstrap cache key does not distinguish account proxies")
+	}
+
+	clock = clock.Add(bootstrapResourcesTTL)
+	if _, build, err := client.bootstrapWithResources(context.Background(), account); err != nil || build != "build-3" {
+		t.Fatalf("expired cache result build=%q err=%v", build, err)
+	}
+	if hits.Load() != 3 {
+		t.Fatalf("expired cache did not refresh: hits=%d", hits.Load())
+	}
+}
+
+func TestBootstrapResourcesCacheDoesNotCacheFailures(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if hits.Add(1) == 1 {
+			http.Error(w, "temporary bootstrap failure", http.StatusBadGateway)
+			return
+		}
+		_, _ = w.Write([]byte(`<html data-build="build"><script src="/assets/app.js"></script></html>`))
+	}))
+	defer srv.Close()
+
+	cfg := config.Default()
+	cfg.ChatGPTBaseURL = srv.URL
+	client := NewClient(cfg, WithHTTPClient(srv.Client()))
+	account := accounts.Account{AccessToken: "account"}
+	if _, _, err := client.bootstrapWithResources(context.Background(), account); err == nil {
+		t.Fatal("expected initial bootstrap failure")
+	}
+	if _, _, err := client.bootstrapWithResources(context.Background(), account); err != nil {
+		t.Fatal(err)
+	}
+	if hits.Load() != 2 {
+		t.Fatalf("failed bootstrap was cached: hits=%d", hits.Load())
+	}
+}
+
+func TestBootstrapResourcesCacheCoalescesConcurrentMisses(t *testing.T) {
+	var hits atomic.Int32
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var enteredOnce sync.Once
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		enteredOnce.Do(func() { close(entered) })
+		<-release
+		_, _ = w.Write([]byte(`<html data-build="build"><script src="/assets/app.js"></script></html>`))
+	}))
+	defer srv.Close()
+
+	cfg := config.Default()
+	cfg.ChatGPTBaseURL = srv.URL
+	client := NewClient(cfg, WithHTTPClient(srv.Client()))
+	const workers = 12
+	start := make(chan struct{})
+	errs := make(chan error, workers)
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			_, _, err := client.bootstrapWithResources(context.Background(), accounts.Account{AccessToken: "account"})
+			errs <- err
+		}()
+	}
+	close(start)
+	<-entered
+	close(release)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if hits.Load() != 1 {
+		t.Fatalf("concurrent bootstrap requests=%d want 1", hits.Load())
 	}
 }

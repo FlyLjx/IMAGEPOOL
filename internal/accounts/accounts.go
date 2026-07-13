@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -32,6 +32,24 @@ const (
 	tokenRecoveryAttemptsKey  = "token_recovery_attempts"
 	tokenRecoveryNextAtKey    = "token_recovery_next_at"
 	maxCredentialRecoveryLogs = 500
+	accountPersistDebounce    = 100 * time.Millisecond
+)
+
+// ImageCooldownReason identifies a temporary dispatch backoff caused by an
+// upstream image-generation failure. The account remains usable once the
+// cooldown expires.
+type ImageCooldownReason string
+
+const (
+	ImageCooldownRateLimited          ImageCooldownReason = "rate_limited"
+	ImageCooldownUpstreamFailure      ImageCooldownReason = "upstream_failure"
+	ImageCooldownGenerationTerminated ImageCooldownReason = "generation_terminated"
+
+	imageCooldownUntilKey     = "image_cooldown_until"
+	imageCooldownReasonKey    = "image_cooldown_reason"
+	imageCooldownFailuresKey  = "image_cooldown_failures"
+	imageCooldownLastErrorKey = "image_cooldown_last_error"
+	imageCooldownLastAtKey    = "image_cooldown_last_at"
 )
 
 const (
@@ -260,6 +278,7 @@ func maxFloat(a, b float64) float64 {
 
 type Store struct {
 	mu                         sync.RWMutex
+	persist                    sync.Mutex
 	path                       string
 	state                      persistence.Store
 	accounts                   []Account
@@ -267,7 +286,19 @@ type Store struct {
 	credentialRecoverySequence uint64
 	imageLeases                map[string]struct{}
 	imageLeaseChanged          chan struct{}
+	imageWaiters               []*imageWaiter
 	now                        func() time.Time
+	dirty                      bool
+	revision                   uint64
+	wake                       chan struct{}
+	stop                       chan struct{}
+	done                       chan struct{}
+	close                      sync.Once
+}
+
+type imageWaiter struct {
+	ready    chan struct{}
+	notified bool
 }
 
 type fileShape struct {
@@ -281,8 +312,8 @@ func NewStore(items []Account, path string) *Store {
 
 func newStore(items []Account, recoveryLogs []CredentialRecoveryLog, path string, state persistence.Store) *Store {
 	copied := make([]Account, len(items))
-	copy(copied, items)
 	for i := range copied {
+		copied[i] = cloneAccount(items[i])
 		copied[i].loadedOrder = i
 		if copied[i].Extra == nil {
 			copied[i].Extra = map[string]any{}
@@ -292,8 +323,8 @@ func newStore(items []Account, recoveryLogs []CredentialRecoveryLog, path string
 	if len(logs) > maxCredentialRecoveryLogs {
 		logs = append([]CredentialRecoveryLog(nil), logs[len(logs)-maxCredentialRecoveryLogs:]...)
 	}
-	return &Store{
-		path:                   path,
+	s := &Store{
+		path:                   strings.TrimSpace(path),
 		state:                  state,
 		accounts:               copied,
 		credentialRecoveryLogs: logs,
@@ -301,6 +332,13 @@ func newStore(items []Account, recoveryLogs []CredentialRecoveryLog, path string
 		imageLeaseChanged:      make(chan struct{}),
 		now:                    time.Now,
 	}
+	if s.path != "" || s.state != nil {
+		s.wake = make(chan struct{}, 1)
+		s.stop = make(chan struct{})
+		s.done = make(chan struct{})
+		go s.persistenceLoop()
+	}
+	return s
 }
 
 func LoadStore(path string) (*Store, error) {
@@ -322,12 +360,11 @@ func LoadStore(path string) (*Store, error) {
 }
 
 func LoadStoreFromPersistence(state persistence.Store) (*Store, error) {
-	store := newStore(nil, nil, "", state)
 	var shaped fileShape
 	err := state.Load(context.Background(), "accounts", &shaped)
 	if err != nil {
 		if errors.Is(err, persistence.ErrNotFound) {
-			return store, nil
+			return newStore(nil, nil, "", state), nil
 		}
 		return nil, fmt.Errorf("load accounts from PostgreSQL: %w", err)
 	}
@@ -354,7 +391,9 @@ func (s *Store) List() []Account {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	out := make([]Account, len(s.accounts))
-	copy(out, s.accounts)
+	for index := range s.accounts {
+		out[index] = cloneAccount(s.accounts[index])
+	}
 	return out
 }
 
@@ -429,7 +468,6 @@ func (s *Store) Add(items []Account) error {
 
 func (s *Store) AddWithResult(items []Account) (added, skipped int, err error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	importedAt := s.now().Unix()
 	byToken := map[string]bool{}
 	for _, a := range s.accounts {
@@ -447,6 +485,7 @@ func (s *Store) AddWithResult(items []Account) (added, skipped int, err error) {
 		if item.Extra == nil {
 			item.Extra = map[string]any{}
 		}
+		item = cloneAccount(item)
 		item.loadedOrder = len(s.accounts)
 		if item.CreatedAt == 0 {
 			item.CreatedAt = importedAt
@@ -459,7 +498,14 @@ func (s *Store) AddWithResult(items []Account) (added, skipped int, err error) {
 	if added > 0 {
 		s.signalImageAvailabilityLocked()
 	}
-	err = s.saveLocked()
+	if added == 0 {
+		s.mu.Unlock()
+		return added, skipped, nil
+	}
+	s.markDirtyLocked()
+	snapshot, revision := s.snapshotLocked()
+	s.mu.Unlock()
+	err = s.persistSnapshot(snapshot, revision)
 	return added, skipped, err
 }
 
@@ -474,7 +520,6 @@ func (s *Store) Delete(tokens []string) (int, error) {
 		return 0, nil
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	next := s.accounts[:0]
 	removed := 0
 	for _, account := range s.accounts {
@@ -487,10 +532,14 @@ func (s *Store) Delete(tokens []string) (int, error) {
 	}
 	s.accounts = next
 	if removed == 0 {
+		s.mu.Unlock()
 		return 0, nil
 	}
 	s.signalImageAvailabilityLocked()
-	return removed, s.saveLocked()
+	s.markDirtyLocked()
+	snapshot, revision := s.snapshotLocked()
+	s.mu.Unlock()
+	return removed, s.persistSnapshot(snapshot, revision)
 }
 
 func (s *Store) Update(token string, updates map[string]any) (Account, bool, error) {
@@ -499,18 +548,22 @@ func (s *Store) Update(token string, updates map[string]any) (Account, bool, err
 		return Account{}, false, nil
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	for i := range s.accounts {
 		if s.accounts[i].AccessToken != token {
 			continue
 		}
 		applyUpdate(&s.accounts[i], updates)
 		s.signalImageAvailabilityLocked()
-		if err := s.saveLocked(); err != nil {
+		result := cloneAccount(s.accounts[i])
+		s.markDirtyLocked()
+		snapshot, revision := s.snapshotLocked()
+		s.mu.Unlock()
+		if err := s.persistSnapshot(snapshot, revision); err != nil {
 			return Account{}, false, err
 		}
-		return s.accounts[i], true, nil
+		return result, true, nil
 	}
+	s.mu.Unlock()
 	return Account{}, false, nil
 }
 
@@ -542,7 +595,7 @@ func (s *Store) Get(token string) (Account, bool) {
 	defer s.mu.RUnlock()
 	for _, account := range s.accounts {
 		if account.AccessToken == token {
-			return account, true
+			return cloneAccount(account), true
 		}
 	}
 	return Account{}, false
@@ -564,11 +617,11 @@ func (s *Store) Tokens() []string {
 // upstream requests do not rotate device or session IDs on every call.
 func (s *Store) EnsureBrowserIdentities() (int, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	updated := 0
 	for index := range s.accounts {
 		changed, err := ensureBrowserIdentity(&s.accounts[index])
 		if err != nil {
+			s.mu.Unlock()
 			return updated, err
 		}
 		if changed {
@@ -576,9 +629,13 @@ func (s *Store) EnsureBrowserIdentities() (int, error) {
 		}
 	}
 	if updated == 0 {
+		s.mu.Unlock()
 		return 0, nil
 	}
-	return updated, s.saveLocked()
+	s.markDirtyLocked()
+	snapshot, revision := s.snapshotLocked()
+	s.mu.Unlock()
+	return updated, s.persistSnapshot(snapshot, revision)
 }
 
 func (s *Store) EnsureBrowserIdentity(token string) (Account, bool, error) {
@@ -587,7 +644,6 @@ func (s *Store) EnsureBrowserIdentity(token string) (Account, bool, error) {
 		return Account{}, false, nil
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	for index := range s.accounts {
 		account := &s.accounts[index]
 		if account.AccessToken != token {
@@ -595,15 +651,24 @@ func (s *Store) EnsureBrowserIdentity(token string) (Account, bool, error) {
 		}
 		changed, err := ensureBrowserIdentity(account)
 		if err != nil {
+			s.mu.Unlock()
 			return Account{}, false, err
 		}
 		if changed {
-			if err := s.saveLocked(); err != nil {
+			result := cloneAccount(*account)
+			s.markDirtyLocked()
+			snapshot, revision := s.snapshotLocked()
+			s.mu.Unlock()
+			if err := s.persistSnapshot(snapshot, revision); err != nil {
 				return Account{}, false, err
 			}
+			return result, true, nil
 		}
-		return *account, true, nil
+		result := cloneAccount(*account)
+		s.mu.Unlock()
+		return result, true, nil
 	}
+	s.mu.Unlock()
 	return Account{}, false, nil
 }
 
@@ -645,7 +710,6 @@ func newBrowserUUID() (string, error) {
 func (s *Store) RecordRefresh(token string, check AccountCheckResult, refreshErr error) (Account, bool, error) {
 	token = strings.TrimSpace(token)
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	for i := range s.accounts {
 		account := &s.accounts[i]
 		if account.AccessToken != token {
@@ -670,11 +734,16 @@ func (s *Store) RecordRefresh(token string, check AccountCheckResult, refreshErr
 			applySuccessfulAccountRefresh(account, check, s.now())
 		}
 		s.signalImageAvailabilityLocked()
-		if err := s.saveLocked(); err != nil {
+		result := cloneAccount(*account)
+		s.markDirtyLocked()
+		snapshot, revision := s.snapshotLocked()
+		s.mu.Unlock()
+		if err := s.persistSnapshot(snapshot, revision); err != nil {
 			return Account{}, false, err
 		}
-		return *account, true, nil
+		return result, true, nil
 	}
+	s.mu.Unlock()
 	return Account{}, false, nil
 }
 
@@ -714,7 +783,7 @@ func applySuccessfulAccountRefresh(account *Account, check AccountCheckResult, n
 	if check.Models != nil {
 		account.Extra["available_models"] = append([]string(nil), check.Models...)
 	}
-	account.Extra["limits_progress"] = check.LimitsProgress
+	account.Extra["limits_progress"] = cloneExtraValue(check.LimitsProgress)
 	account.Extra["restore_at"] = check.RestoreAt
 	account.Extra["default_model_slug"] = check.DefaultModelSlug
 }
@@ -726,38 +795,75 @@ func (s *Store) SelectForImage(exclude map[string]bool) (Account, error) {
 	if !ok {
 		return Account{}, ErrNoAvailableAccount
 	}
-	return account, nil
+	return cloneAccount(account), nil
 }
 
 // AcquireForImage reserves one idle account for an image request. If all
 // otherwise-eligible accounts are occupied, it waits for a release so callers
 // can remain in the task queue without starting a second request on a token.
 func (s *Store) AcquireForImage(ctx context.Context, exclude map[string]bool, onWait func()) (Account, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	var waiter *imageWaiter
 	waited := false
 	for {
+		if err := ctx.Err(); err != nil {
+			s.removeImageWaiter(waiter)
+			return Account{}, err
+		}
 		s.mu.Lock()
-		account, available := s.selectForImageLocked(exclude, true)
-		if available {
-			s.imageLeases[account.AccessToken] = struct{}{}
-			s.mu.Unlock()
-			return account, nil
+		if waiter == nil && len(s.imageWaiters) > 0 {
+			waiter = s.enqueueImageWaiterLocked()
 		}
-		_, eligible := s.selectForImageLocked(exclude, false)
-		if !eligible {
+		if waiter == nil || s.imageWaiters[0] == waiter {
+			account, available := s.selectForImageLocked(exclude, true)
+			if available {
+				if waiter != nil {
+					s.removeImageWaiterLocked(waiter)
+				}
+				s.imageLeases[account.AccessToken] = struct{}{}
+				s.mu.Unlock()
+				return cloneAccount(account), nil
+			}
+			_, eligible := s.selectForImageLocked(exclude, false)
+			cooldownUntil, cooling := s.earliestImageCooldownLocked(exclude)
+			if !eligible && !cooling {
+				if waiter != nil {
+					s.removeImageWaiterLocked(waiter)
+				}
+				s.mu.Unlock()
+				return Account{}, ErrNoAvailableAccount
+			}
+			if waiter == nil {
+				waiter = s.enqueueImageWaiterLocked()
+			}
+			changed := s.prepareImageWaiterWaitLocked(waiter)
 			s.mu.Unlock()
-			return Account{}, ErrNoAvailableAccount
+
+			if !waited && onWait != nil {
+				onWait()
+				waited = true
+			}
+			if err := waitForImageAvailability(ctx, changed, cooldownUntil); err != nil {
+				s.removeImageWaiter(waiter)
+				return Account{}, err
+			}
+			continue
 		}
-		changed := s.imageLeaseChanged
+		if waiter == nil {
+			waiter = s.enqueueImageWaiterLocked()
+		}
+		changed := s.prepareImageWaiterWaitLocked(waiter)
 		s.mu.Unlock()
 
 		if !waited && onWait != nil {
 			onWait()
 			waited = true
 		}
-		select {
-		case <-changed:
-		case <-ctx.Done():
-			return Account{}, ctx.Err()
+		if err := waitForImageAvailability(ctx, changed, time.Time{}); err != nil {
+			s.removeImageWaiter(waiter)
+			return Account{}, err
 		}
 	}
 }
@@ -786,14 +892,14 @@ func (s *Store) AcquireAccountForImage(ctx context.Context, token string, onWait
 			s.mu.Unlock()
 			return Account{}, ErrAccountNotFound
 		}
-		if !usable(account) {
+		if !usable(account) || isImageCooling(account, s.now()) {
 			s.mu.Unlock()
 			return Account{}, ErrNoAvailableAccount
 		}
 		if _, occupied := s.imageLeases[token]; !occupied {
 			s.imageLeases[token] = struct{}{}
 			s.mu.Unlock()
-			return account, nil
+			return cloneAccount(account), nil
 		}
 		changed := s.imageLeaseChanged
 		s.mu.Unlock()
@@ -825,10 +931,70 @@ func (s *Store) ReleaseImage(token string) {
 	s.signalImageAvailabilityLocked()
 }
 
+func (s *Store) enqueueImageWaiterLocked() *imageWaiter {
+	waiter := &imageWaiter{ready: make(chan struct{})}
+	s.imageWaiters = append(s.imageWaiters, waiter)
+	return waiter
+}
+
+func (s *Store) prepareImageWaiterWaitLocked(waiter *imageWaiter) <-chan struct{} {
+	if waiter == nil {
+		return nil
+	}
+	waiter.ready = make(chan struct{})
+	waiter.notified = false
+	return waiter.ready
+}
+
+func (s *Store) removeImageWaiter(waiter *imageWaiter) {
+	if waiter == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.removeImageWaiterLocked(waiter)
+}
+
+func (s *Store) removeImageWaiterLocked(waiter *imageWaiter) {
+	if waiter == nil {
+		return
+	}
+	for index, candidate := range s.imageWaiters {
+		if candidate != waiter {
+			continue
+		}
+		wasHead := index == 0
+		copy(s.imageWaiters[index:], s.imageWaiters[index+1:])
+		s.imageWaiters[len(s.imageWaiters)-1] = nil
+		s.imageWaiters = s.imageWaiters[:len(s.imageWaiters)-1]
+		if wasHead {
+			s.wakeImageWaiterLocked()
+		}
+		return
+	}
+}
+
+func (s *Store) wakeImageWaiterLocked() {
+	if len(s.imageWaiters) == 0 {
+		return
+	}
+	waiter := s.imageWaiters[0]
+	if waiter == nil || waiter.notified {
+		return
+	}
+	close(waiter.ready)
+	waiter.notified = true
+}
+
 func (s *Store) selectForImageLocked(exclude map[string]bool, skipOccupied bool) (Account, bool) {
-	candidates := make([]Account, 0, len(s.accounts))
+	now := s.now()
+	var selected Account
+	found := false
 	for _, a := range s.accounts {
 		if !usable(a) {
+			continue
+		}
+		if isImageCooling(a, now) {
 			continue
 		}
 		if exclude != nil && exclude[a.AccessToken] {
@@ -839,32 +1005,85 @@ func (s *Store) selectForImageLocked(exclude map[string]bool, skipOccupied bool)
 				continue
 			}
 		}
-		candidates = append(candidates, a)
+		if !found || imageAccountPreferred(a, selected) {
+			selected = a
+			found = true
+		}
 	}
-	if len(candidates) == 0 {
-		return Account{}, false
+	return selected, found
+}
+
+// imageAccountPreferred retains the previous stable-sort ordering while
+// allowing dispatch to find the best account in a single pass under s.mu.
+func imageAccountPreferred(left, right Account) bool {
+	leftImported := left.ImportedAt > 0
+	rightImported := right.ImportedAt > 0
+	if leftImported != rightImported {
+		return leftImported
 	}
-	sort.SliceStable(candidates, func(i, j int) bool {
-		leftImported := candidates[i].ImportedAt > 0
-		rightImported := candidates[j].ImportedAt > 0
-		if leftImported != rightImported {
-			return leftImported
+	if leftImported && left.ImportedAt != right.ImportedAt {
+		return left.ImportedAt > right.ImportedAt
+	}
+	if leftImported && left.LastUsedAt != right.LastUsedAt {
+		return left.LastUsedAt < right.LastUsedAt
+	}
+	if left.CreatedAt != right.CreatedAt {
+		return left.CreatedAt > right.CreatedAt
+	}
+	if left.loadedOrder != right.loadedOrder {
+		return left.loadedOrder > right.loadedOrder
+	}
+	return left.Email > right.Email
+}
+
+func (s *Store) earliestImageCooldownLocked(exclude map[string]bool) (time.Time, bool) {
+	now := s.now()
+	var earliest time.Time
+	for _, account := range s.accounts {
+		if !usable(account) || (exclude != nil && exclude[account.AccessToken]) {
+			continue
 		}
-		if leftImported && candidates[i].ImportedAt != candidates[j].ImportedAt {
-			return candidates[i].ImportedAt > candidates[j].ImportedAt
+		until := imageCooldownUntil(account)
+		if !until.After(now) {
+			continue
 		}
-		if leftImported && candidates[i].LastUsedAt != candidates[j].LastUsedAt {
-			return candidates[i].LastUsedAt < candidates[j].LastUsedAt
+		if earliest.IsZero() || until.Before(earliest) {
+			earliest = until
 		}
-		if candidates[i].CreatedAt != candidates[j].CreatedAt {
-			return candidates[i].CreatedAt > candidates[j].CreatedAt
+	}
+	return earliest, !earliest.IsZero()
+}
+
+func waitForImageAvailability(ctx context.Context, changed <-chan struct{}, cooldownUntil time.Time) error {
+	if cooldownUntil.IsZero() {
+		select {
+		case <-changed:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
 		}
-		if candidates[i].loadedOrder != candidates[j].loadedOrder {
-			return candidates[i].loadedOrder > candidates[j].loadedOrder
+	}
+	delay := time.Until(cooldownUntil)
+	if delay <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(delay)
+	defer func() {
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
 		}
-		return candidates[i].Email > candidates[j].Email
-	})
-	return candidates[0], true
+	}()
+	select {
+	case <-changed:
+		return nil
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (s *Store) signalImageAvailabilityLocked() {
@@ -872,6 +1091,7 @@ func (s *Store) signalImageAvailabilityLocked() {
 		close(s.imageLeaseChanged)
 	}
 	s.imageLeaseChanged = make(chan struct{})
+	s.wakeImageWaiterLocked()
 }
 
 func usable(a Account) bool {
@@ -937,6 +1157,7 @@ func recordSuccess(account *Account, now time.Time) {
 	if account.Extra == nil {
 		account.Extra = map[string]any{}
 	}
+	clearImageCooldown(account.Extra)
 	account.Extra["last_used_at"] = now.In(time.Local).Format(time.RFC3339)
 }
 
@@ -1015,6 +1236,134 @@ func (s *Store) MarkFailure(token string, err error) error {
 	})
 }
 
+// MarkImageRateLimited temporarily removes an account from image dispatch.
+// A positive retryAfter is honored when it exceeds the local backoff.
+func (s *Store) MarkImageRateLimited(token string, retryAfter time.Duration, err error) error {
+	return s.markImageCooldown(token, ImageCooldownRateLimited, retryAfter, err)
+}
+
+// MarkImageUpstreamFailure temporarily backs off an account after a retryable
+// upstream 5xx response. It does not change the account's persistent status.
+func (s *Store) MarkImageUpstreamFailure(token string, err error) error {
+	return s.markImageCooldown(token, ImageCooldownUpstreamFailure, 0, err)
+}
+
+// MarkImageGenerationTerminated temporarily backs off an account when the
+// upstream image tool has already reached a terminal failure state.
+func (s *Store) MarkImageGenerationTerminated(token string, err error) error {
+	return s.markImageCooldown(token, ImageCooldownGenerationTerminated, 0, err)
+}
+
+// MarkImageHTTPFailure applies the image dispatch cooldown policy for HTTP
+// failures that are known to be transient. Other status codes are ignored.
+func (s *Store) MarkImageHTTPFailure(token string, statusCode int, retryAfter time.Duration, err error) error {
+	switch {
+	case statusCode == 429:
+		return s.MarkImageRateLimited(token, retryAfter, err)
+	case statusCode >= 500 && statusCode <= 599:
+		return s.markImageCooldown(token, ImageCooldownUpstreamFailure, retryAfter, err)
+	default:
+		return nil
+	}
+}
+
+func (s *Store) markImageCooldown(token string, reason ImageCooldownReason, retryAfter time.Duration, err error) error {
+	return s.updateByToken(token, func(a *Account) {
+		now := s.now()
+		if a.Extra == nil {
+			a.Extra = map[string]any{}
+		}
+		failures := max(0, asInt(a.Extra[imageCooldownFailuresKey])) + 1
+		until := now.Add(imageCooldownDelay(reason, retryAfter, failures))
+
+		a.LastUsedAt = now.Unix()
+		a.LastError = compactImageCooldownError(err)
+		a.ImageFailures++
+		a.Extra["last_used_at"] = now.In(time.Local).Format(time.RFC3339)
+		a.Extra[imageCooldownReasonKey] = string(reason)
+		a.Extra[imageCooldownFailuresKey] = failures
+		a.Extra[imageCooldownUntilKey] = until.UTC().Format(time.RFC3339Nano)
+		a.Extra[imageCooldownLastErrorKey] = a.LastError
+		a.Extra[imageCooldownLastAtKey] = now.UTC().Format(time.RFC3339Nano)
+	})
+}
+
+func imageCooldownDelay(reason ImageCooldownReason, retryAfter time.Duration, failures int) time.Duration {
+	base, capDelay := 15*time.Second, 3*time.Minute
+	switch reason {
+	case ImageCooldownRateLimited:
+		base, capDelay = 30*time.Second, 15*time.Minute
+	case ImageCooldownGenerationTerminated:
+		base, capDelay = 20*time.Second, 5*time.Minute
+	}
+	for attempts := max(0, failures-1); attempts > 0 && base < capDelay; attempts-- {
+		base *= 2
+	}
+	if base > capDelay {
+		base = capDelay
+	}
+	if retryAfter > base {
+		return retryAfter
+	}
+	return base
+}
+
+func compactImageCooldownError(err error) string {
+	if err == nil {
+		return ""
+	}
+	return strings.TrimSpace(err.Error())
+}
+
+func isImageCooling(account Account, now time.Time) bool {
+	return imageCooldownUntil(account).After(now)
+}
+
+func imageCooldownUntil(account Account) time.Time {
+	if account.Extra == nil {
+		return time.Time{}
+	}
+	value, ok := account.Extra[imageCooldownUntilKey]
+	if !ok || value == nil {
+		return time.Time{}
+	}
+	switch typed := value.(type) {
+	case time.Time:
+		return typed
+	case int64:
+		return time.Unix(typed, 0)
+	case int:
+		return time.Unix(int64(typed), 0)
+	case float64:
+		return time.Unix(int64(typed), 0)
+	}
+	raw := strings.TrimSpace(fmt.Sprint(value))
+	if raw == "" {
+		return time.Time{}
+	}
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339} {
+		if parsed, err := time.Parse(layout, raw); err == nil {
+			return parsed
+		}
+	}
+	if seconds, err := strconv.ParseInt(raw, 10, 64); err == nil {
+		return time.Unix(seconds, 0)
+	}
+	return time.Time{}
+}
+
+func clearImageCooldown(extra map[string]any) {
+	for _, key := range []string{
+		imageCooldownUntilKey,
+		imageCooldownReasonKey,
+		imageCooldownFailuresKey,
+		imageCooldownLastErrorKey,
+		imageCooldownLastAtKey,
+	} {
+		delete(extra, key)
+	}
+}
+
 // PendingTokenRecoveries returns accounts whose failed credentials are ready
 // for an asynchronous OAuth refresh attempt.
 func (s *Store) PendingTokenRecoveries(now time.Time) []Account {
@@ -1025,7 +1374,7 @@ func (s *Store) PendingTokenRecoveries(now time.Time) []Account {
 		if !isStatus(account.Status, StatusCredentialInvalid) || !tokenRecoveryIsDue(account, now) {
 			continue
 		}
-		items = append(items, account)
+		items = append(items, cloneAccount(account))
 	}
 	return items
 }
@@ -1038,7 +1387,6 @@ func (s *Store) BeginTokenRecovery(token string, now time.Time) (Account, bool, 
 		return Account{}, false, nil
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	for index := range s.accounts {
 		account := &s.accounts[index]
 		if account.AccessToken != token || !isStatus(account.Status, StatusCredentialInvalid) || !tokenRecoveryIsDue(*account, now) {
@@ -1058,11 +1406,16 @@ func (s *Store) BeginTokenRecovery(token string, now time.Time) (Account, bool, 
 			"",
 			asInt(account.Extra[tokenRecoveryAttemptsKey])+1,
 		)
-		if err := s.saveLocked(); err != nil {
+		result := cloneAccount(*account)
+		s.markDirtyLocked()
+		snapshot, revision := s.snapshotLocked()
+		s.mu.Unlock()
+		if err := s.persistSnapshot(snapshot, revision); err != nil {
 			return Account{}, false, err
 		}
-		return *account, true, nil
+		return result, true, nil
 	}
+	s.mu.Unlock()
 	return Account{}, false, nil
 }
 
@@ -1087,13 +1440,13 @@ func (s *Store) replaceOAuthTokens(token, accessToken, refreshToken, idToken, ev
 		return Account{}, false, fmt.Errorf("access token is required")
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	for index := range s.accounts {
 		if s.accounts[index].AccessToken != token {
 			continue
 		}
 		for otherIndex, other := range s.accounts {
 			if otherIndex != index && other.AccessToken == accessToken {
+				s.mu.Unlock()
 				return Account{}, false, fmt.Errorf("refreshed access token already belongs to another account")
 			}
 		}
@@ -1121,11 +1474,16 @@ func (s *Store) replaceOAuthTokens(token, accessToken, refreshToken, idToken, ev
 		)
 		delete(s.imageLeases, token)
 		s.signalImageAvailabilityLocked()
-		if err := s.saveLocked(); err != nil {
-			return *account, true, err
+		result := cloneAccount(*account)
+		s.markDirtyLocked()
+		snapshot, revision := s.snapshotLocked()
+		s.mu.Unlock()
+		if err := s.persistSnapshot(snapshot, revision); err != nil {
+			return result, true, err
 		}
-		return *account, true, nil
+		return result, true, nil
 	}
+	s.mu.Unlock()
 	return Account{}, false, nil
 }
 
@@ -1137,7 +1495,6 @@ func (s *Store) LogTokenRecoveryEvent(token, level, event, message, errText stri
 		return false, nil
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	for index := range s.accounts {
 		account := &s.accounts[index]
 		if account.AccessToken != token {
@@ -1154,8 +1511,12 @@ func (s *Store) LogTokenRecoveryEvent(token, level, event, message, errText stri
 			errText,
 			asInt(account.Extra[tokenRecoveryAttemptsKey])+1,
 		)
-		return true, s.saveLocked()
+		s.markDirtyLocked()
+		snapshot, revision := s.snapshotLocked()
+		s.mu.Unlock()
+		return true, s.persistSnapshot(snapshot, revision)
 	}
+	s.mu.Unlock()
 	return false, nil
 }
 
@@ -1167,7 +1528,6 @@ func (s *Store) CompleteTokenRecovery(token string, check AccountCheckResult) (A
 		return Account{}, false, nil
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	for index := range s.accounts {
 		account := &s.accounts[index]
 		if account.AccessToken != token {
@@ -1186,11 +1546,16 @@ func (s *Store) CompleteTokenRecovery(token string, check AccountCheckResult) (A
 			attempt,
 		)
 		s.signalImageAvailabilityLocked()
-		if err := s.saveLocked(); err != nil {
-			return *account, true, err
+		result := cloneAccount(*account)
+		s.markDirtyLocked()
+		snapshot, revision := s.snapshotLocked()
+		s.mu.Unlock()
+		if err := s.persistSnapshot(snapshot, revision); err != nil {
+			return result, true, err
 		}
-		return *account, true, nil
+		return result, true, nil
 	}
+	s.mu.Unlock()
 	return Account{}, false, nil
 }
 
@@ -1213,7 +1578,6 @@ func (s *Store) FailTokenRecovery(token, reason string, maxAttempts int, retryAf
 	}
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	for index := range s.accounts {
 		account := &s.accounts[index]
 		if account.AccessToken != token {
@@ -1239,7 +1603,10 @@ func (s *Store) FailTokenRecovery(token, reason string, maxAttempts int, retryAf
 			s.accounts = append(s.accounts[:index], s.accounts[index+1:]...)
 			delete(s.imageLeases, token)
 			s.signalImageAvailabilityLocked()
-			return true, s.saveLocked()
+			s.markDirtyLocked()
+			snapshot, revision := s.snapshotLocked()
+			s.mu.Unlock()
+			return true, s.persistSnapshot(snapshot, revision)
 		}
 		account.Status = StatusCredentialInvalid
 		account.Extra[tokenRecoveryStateKey] = tokenRecoveryPending
@@ -1254,8 +1621,12 @@ func (s *Store) FailTokenRecovery(token, reason string, maxAttempts int, retryAf
 			attempts,
 		)
 		s.signalImageAvailabilityLocked()
-		return false, s.saveLocked()
+		s.markDirtyLocked()
+		snapshot, revision := s.snapshotLocked()
+		s.mu.Unlock()
+		return false, s.persistSnapshot(snapshot, revision)
 	}
+	s.mu.Unlock()
 	return false, nil
 }
 
@@ -1296,7 +1667,6 @@ func (s *Store) RemoveInvalidToken(token, reason string) (bool, error) {
 		return false, nil
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	next := s.accounts[:0]
 	removed := false
 	for _, a := range s.accounts {
@@ -1311,8 +1681,12 @@ func (s *Store) RemoveInvalidToken(token, reason string) (bool, error) {
 	if removed {
 		delete(s.imageLeases, token)
 		s.signalImageAvailabilityLocked()
-		return true, s.saveLocked()
+		s.markDirtyLocked()
+		snapshot, revision := s.snapshotLocked()
+		s.mu.Unlock()
+		return true, s.persistSnapshot(snapshot, revision)
 	}
+	s.mu.Unlock()
 	return false, nil
 }
 
@@ -1322,13 +1696,16 @@ func (s *Store) updateByToken(token string, fn func(*Account)) error {
 		return nil
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	for i := range s.accounts {
 		if s.accounts[i].AccessToken == token {
 			fn(&s.accounts[i])
-			return s.saveLocked()
+			s.markDirtyLocked()
+			s.mu.Unlock()
+			s.signalPersistence()
+			return nil
 		}
 	}
+	s.mu.Unlock()
 	return nil
 }
 
@@ -1361,9 +1738,134 @@ func compactCredentialRecoveryLogText(value string) string {
 	return value[:500] + "..."
 }
 
-func (s *Store) saveLocked() error {
+func (s *Store) markDirtyLocked() {
+	s.revision++
+	s.dirty = true
+}
+
+func (s *Store) snapshotLocked() (fileShape, uint64) {
+	accounts := make([]Account, len(s.accounts))
+	for index := range s.accounts {
+		accounts[index] = cloneAccount(s.accounts[index])
+	}
+	logs := append([]CredentialRecoveryLog(nil), s.credentialRecoveryLogs...)
+	return fileShape{Accounts: accounts, CredentialRecoveryLogs: logs}, s.revision
+}
+
+func (s *Store) signalPersistence() {
+	if s == nil || s.wake == nil {
+		return
+	}
+	select {
+	case s.wake <- struct{}{}:
+	default:
+	}
+}
+
+func (s *Store) persistenceLoop() {
+	defer close(s.done)
+	for {
+		select {
+		case <-s.wake:
+			timer := time.NewTimer(accountPersistDebounce)
+			select {
+			case <-timer.C:
+				_ = s.persistPending()
+			case <-s.stop:
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				_ = s.persistPending()
+				return
+			}
+		case <-s.stop:
+			_ = s.persistPending()
+			return
+		}
+	}
+}
+
+// Flush persists all account updates accepted in memory before it returns.
+// Normal image-result updates use the debounce worker so storage latency never
+// holds the dispatch lock; Flush is for tests and graceful shutdown.
+func (s *Store) Flush() error {
+	if s == nil {
+		return nil
+	}
+	for {
+		if err := s.persistPending(); err != nil {
+			return err
+		}
+		s.mu.RLock()
+		dirty := s.dirty
+		s.mu.RUnlock()
+		if !dirty {
+			return nil
+		}
+	}
+}
+
+// Close stops the account persistence worker after flushing accepted updates.
+// The shared persistence.Store remains owned by the application.
+func (s *Store) Close() {
+	if s == nil || s.stop == nil {
+		return
+	}
+	s.close.Do(func() {
+		close(s.stop)
+		<-s.done
+		_ = s.Flush()
+	})
+}
+
+func (s *Store) persistPending() error {
+	if s == nil {
+		return nil
+	}
+	s.persist.Lock()
+	defer s.persist.Unlock()
+
+	s.mu.Lock()
+	if !s.dirty {
+		s.mu.Unlock()
+		return nil
+	}
+	snapshot, revision := s.snapshotLocked()
+	s.mu.Unlock()
+	return s.saveSnapshot(snapshot, revision)
+}
+
+func (s *Store) persistSnapshot(snapshot fileShape, revision uint64) error {
+	s.persist.Lock()
+	defer s.persist.Unlock()
+	return s.saveSnapshot(snapshot, revision)
+}
+
+// saveSnapshot is called with s.persist held and never holds s.mu while I/O
+// runs. The revision check leaves a concurrent update dirty for a later write
+// instead of acknowledging an obsolete snapshot.
+func (s *Store) saveSnapshot(snapshot fileShape, revision uint64) error {
+	err := s.save(snapshot)
+	s.mu.Lock()
+	if err == nil && s.revision == revision {
+		s.dirty = false
+	} else {
+		s.dirty = true
+	}
+	more := s.dirty
+	s.mu.Unlock()
+	if err == nil && more {
+		s.signalPersistence()
+	}
+	return err
+}
+
+func (s *Store) save(shaped fileShape) error {
 	if s.state != nil {
-		return s.state.Save(context.Background(), "accounts", fileShape{Accounts: s.accounts, CredentialRecoveryLogs: s.credentialRecoveryLogs})
+		return s.state.Save(context.Background(), "accounts", shaped)
 	}
 	if strings.TrimSpace(s.path) == "" {
 		return nil
@@ -1371,7 +1873,7 @@ func (s *Store) saveLocked() error {
 	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
 		return err
 	}
-	data, err := json.MarshalIndent(fileShape{Accounts: s.accounts, CredentialRecoveryLogs: s.credentialRecoveryLogs}, "", "  ")
+	data, err := json.MarshalIndent(shaped, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -1403,7 +1905,7 @@ func applyUpdate(account *Account, updates map[string]any) {
 		case "disabled":
 			account.Disabled = asBool(value)
 		default:
-			account.Extra[key] = value
+			account.Extra[key] = cloneExtraValue(value)
 		}
 	}
 }
@@ -1503,6 +2005,80 @@ func cloneMap(source map[string]any) map[string]any {
 		out[key] = value
 	}
 	return out
+}
+
+func cloneAccount(account Account) Account {
+	if account.FP != nil {
+		fp := make(map[string]string, len(account.FP))
+		for key, value := range account.FP {
+			fp[key] = value
+		}
+		account.FP = fp
+	}
+	account.Extra = cloneExtraMap(account.Extra)
+	return account
+}
+
+func cloneExtraMap(source map[string]any) map[string]any {
+	if source == nil {
+		return nil
+	}
+	out := make(map[string]any, len(source))
+	for key, value := range source {
+		out[key] = cloneExtraValue(value)
+	}
+	return out
+}
+
+// cloneExtraValue preserves concrete JSON-shaped map and slice types. Account
+// data is accepted from imports as well as JSON, so it may contain []map values
+// rather than only []any values produced by encoding/json.
+func cloneExtraValue(value any) any {
+	if value == nil {
+		return nil
+	}
+	return cloneExtraReflect(reflect.ValueOf(value)).Interface()
+}
+
+func cloneExtraReflect(value reflect.Value) reflect.Value {
+	if !value.IsValid() {
+		return value
+	}
+	switch value.Kind() {
+	case reflect.Interface:
+		if value.IsNil() {
+			return reflect.Zero(value.Type())
+		}
+		return cloneExtraReflect(value.Elem())
+	case reflect.Map:
+		if value.IsNil() {
+			return reflect.Zero(value.Type())
+		}
+		out := reflect.MakeMapWithSize(value.Type(), value.Len())
+		iter := value.MapRange()
+		for iter.Next() {
+			out.SetMapIndex(iter.Key(), cloneExtraReflect(iter.Value()))
+		}
+		return out
+	case reflect.Slice:
+		if value.IsNil() {
+			return reflect.Zero(value.Type())
+		}
+		out := reflect.MakeSlice(value.Type(), value.Len(), value.Len())
+		for index := 0; index < value.Len(); index++ {
+			out.Index(index).Set(cloneExtraReflect(value.Index(index)))
+		}
+		return out
+	case reflect.Pointer:
+		if value.IsNil() {
+			return reflect.Zero(value.Type())
+		}
+		out := reflect.New(value.Type().Elem())
+		out.Elem().Set(cloneExtraReflect(value.Elem()))
+		return out
+	default:
+		return value
+	}
 }
 
 func setString(out map[string]any, key, value string) {

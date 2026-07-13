@@ -52,6 +52,8 @@ func main() {
 	if err != nil {
 		log.Fatalf("load accounts: %v", err)
 	}
+	// Flush asynchronously batched account state before the backing store closes.
+	defer store.Close()
 	if updated, identityErr := store.EnsureBrowserIdentities(); identityErr != nil {
 		log.Fatalf("persist account browser identities: %v", identityErr)
 	} else if updated > 0 {
@@ -77,6 +79,7 @@ func main() {
 	if state != nil {
 		handler = httpapi.NewServerWithPersistence(cfg, store, imageService, textService, searchService, storageService, taskManager, state, configUpdated)
 	}
+	defer handler.Close()
 
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,

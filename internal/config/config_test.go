@@ -23,7 +23,7 @@ func TestDefaultNormalize(t *testing.T) {
 	if cfg.ImagePollTimeoutSecs != 180 {
 		t.Fatalf("image poll timeout=%.0f", cfg.ImagePollTimeoutSecs)
 	}
-	if cfg.ImageTaskTimeoutSecs != 0 {
+	if cfg.ImageTaskTimeoutSecs != 300 {
 		t.Fatalf("image task timeout=%.0f", cfg.ImageTaskTimeoutSecs)
 	}
 	if cfg.RefreshAccountIntervalMinutes != 60 {
@@ -34,21 +34,26 @@ func TestDefaultNormalize(t *testing.T) {
 	}
 }
 
-func TestNormalizeCapsImageWaits(t *testing.T) {
+func TestNormalizeFixesImageWaits(t *testing.T) {
 	cfg := Config{ImagePollTimeoutSecs: 300, ImageTaskTimeoutSecs: 600}.Normalize()
 	if cfg.ImagePollTimeoutSecs != 180 || cfg.ImageTaskTimeoutSecs != 300 {
 		t.Fatalf("image timeouts=%.0f/%.0f", cfg.ImagePollTimeoutSecs, cfg.ImageTaskTimeoutSecs)
 	}
-}
-
-func TestNormalizeMigratesLegacyImagePollTimeout(t *testing.T) {
-	if timeout := (Config{ImagePollTimeoutSecs: 60}).Normalize().ImagePollTimeoutSecs; timeout != 180 {
-		t.Fatalf("image poll timeout=%.0f", timeout)
+	if timeout := (Config{ImageTaskTimeoutSecs: 120}).Normalize().ImageTaskTimeoutSecs; timeout != 300 {
+		t.Fatalf("configured image task timeout=%.0f", timeout)
 	}
 }
 
-func TestZeroImageTaskTimeoutDisablesTotalDeadline(t *testing.T) {
-	if timeout := (Config{ImageTaskTimeoutSecs: 0}).Normalize().ImageTaskTimeoutSecs; timeout != 0 {
+func TestNormalizeMigratesLegacyImagePollTimeout(t *testing.T) {
+	for _, configured := range []float64{60, 90} {
+		if timeout := (Config{ImagePollTimeoutSecs: configured}).Normalize().ImagePollTimeoutSecs; timeout != 180 {
+			t.Fatalf("configured=%.0f image poll timeout=%.0f", configured, timeout)
+		}
+	}
+}
+
+func TestZeroImageTaskTimeoutMigratesToBoundedDefault(t *testing.T) {
+	if timeout := (Config{ImageTaskTimeoutSecs: 0}).Normalize().ImageTaskTimeoutSecs; timeout != 300 {
 		t.Fatalf("image task timeout=%.0f", timeout)
 	}
 }

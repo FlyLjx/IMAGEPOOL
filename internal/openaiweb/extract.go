@@ -2,6 +2,7 @@ package openaiweb
 
 import (
 	"encoding/json"
+	"fmt"
 	"regexp"
 	"strings"
 )
@@ -124,4 +125,136 @@ func findStringKey(v any, key string) string {
 		}
 	}
 	return ""
+}
+
+// findImageGenerationTerminalError identifies terminal states emitted by the
+// image tool. Once ChatGPT has ended a tool run, polling cannot produce an
+// image, so callers should immediately switch accounts instead of consuming
+// the entire polling window.
+func findImageGenerationTerminalError(v any) error {
+	status := findImageGenerationTerminalStatus(v)
+	if status == "" {
+		return nil
+	}
+	return fmt.Errorf("%w: ChatGPT 生图任务已终止（%s）", ErrImageGenerationTerminated, status)
+}
+
+func findImageGenerationTerminalStatus(v any) string {
+	terminal := map[string]bool{
+		"server_timeout":          true,
+		"interrupted":             true,
+		"failed":                  true,
+		"failure":                 true,
+		"error":                   true,
+		"server_error":            true,
+		"generation_failed":       true,
+		"image_generation_failed": true,
+		"cancelled":               true,
+		"canceled":                true,
+		"aborted":                 true,
+	}
+	var walk func(any) string
+	walk = func(value any) string {
+		switch item := value.(type) {
+		case map[string]any:
+			if status := imageToolTerminalStatus(item, terminal); status != "" {
+				return status
+			}
+			for _, child := range item {
+				if status := walk(child); status != "" {
+					return status
+				}
+			}
+		case []any:
+			for _, child := range item {
+				if status := walk(child); status != "" {
+					return status
+				}
+			}
+		}
+		return ""
+	}
+	return walk(v)
+}
+
+// imageToolTerminalStatus only inspects messages produced by ChatGPT's image
+// tool. Conversation events include many unrelated status and error fields;
+// treating those as image failures would prematurely abandon healthy work.
+func imageToolTerminalStatus(value map[string]any, terminal map[string]bool) string {
+	message := value
+	if nested, ok := value["message"].(map[string]any); ok {
+		message = nested
+	}
+	role, ok := nodeRole(message)
+	if !ok || !strings.EqualFold(strings.TrimSpace(role), "tool") {
+		return ""
+	}
+	metadata, _ := message["metadata"].(map[string]any)
+	if !isImageGenerationTool(message, metadata) {
+		return ""
+	}
+	if status := terminalImageStatus(metadata["status"], terminal); status != "" {
+		return status
+	}
+	if finish, ok := metadata["finish_details"].(map[string]any); ok {
+		for _, key := range []string{"status", "type", "reason"} {
+			if status := terminalImageStatus(finish[key], terminal); status != "" {
+				return status
+			}
+		}
+	}
+	return ""
+}
+
+func isImageGenerationTool(message, metadata map[string]any) bool {
+	if imageToolTruthy(metadata["image_gen_async"]) {
+		return true
+	}
+	for _, key := range []string{"tool_name", "recipient", "model_slug", "invoked_plugin"} {
+		if looksLikeImageTool(str(metadata[key])) {
+			return true
+		}
+	}
+	author, _ := message["author"].(map[string]any)
+	for _, key := range []string{"name", "recipient"} {
+		if looksLikeImageTool(str(author[key])) {
+			return true
+		}
+	}
+	return false
+}
+
+func looksLikeImageTool(value string) bool {
+	value = strings.ToLower(strings.TrimSpace(value))
+	return strings.Contains(value, "image_gen") || strings.Contains(value, "imagegen") || strings.Contains(value, "t2uay3k")
+}
+
+func imageToolTruthy(value any) bool {
+	switch item := value.(type) {
+	case bool:
+		return item
+	case string:
+		return strings.EqualFold(strings.TrimSpace(item), "true") || strings.TrimSpace(item) == "1"
+	case float64:
+		return item != 0
+	case int:
+		return item != 0
+	default:
+		return false
+	}
+}
+
+func terminalImageStatus(value any, terminal map[string]bool) string {
+	status := normalizeImageGenerationStatus(str(value))
+	if terminal[status] {
+		return status
+	}
+	return ""
+}
+
+func normalizeImageGenerationStatus(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	value = strings.ReplaceAll(value, "-", "_")
+	value = strings.ReplaceAll(value, " ", "_")
+	return value
 }

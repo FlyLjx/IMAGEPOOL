@@ -76,7 +76,7 @@ function normalizeConfig(config: SettingsConfig): SettingsConfig {
     refresh_account_concurrency: Number(config.refresh_account_concurrency || 20),
     image_retention_days: Number(config.image_retention_days || 30),
     image_poll_timeout_secs: Math.min(180, Number(config.image_poll_timeout_secs) || 180),
-    image_task_timeout_secs: Math.min(300, Math.max(0, Number(config.image_task_timeout_secs) || 0)),
+    image_task_timeout_secs: 300,
     image_web_model_slug: String(config.image_web_model_slug || "gpt-5-5"),
     image_account_concurrency: Number(config.image_account_concurrency || 3),
     image_account_precheck_interval_minutes: Number(config.image_account_precheck_interval_minutes || 10),
@@ -168,7 +168,6 @@ type SettingsStore = {
   setRefreshAccountConcurrency: (value: string) => void;
   setImageRetentionDays: (value: string) => void;
   setImagePollTimeoutSecs: (value: string) => void;
-  setImageTaskTimeoutSecs: (value: string) => void;
   setImageWebModelSlug: (value: string) => void;
   setAutoRemoveInvalidAccounts: (value: boolean) => void;
   setAutoRemoveRateLimitedAccounts: (value: boolean) => void;
@@ -251,7 +250,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         refresh_account_concurrency: Math.min(100, Math.max(1, Number(config.refresh_account_concurrency) || 20)),
         image_retention_days: Math.max(1, Number(config.image_retention_days) || 30),
         image_poll_timeout_secs: Math.min(180, Math.max(15, Number(config.image_poll_timeout_secs) || 180)),
-        image_task_timeout_secs: Math.min(300, Math.max(0, Number(config.image_task_timeout_secs) || 0)),
+        image_task_timeout_secs: 300,
         image_web_model_slug: String(config.image_web_model_slug || "gpt-5-5").trim() || "gpt-5-5",
         image_account_concurrency: Math.max(1, Number(config.image_account_concurrency) || 3),
         image_account_precheck_interval_minutes: Math.max(1, Number(config.image_account_precheck_interval_minutes) || 10),
@@ -350,10 +349,6 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
 
   setImagePollTimeoutSecs: (value) => {
     set((state) => (state.config ? { config: { ...state.config, image_poll_timeout_secs: value } } : {}));
-  },
-
-  setImageTaskTimeoutSecs: (value) => {
-    set((state) => (state.config ? { config: { ...state.config, image_task_timeout_secs: value } } : {}));
   },
 
   setImageWebModelSlug: (value) => {

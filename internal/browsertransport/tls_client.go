@@ -18,13 +18,34 @@ type roundTripper struct {
 }
 
 func NewHTTPClient(runtime config.ProxyRuntime, timeout time.Duration, resource bool) (*http.Client, error) {
+	return newHTTPClient(runtime, timeout, resource, nil, false)
+}
+
+// NewStreamingHTTPClient creates a separate TLS client without a total
+// request timeout while reusing the established browser cookie jar.
+func NewStreamingHTTPClient(runtime config.ProxyRuntime, resource bool, jar fhttp.CookieJar) (*http.Client, error) {
+	return newHTTPClient(runtime, 0, resource, jar, true)
+}
+
+func newHTTPClient(runtime config.ProxyRuntime, timeout time.Duration, resource bool, jar fhttp.CookieJar, streaming bool) (*http.Client, error) {
 	if timeout <= 0 {
-		timeout = 120 * time.Second
+		if !streaming {
+			timeout = 120 * time.Second
+		}
+	}
+	if jar == nil {
+		jar = tlsclient.NewCookieJar()
 	}
 	options := []tlsclient.HttpClientOption{
 		tlsclient.WithClientProfile(profiles.Chrome_144),
-		tlsclient.WithCookieJar(tlsclient.NewCookieJar()),
-		tlsclient.WithTimeoutMilliseconds(int(timeout.Milliseconds())),
+		tlsclient.WithCookieJar(jar),
+	}
+	if streaming {
+		// tls-client applies a 30 second deadline unless this is explicitly
+		// overridden. A zero value disables its full-request timer.
+		options = append(options, tlsclient.WithTimeoutMilliseconds(0))
+	} else if timeout > 0 {
+		options = append(options, tlsclient.WithTimeoutMilliseconds(int(timeout.Milliseconds())))
 	}
 	if runtime.SkipSSLVerify {
 		options = append(options, tlsclient.WithInsecureSkipVerify())
@@ -40,6 +61,19 @@ func NewHTTPClient(runtime config.ProxyRuntime, timeout time.Duration, resource 
 		return nil, err
 	}
 	return &http.Client{Timeout: timeout, Transport: &roundTripper{client: client}}, nil
+}
+
+// CookieJarForHTTPClient returns the jar used by a browser-transport client.
+// It is nil for unrelated transports.
+func CookieJarForHTTPClient(client *http.Client) fhttp.CookieJar {
+	if client == nil {
+		return nil
+	}
+	transport, ok := client.Transport.(*roundTripper)
+	if !ok || transport.client == nil {
+		return nil
+	}
+	return transport.client.GetCookieJar()
 }
 
 func (t *roundTripper) RoundTrip(request *http.Request) (*http.Response, error) {

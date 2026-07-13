@@ -3,6 +3,8 @@ package tasks
 import (
 	"context"
 	"errors"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -15,6 +17,8 @@ type taskSvc struct{ ch chan struct{} }
 
 type failedAttemptTaskSvc struct{}
 
+type sensitiveFailureTaskSvc struct{ err error }
+
 func (failedAttemptTaskSvc) Generate(context.Context, images.Request) (images.Response, error) {
 	return images.Response{Attempts: []openaiweb.AttemptLog{
 		{Attempt: 1, AccountEmail: "first@example.test", Status: "failed"},
@@ -26,9 +30,28 @@ func (s failedAttemptTaskSvc) GenerateWithAccount(ctx context.Context, _ string,
 	return s.Generate(ctx, req)
 }
 
+func (s sensitiveFailureTaskSvc) Generate(_ context.Context, req images.Request) (images.Response, error) {
+	if req.Progress != nil {
+		req.Progress(openaiweb.ProgressEvent{Progress: "checking_account", Message: s.err.Error(), Details: map[string]any{"error": s.err.Error()}})
+	}
+	return images.Response{Attempts: []openaiweb.AttemptLog{{Attempt: 1, AccountEmail: "account@example.test", Status: "failed", Error: s.err.Error()}}}, s.err
+}
+
+func (s sensitiveFailureTaskSvc) GenerateWithAccount(ctx context.Context, _ string, req images.Request) (images.Response, error) {
+	return s.Generate(ctx, req)
+}
+
 type queuedTaskSvc struct {
 	waiting chan struct{}
 	release chan struct{}
+}
+
+type gatedTaskSvc struct {
+	started chan struct{}
+	release chan struct{}
+	mu      sync.Mutex
+	active  int
+	max     int
 }
 
 type blockingCollectionStore struct {
@@ -80,6 +103,34 @@ func (s queuedTaskSvc) Generate(ctx context.Context, req images.Request) (images
 }
 
 func (s queuedTaskSvc) GenerateWithAccount(ctx context.Context, _ string, req images.Request) (images.Response, error) {
+	return s.Generate(ctx, req)
+}
+
+func (s *gatedTaskSvc) Generate(ctx context.Context, _ images.Request) (images.Response, error) {
+	s.mu.Lock()
+	s.active++
+	if s.active > s.max {
+		s.max = s.active
+	}
+	s.mu.Unlock()
+	select {
+	case s.started <- struct{}{}:
+	default:
+	}
+	defer func() {
+		s.mu.Lock()
+		s.active--
+		s.mu.Unlock()
+	}()
+	select {
+	case <-s.release:
+		return images.Response{Data: []images.Data{{URL: "u"}}}, nil
+	case <-ctx.Done():
+		return images.Response{}, ctx.Err()
+	}
+}
+
+func (s *gatedTaskSvc) GenerateWithAccount(ctx context.Context, _ string, req images.Request) (images.Response, error) {
 	return s.Generate(ctx, req)
 }
 
@@ -183,6 +234,32 @@ func TestFailedTaskKeepsAttemptStatistics(t *testing.T) {
 	}
 }
 
+func TestFailedTaskRedactsUpstreamCredentialDetails(t *testing.T) {
+	raw := &openaiweb.UpstreamError{Path: "/backend-api/files", StatusCode: 401, Body: `{"error":{"code":"token_revoked"}}`}
+	m := NewManager(sensitiveFailureTaskSvc{err: raw})
+	task, result, err := m.RunGenerationForOwner(context.Background(), "user-a", images.Request{Prompt: "draw"})
+	var upstream *openaiweb.UpstreamError
+	if !errors.As(err, &upstream) || upstream != raw {
+		t.Fatalf("raw error must be preserved for internal handling: %v", err)
+	}
+	if task.Error != openaiweb.PublicCredentialInvalidMessage || task.RealtimeStatus != openaiweb.PublicCredentialInvalidMessage {
+		t.Fatalf("task=%#v", task)
+	}
+	if len(result.Attempts) != 1 || result.Attempts[0].Error != openaiweb.PublicCredentialInvalidMessage {
+		t.Fatalf("result attempts=%#v", result.Attempts)
+	}
+	for _, entry := range task.StatusLogs {
+		for _, leaked := range []string{"/backend-api/", "token_revoked", "body="} {
+			if strings.Contains(strings.ToLower(entry.Message), leaked) {
+				t.Fatalf("task log leaked %q: %#v", leaked, entry)
+			}
+			if detail, _ := entry.Details["error"].(string); strings.Contains(strings.ToLower(detail), leaked) {
+				t.Fatalf("task log details leaked %q: %#v", leaked, entry)
+			}
+		}
+	}
+}
+
 func TestTaskVisibilityIsScopedToOwner(t *testing.T) {
 	m := NewManager(taskSvc{})
 	a := m.SubmitGenerationForOwner("user-a", "a", images.Request{Prompt: "a"})
@@ -251,5 +328,86 @@ func TestTaskPersistenceNeverBlocksSubmissionOrStatus(t *testing.T) {
 		if _, ok := state.items[task.ID]; !ok {
 			t.Fatalf("task %s was not persisted", task.ID)
 		}
+	}
+}
+
+func TestAsyncDispatcherBoundsConcurrentWorkers(t *testing.T) {
+	svc := &gatedTaskSvc{started: make(chan struct{}, asyncTaskWorkerLimit+1), release: make(chan struct{})}
+	m := NewManager(svc)
+	defer func() {
+		close(svc.release)
+		m.Close()
+	}()
+
+	for index := 0; index < asyncTaskWorkerLimit+24; index++ {
+		m.SubmitGeneration("", images.Request{Prompt: "draw"})
+	}
+	for index := 0; index < asyncTaskWorkerLimit; index++ {
+		select {
+		case <-svc.started:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("worker %d did not start", index+1)
+		}
+	}
+	select {
+	case <-svc.started:
+		t.Fatal("dispatcher exceeded the configured worker limit")
+	case <-time.After(75 * time.Millisecond):
+	}
+	svc.mu.Lock()
+	maxWorkers := svc.max
+	svc.mu.Unlock()
+	if maxWorkers != asyncTaskWorkerLimit {
+		t.Fatalf("max active workers=%d, want %d", maxWorkers, asyncTaskWorkerLimit)
+	}
+}
+
+func TestAsyncDispatcherRejectsFullQueueWithoutBlocking(t *testing.T) {
+	svc := &gatedTaskSvc{started: make(chan struct{}, asyncTaskWorkerLimit+1), release: make(chan struct{})}
+	m := NewManager(svc)
+	defer func() {
+		close(svc.release)
+		m.Close()
+	}()
+
+	started := time.Now()
+	var last Task
+	for index := 0; index < asyncTaskWorkerLimit+asyncTaskQueueLimit+8; index++ {
+		last = m.SubmitGeneration("", images.Request{Prompt: "draw"})
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("queue admission blocked for %s", elapsed)
+	}
+	if last.Status != StatusFailed || last.Error != "任务队列已满，请稍后重试" {
+		t.Fatalf("last task should be rejected when full: %#v", last)
+	}
+}
+
+func TestCloseCancelsQueuedAndRunningAsyncTasks(t *testing.T) {
+	svc := &gatedTaskSvc{started: make(chan struct{}, asyncTaskWorkerLimit+1), release: make(chan struct{})}
+	m := NewManager(svc)
+	started := m.SubmitGeneration("running", images.Request{Prompt: "draw"})
+	queued := m.SubmitGeneration("queued", images.Request{Prompt: "draw"})
+	select {
+	case <-svc.started:
+	case <-time.After(time.Second):
+		t.Fatal("running task did not start")
+	}
+	m.Close()
+	for _, task := range []Task{started, queued} {
+		stored, ok := m.Status(task.ID)
+		if !ok || stored.Status != StatusCanceled || stored.Error == "" {
+			t.Fatalf("task was not canceled on close: %#v ok=%v", stored, ok)
+		}
+	}
+}
+
+func TestAppendLogRetainsRecentBoundedHistory(t *testing.T) {
+	task := &Task{}
+	for index := 0; index < maxTaskStatusLogs+12; index++ {
+		appendLog(task, LogEntry{Event: "event"})
+	}
+	if len(task.StatusLogs) != maxTaskStatusLogs || task.StatusLogCount != maxTaskStatusLogs+12 {
+		t.Fatalf("logs=%d count=%d", len(task.StatusLogs), task.StatusLogCount)
 	}
 }

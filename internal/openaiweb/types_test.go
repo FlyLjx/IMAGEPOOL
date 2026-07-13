@@ -2,6 +2,7 @@ package openaiweb
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -40,5 +41,60 @@ func TestAuthenticationErrorIncludesGenericUpstream401(t *testing.T) {
 func TestImagePollTimeoutSwitchesAccounts(t *testing.T) {
 	if !IsRetryableImageError(fmt.Errorf("poll failed: %w", ErrPollTimeout)) {
 		t.Fatal("poll timeout must switch to another account")
+	}
+	if !IsRetryableImageError(fmt.Errorf("prepare failed: %w", ErrImagePreparationTimeout)) {
+		t.Fatal("preparation timeout must switch accounts")
+	}
+	if !IsRetryableImageError(fmt.Errorf("tool failed: %w", ErrImageGenerationTerminated)) {
+		t.Fatal("terminal image-tool status must switch accounts")
+	}
+}
+
+func TestRetryableImageErrorIncludesTransientUpstreamStatuses(t *testing.T) {
+	for _, status := range []int{408, 409, 425, 429, 500, 502, 503, 504} {
+		if !IsRetryableImageError(&UpstreamError{StatusCode: status}) {
+			t.Fatalf("status %d must be retryable", status)
+		}
+	}
+	if IsRetryableImageError(&UpstreamError{StatusCode: 400}) {
+		t.Fatal("400 must not be retryable")
+	}
+}
+
+func TestPublicErrorProjectionRedactsCredentialDiagnostics(t *testing.T) {
+	raw := &UpstreamError{
+		Path:       "/backend-api/files",
+		StatusCode: 401,
+		Body:       `{"error":{"code":"token_revoked","message":"invalidated oauth token"}}`,
+	}
+	if !IsAuthenticationError(raw) {
+		t.Fatal("raw upstream error must remain usable for credential handling")
+	}
+	message := PublicErrorMessage(raw)
+	if message != PublicCredentialInvalidMessage {
+		t.Fatalf("message=%q", message)
+	}
+	for _, leaked := range []string{"/backend-api/", "token_revoked", "oauth token", raw.Body} {
+		if strings.Contains(strings.ToLower(message), strings.ToLower(leaked)) {
+			t.Fatalf("public message leaked %q: %q", leaked, message)
+		}
+	}
+
+	attempts := []AttemptLog{{Attempt: 1, Status: "failed", Error: raw.Error()}}
+	publicAttempts := PublicAttemptLogs(attempts)
+	if publicAttempts[0].Error != PublicCredentialInvalidMessage {
+		t.Fatalf("attempts=%#v", publicAttempts)
+	}
+	if !strings.Contains(attempts[0].Error, "token_revoked") {
+		t.Fatalf("source attempts were unexpectedly changed: %#v", attempts)
+	}
+
+	event := PublicProgressEvent(ProgressEvent{Message: raw.Error(), Details: map[string]any{"error": raw.Error(), "nested": map[string]any{"cause": raw.Error()}}})
+	if event.Message != PublicCredentialInvalidMessage || event.Details["error"] != PublicCredentialInvalidMessage {
+		t.Fatalf("event=%#v", event)
+	}
+	nested, _ := event.Details["nested"].(map[string]any)
+	if nested["cause"] != PublicCredentialInvalidMessage {
+		t.Fatalf("nested details=%#v", event.Details)
 	}
 }

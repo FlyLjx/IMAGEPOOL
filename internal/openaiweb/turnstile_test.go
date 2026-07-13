@@ -1,9 +1,13 @@
 package openaiweb
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"testing"
+	"time"
 )
 
 func TestSolveTurnstileToken(t *testing.T) {
@@ -71,6 +75,34 @@ func TestParseTurnstileVMOutput(t *testing.T) {
 	}
 	if _, err := parseTurnstileVMOutput([]byte(`{"ok":false,"turnstile_result_decoded_if_error":"unsupported opcode"}`)); err == nil {
 		t.Fatal("expected VM failure")
+	}
+}
+
+func TestTurnstileVMCapacityWaitIsCancelableAndRetryable(t *testing.T) {
+	for range cap(turnstileVMSlots) {
+		turnstileVMSlots <- struct{}{}
+	}
+	defer func() {
+		for range cap(turnstileVMSlots) {
+			<-turnstileVMSlots
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	_, err := acquireTurnstileVMSlot(ctx)
+	if !errors.Is(err, ErrTurnstileVMCapacity) {
+		t.Fatalf("err=%v, want capacity error", err)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err=%v, want deadline exceeded", err)
+	}
+	wrapped := fmt.Errorf("chat requirements requires turnstile token: %w", err)
+	if IsInteractiveChallengeError(wrapped) {
+		t.Fatalf("capacity saturation must not be treated as an interactive challenge: %v", wrapped)
+	}
+	if !IsRetryableImageError(wrapped) {
+		t.Fatalf("capacity saturation must be retryable: %v", wrapped)
 	}
 }
 

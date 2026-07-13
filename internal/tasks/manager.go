@@ -22,6 +22,13 @@ const (
 	StatusCanceled  = "error"
 	taskCollection  = "tasks"
 	persistDebounce = 100 * time.Millisecond
+
+	// Keep async task admission bounded. Account leases remain the effective
+	// upstream concurrency limit; this prevents a traffic burst from creating
+	// an unbounded number of waiting goroutines before it reaches that pool.
+	asyncTaskWorkerLimit = 128
+	asyncTaskQueueLimit  = 4096
+	maxTaskStatusLogs    = 200
 )
 
 type ImageService interface {
@@ -30,6 +37,12 @@ type ImageService interface {
 }
 
 type imageGenerator func(context.Context, images.Request) (images.Response, error)
+
+type queuedTask struct {
+	id  string
+	ctx context.Context
+	req images.Request
+}
 
 type LogEntry struct {
 	Time     time.Time      `json:"time"`
@@ -71,18 +84,25 @@ type Task struct {
 }
 
 type Manager struct {
-	mu      sync.RWMutex
-	seq     uint64
-	service ImageService
-	state   persistence.Store
-	items   persistence.CollectionStore
-	tasks   map[string]*Task
-	cancels map[string]context.CancelFunc
-	dirty   map[string]struct{}
-	wake    chan struct{}
-	stop    chan struct{}
-	done    chan struct{}
-	close   sync.Once
+	mu              sync.RWMutex
+	seq             uint64
+	service         ImageService
+	state           persistence.Store
+	items           persistence.CollectionStore
+	tasks           map[string]*Task
+	cancels         map[string]context.CancelFunc
+	dirty           map[string]struct{}
+	wake            chan struct{}
+	stop            chan struct{}
+	done            chan struct{}
+	dispatchMu      sync.Mutex
+	dispatchClosing bool
+	jobs            chan queuedTask
+	dispatchStop    chan struct{}
+	dispatchDone    chan struct{}
+	workerSlots     chan struct{}
+	workers         sync.WaitGroup
+	close           sync.Once
 }
 
 func NewManager(service ImageService) *Manager {
@@ -94,7 +114,17 @@ func NewManagerWithPersistence(service ImageService, state persistence.Store) *M
 }
 
 func newManager(service ImageService, state persistence.Store) *Manager {
-	m := &Manager{service: service, state: state, tasks: map[string]*Task{}, cancels: map[string]context.CancelFunc{}, dirty: map[string]struct{}{}}
+	m := &Manager{
+		service:      service,
+		state:        state,
+		tasks:        map[string]*Task{},
+		cancels:      map[string]context.CancelFunc{},
+		dirty:        map[string]struct{}{},
+		jobs:         make(chan queuedTask, asyncTaskQueueLimit),
+		dispatchStop: make(chan struct{}),
+		dispatchDone: make(chan struct{}),
+		workerSlots:  make(chan struct{}, asyncTaskWorkerLimit),
+	}
 	if collection, ok := state.(persistence.CollectionStore); ok {
 		m.items = collection
 	}
@@ -104,6 +134,7 @@ func newManager(service ImageService, state persistence.Store) *Manager {
 		m.done = make(chan struct{})
 	}
 	m.load()
+	go m.dispatchLoop()
 	if state != nil {
 		go m.persistenceLoop()
 		if len(m.dirty) > 0 {
@@ -145,10 +176,92 @@ func (m *Manager) RunGenerationWithAccountForOwner(ctx context.Context, ownerID,
 
 func (m *Manager) submit(mode, ownerID, clientTaskID string, req images.Request) Task {
 	task, ctx := m.create(mode, ownerID, clientTaskID, req, context.Background())
-	go func() {
-		_, _ = m.run(ctx, task.ID, req)
-	}()
+	if !m.enqueue(task.ID, ctx, req) {
+		if rejected, ok := m.Status(task.ID); ok {
+			return rejected
+		}
+	}
 	return task
+}
+
+func (m *Manager) enqueue(id string, ctx context.Context, req images.Request) bool {
+	if m == nil {
+		return false
+	}
+	m.dispatchMu.Lock()
+	defer m.dispatchMu.Unlock()
+	if m.dispatchClosing {
+		m.rejectQueuedTask(id, "服务正在停止，任务未执行")
+		return false
+	}
+	select {
+	case m.jobs <- queuedTask{id: id, ctx: ctx, req: req}:
+		return true
+	default:
+		m.rejectQueuedTask(id, "任务队列已满，请稍后重试")
+		return false
+	}
+}
+
+func (m *Manager) dispatchLoop() {
+	defer close(m.dispatchDone)
+	for {
+		select {
+		case <-m.dispatchStop:
+			m.rejectPendingTasks("服务停止，任务未执行")
+			return
+		case job := <-m.jobs:
+			select {
+			case <-m.dispatchStop:
+				m.rejectQueuedTask(job.id, "服务停止，任务未执行")
+				m.rejectPendingTasks("服务停止，任务未执行")
+				return
+			case m.workerSlots <- struct{}{}:
+			}
+			m.workers.Add(1)
+			go func() {
+				defer func() {
+					<-m.workerSlots
+					m.workers.Done()
+				}()
+				_, _ = m.run(job.ctx, job.id, job.req)
+			}()
+		}
+	}
+}
+
+func (m *Manager) rejectPendingTasks(message string) {
+	for {
+		select {
+		case job := <-m.jobs:
+			m.rejectQueuedTask(job.id, message)
+		default:
+			return
+		}
+	}
+}
+
+func (m *Manager) rejectQueuedTask(id, message string) {
+	var cancel context.CancelFunc
+	m.mu.Lock()
+	if task := m.tasks[id]; task != nil && task.Status == StatusQueued {
+		now := time.Now()
+		task.Status = StatusFailed
+		task.Progress = "failed"
+		task.ProgressPercent = 100
+		task.RealtimeStatus = message
+		task.Error = message
+		task.FinishedAt = &now
+		task.UpdatedAt = now
+		appendLog(task, LogEntry{Time: now, Level: "error", Event: "rejected", Progress: "failed", Message: message})
+		m.markDirtyLocked(id)
+	}
+	cancel = m.cancels[id]
+	delete(m.cancels, id)
+	m.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 }
 
 func (m *Manager) runSync(ctx context.Context, mode, ownerID string, req images.Request) (Task, images.Response, error) {
@@ -190,6 +303,7 @@ func (m *Manager) run(ctx context.Context, id string, req images.Request) (image
 
 func (m *Manager) runWith(ctx context.Context, id string, req images.Request, generate imageGenerator) (images.Response, error) {
 	req.Progress = func(event openaiweb.ProgressEvent) {
+		event = openaiweb.PublicProgressEvent(event)
 		m.update(id, func(task *Task) {
 			now := time.Now()
 			if event.Progress == "waiting_account" {
@@ -214,6 +328,7 @@ func (m *Manager) runWith(ctx context.Context, id string, req images.Request, ge
 		})
 	}
 	result, err := generate(ctx, req)
+	result = publicImageResponse(result)
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -235,18 +350,19 @@ func (m *Manager) runWith(ctx context.Context, id string, req images.Request, ge
 		task.Progress = "canceled"
 		task.ProgressPercent = 100
 		task.RealtimeStatus = "任务已取消"
-		task.Error = ctx.Err().Error()
+		task.Error = openaiweb.PublicErrorMessage(ctx.Err())
 		appendLog(task, LogEntry{Time: now, Level: "warning", Event: "canceled", Progress: "canceled", Message: "任务已取消"})
 		return result, ctx.Err()
 	}
 	if err != nil {
+		message := openaiweb.PublicErrorMessage(err)
 		applyAttemptStats(task, result)
 		task.Status = StatusFailed
 		task.Progress = "failed"
 		task.ProgressPercent = 100
-		task.RealtimeStatus = err.Error()
-		task.Error = err.Error()
-		appendLog(task, LogEntry{Time: now, Level: "error", Event: "failed", Progress: "failed", Message: err.Error()})
+		task.RealtimeStatus = message
+		task.Error = message
+		appendLog(task, LogEntry{Time: now, Level: "error", Event: "failed", Progress: "failed", Message: message})
 		return result, err
 	}
 	task.Status = StatusSucceeded
@@ -258,6 +374,14 @@ func (m *Manager) runWith(ctx context.Context, id string, req images.Request, ge
 	applyAttemptStats(task, result)
 	appendLog(task, LogEntry{Time: now, Level: "success", Event: "completed", Progress: "succeeded", Message: "任务处理完成"})
 	return result, nil
+}
+
+// publicImageResponse is the task-manager output boundary. Image services keep
+// original errors for account handling; task responses and persisted records
+// only retain their safe attempt projection.
+func publicImageResponse(result images.Response) images.Response {
+	result.Attempts = openaiweb.PublicAttemptLogs(result.Attempts)
+	return result
 }
 
 func applyAttemptStats(task *Task, result images.Response) {
@@ -508,16 +632,45 @@ func (m *Manager) persistPending() {
 	m.signalPersistence()
 }
 
-// Close flushes pending task updates without closing the shared persistence
-// backend used by the other services.
+// Close stops task admission, cancels active work, and flushes task state
+// without closing the shared persistence backend used by other services.
 func (m *Manager) Close() {
-	if m == nil || m.stop == nil {
+	if m == nil {
 		return
 	}
 	m.close.Do(func() {
-		close(m.stop)
-		<-m.done
+		m.dispatchMu.Lock()
+		m.dispatchClosing = true
+		if m.dispatchStop != nil {
+			close(m.dispatchStop)
+		}
+		m.dispatchMu.Unlock()
+
+		m.cancelAll()
+		if m.dispatchDone != nil {
+			<-m.dispatchDone
+		}
+		m.workers.Wait()
+
+		if m.stop != nil {
+			close(m.stop)
+			<-m.done
+		}
 	})
+}
+
+func (m *Manager) cancelAll() {
+	m.mu.Lock()
+	cancels := make([]context.CancelFunc, 0, len(m.cancels))
+	for _, cancel := range m.cancels {
+		if cancel != nil {
+			cancels = append(cancels, cancel)
+		}
+	}
+	m.mu.Unlock()
+	for _, cancel := range cancels {
+		cancel()
+	}
 }
 
 func (m *Manager) copyTask(task *Task) Task {
@@ -525,20 +678,36 @@ func (m *Manager) copyTask(task *Task) Task {
 		return Task{}
 	}
 	cp := *task
+	cp.Error = openaiweb.PublicErrorText(cp.Error)
+	cp.RealtimeStatus = openaiweb.PublicErrorText(cp.RealtimeStatus)
 	if task.Result != nil {
 		result := *task.Result
 		result.Data = append([]images.Data(nil), task.Result.Data...)
-		result.Attempts = append([]openaiweb.AttemptLog(nil), task.Result.Attempts...)
+		result.Attempts = openaiweb.PublicAttemptLogs(task.Result.Attempts)
 		cp.Result = &result
 	}
 	cp.Data = append([]images.Data(nil), task.Data...)
-	cp.StatusLogs = append([]LogEntry(nil), task.StatusLogs...)
+	cp.StatusLogs = make([]LogEntry, len(task.StatusLogs))
+	copy(cp.StatusLogs, task.StatusLogs)
+	for i := range cp.StatusLogs {
+		cp.StatusLogs[i].Message = openaiweb.PublicErrorText(cp.StatusLogs[i].Message)
+		cp.StatusLogs[i].Details = openaiweb.PublicDetails(cp.StatusLogs[i].Details)
+	}
 	return cp
 }
 
 func appendLog(task *Task, entry LogEntry) {
+	entry.Message = openaiweb.PublicErrorText(entry.Message)
+	entry.Details = openaiweb.PublicDetails(entry.Details)
+	if task.StatusLogCount < len(task.StatusLogs) {
+		task.StatusLogCount = len(task.StatusLogs)
+	}
+	if len(task.StatusLogs) >= maxTaskStatusLogs {
+		copy(task.StatusLogs, task.StatusLogs[len(task.StatusLogs)-maxTaskStatusLogs+1:])
+		task.StatusLogs = task.StatusLogs[:maxTaskStatusLogs-1]
+	}
 	task.StatusLogs = append(task.StatusLogs, entry)
-	task.StatusLogCount = len(task.StatusLogs)
+	task.StatusLogCount++
 }
 
 func progressPercent(progress string) int {

@@ -2,6 +2,7 @@ package openaiweb
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha3"
 	"encoding/base64"
 	"encoding/hex"
@@ -13,6 +14,13 @@ import (
 )
 
 const defaultPOWScript = "https://chatgpt.com/backend-api/sentinel/sdk.js"
+
+const (
+	powMaxAttempts         = 500000
+	powCancelCheckInterval = 1024 // must remain a power of two
+	powSolveTimeout        = 15 * time.Second
+	powDigestSize          = 64
+)
 
 var scriptSrcRE = regexp.MustCompile(`<script[^>]+src=["']([^"']+)["']`)
 var dataBuildRE = regexp.MustCompile(`data-build=["']([^"']+)["']`)
@@ -46,11 +54,21 @@ func buildLegacyRequirementsToken(userAgent string, scripts []string, dataBuild 
 	return "gAAAAAC" + base64.StdEncoding.EncodeToString(raw)
 }
 
-func buildProofToken(seed, difficulty, userAgent string, scripts []string, dataBuild string) (string, error) {
+func buildProofToken(ctx context.Context, seed, difficulty, userAgent string, scripts []string, dataBuild string) (string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return "", fmt.Errorf("proof token generation canceled: %w", err)
+	}
 	cfg := buildPOWConfig(userAgent, scripts, dataBuild)
-	answer, ok, err := powGenerate(seed, difficulty, cfg, 500000)
+	// The regular request deadline remains authoritative. This shorter local
+	// budget prevents a pathological challenge from monopolizing a worker.
+	solveCtx, cancel := context.WithTimeout(ctx, powSolveTimeout)
+	defer cancel()
+	answer, ok, err := powGenerateContext(solveCtx, seed, difficulty, cfg, powMaxAttempts)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("solve proof token: %w", err)
 	}
 	if !ok {
 		return "", fmt.Errorf("failed to solve proof token: difficulty=%s", difficulty)
@@ -71,21 +89,53 @@ func buildPOWConfig(userAgent string, scripts []string, dataBuild string) []any 
 }
 
 func powGenerate(seed, difficulty string, cfg []any, limit int) (string, bool, error) {
+	return powGenerateContext(context.Background(), seed, difficulty, cfg, limit)
+}
+
+func powGenerateContext(ctx context.Context, seed, difficulty string, cfg []any, limit int) (string, bool, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return "", false, err
+	}
 	target, err := hex.DecodeString(difficulty)
 	if err != nil {
 		return "", false, err
 	}
 	diffLen := len(difficulty) / 2
+	if diffLen > powDigestSize {
+		return "", false, fmt.Errorf("proof token difficulty is longer than SHA3-512 output")
+	}
+	if len(cfg) <= 9 {
+		return "", false, fmt.Errorf("proof token configuration is incomplete")
+	}
+	// Keep callers' configuration immutable, but avoid a new slice for every
+	// candidate while hashing a proof-of-work challenge.
+	cfg = append([]any(nil), cfg...)
 	seedBytes := []byte(seed)
+	hasher := sha3.New512()
+	var digest [powDigestSize]byte
+	var encoded []byte
 	for i := 0; i < limit; i++ {
-		clone := append([]any(nil), cfg...)
-		clone[3] = i
-		clone[9] = i >> 1
-		raw, _ := json.Marshal(clone)
-		encodedBytes := []byte(base64.StdEncoding.EncodeToString(raw))
-		digest := sha3.Sum512(append(seedBytes, encodedBytes...))
-		if bytes.Compare(digest[:diffLen], target) <= 0 {
-			return string(encodedBytes), true, nil
+		if i&(powCancelCheckInterval-1) == 0 {
+			if err := ctx.Err(); err != nil {
+				return "", false, err
+			}
+		}
+		cfg[3] = i
+		cfg[9] = i >> 1
+		raw, err := json.Marshal(cfg)
+		if err != nil {
+			return "", false, err
+		}
+		encoded = base64.StdEncoding.AppendEncode(encoded[:0], raw)
+		hasher.Reset()
+		_, _ = hasher.Write(seedBytes)
+		_, _ = hasher.Write(encoded)
+		sum := hasher.Sum(digest[:0])
+		if bytes.Compare(sum[:diffLen], target) <= 0 {
+			return string(encoded), true, nil
 		}
 	}
 	return "", false, nil

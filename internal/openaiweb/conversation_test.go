@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -14,6 +16,12 @@ import (
 	"imagepool/internal/accounts"
 	"imagepool/internal/config"
 )
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (fn roundTripperFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return fn(request)
+}
 
 func TestPollImageResultsRetriesFreshConversationInaccessible(t *testing.T) {
 	var hits atomic.Int32
@@ -174,7 +182,7 @@ func TestStartImageGenerationResumesIdleToolStream(t *testing.T) {
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				t.Error(err)
 			}
-			if body["conversation_id"] != "conv-1" || body["offset"] != float64(0) {
+			if body["conversation_id"] != "conv-1" || body["offset"] != float64(1) {
 				t.Errorf("bad resume payload: %#v", body)
 			}
 			w.Header().Set("Content-Type", "text/event-stream")
@@ -195,6 +203,195 @@ func TestStartImageGenerationResumesIdleToolStream(t *testing.T) {
 	}
 	if !resumeSeen.Load() || conversationID != "conv-1" || len(fileIDs) != 1 || fileIDs[0] != "file_00000000aaaaaaaaaaaaaaaaaaaaaaaa" || len(sedimentIDs) != 0 {
 		t.Fatalf("resumed=%t conversation=%q files=%#v sediments=%#v", resumeSeen.Load(), conversationID, fileIDs, sedimentIDs)
+	}
+}
+
+func TestStartImageGenerationKeepsCommentHeartbeatStreamOpen(t *testing.T) {
+	var resumeCalls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/backend-api/f/conversation":
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte("data: {\"type\":\"resume_conversation_token\",\"token\":\"resume-token\",\"conversation_id\":\"conv-1\"}\n\n"))
+			flusher, _ := w.(http.Flusher)
+			if flusher != nil {
+				flusher.Flush()
+			}
+			for index := 0; index < 6; index++ {
+				time.Sleep(10 * time.Millisecond)
+				_, _ = w.Write([]byte(": keepalive\n\n"))
+				if flusher != nil {
+					flusher.Flush()
+				}
+			}
+			_, _ = w.Write([]byte("data: {\"conversation_id\":\"conv-1\",\"message\":{\"author\":{\"role\":\"tool\"},\"content\":{\"parts\":[{\"asset_pointer\":\"file-service://file_00000000aaaaaaaaaaaaaaaaaaaaaaaa\"}]}}}\n\n"))
+		case "/backend-api/f/conversation/resume":
+			resumeCalls.Add(1)
+			http.NotFound(w, r)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	cfg := config.Default()
+	cfg.ChatGPTBaseURL = srv.URL
+	client := NewClient(cfg, WithHTTPClient(srv.Client()))
+	client.imageStreamOpenTimeout = 15 * time.Millisecond
+	client.imageStreamIdleTimeout = 45 * time.Millisecond
+	conversationID, fileIDs, _, err := client.startImageGeneration(context.Background(), accounts.Account{AccessToken: "token"}, "draw", "auto", chatRequirements{}, "conduit", "trace", "parent", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resumeCalls.Load() != 0 || conversationID != "conv-1" || len(fileIDs) != 1 || fileIDs[0] != "file_00000000aaaaaaaaaaaaaaaaaaaaaaaa" {
+		t.Fatalf("resumes=%d conversation=%q files=%#v", resumeCalls.Load(), conversationID, fileIDs)
+	}
+}
+
+func TestConsumeImageStreamStopsAfterGenerationBudgetDespiteHeartbeats(t *testing.T) {
+	reader, writer := io.Pipe()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer writer.Close()
+		ticker := time.NewTicker(5 * time.Millisecond)
+		defer ticker.Stop()
+		for range ticker.C {
+			if _, err := writer.Write([]byte(": heartbeat\n\n")); err != nil {
+				return
+			}
+		}
+	}()
+
+	client := NewClient(config.Default())
+	client.pollTimeout = 30 * time.Millisecond
+	client.imageStreamIdleTimeout = time.Second
+	_, _, err := client.consumeImageStream(context.Background(), reader, nil, &imageStreamState{})
+	if !errors.Is(err, ErrPollTimeout) {
+		t.Fatalf("err=%v", err)
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("heartbeat writer was not released")
+	}
+}
+
+func TestImageGenerationErrorReportsActualElapsedBudget(t *testing.T) {
+	ctx := context.WithValue(context.Background(), imageGenerationStartedAtKey{}, time.Now().Add(-42*time.Second))
+	err := imageGenerationError(ctx, context.DeadlineExceeded)
+	if !errors.Is(err, ErrPollTimeout) || !strings.Contains(err.Error(), "已等待 42 秒") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestStartImageGenerationRetriesOpeningStreamThenReturnsTimeout(t *testing.T) {
+	var calls atomic.Int32
+	var canceled atomic.Int32
+	httpClient := &http.Client{Transport: roundTripperFunc(func(request *http.Request) (*http.Response, error) {
+		if request.URL.Path != "/backend-api/f/conversation" {
+			return nil, fmt.Errorf("path=%s", request.URL.Path)
+		}
+		calls.Add(1)
+		<-request.Context().Done()
+		canceled.Add(1)
+		return nil, request.Context().Err()
+	})}
+
+	cfg := config.Default()
+	cfg.ChatGPTBaseURL = "http://stream.test"
+	client := NewClient(cfg, WithHTTPClient(httpClient), WithSleep(func(context.Context, time.Duration) error { return nil }))
+	client.imageStreamOpenTimeout = 15 * time.Millisecond
+	_, _, _, err := client.startImageGeneration(context.Background(), accounts.Account{AccessToken: "token"}, "draw", "auto", chatRequirements{}, "conduit", "trace", "parent", nil)
+	if !errors.Is(err, errImageStreamOpenTimeout) {
+		t.Fatalf("err=%v", err)
+	}
+	if calls.Load() != maxImageStartAttempts || canceled.Load() != maxImageStartAttempts {
+		t.Fatalf("opens=%d canceled=%d", calls.Load(), canceled.Load())
+	}
+}
+
+func TestStartImageGenerationBoundsAllOpenAttemptsByGenerationBudget(t *testing.T) {
+	var calls atomic.Int32
+	client := NewClient(config.Default(), WithHTTPClient(&http.Client{Transport: roundTripperFunc(func(request *http.Request) (*http.Response, error) {
+		calls.Add(1)
+		<-request.Context().Done()
+		return nil, request.Context().Err()
+	})}), WithSleep(func(context.Context, time.Duration) error { return nil }))
+	client.pollTimeout = 30 * time.Millisecond
+	client.imageStreamOpenTimeout = time.Second
+	started := time.Now()
+	_, _, _, err := client.startImageGeneration(context.Background(), accounts.Account{AccessToken: "token"}, "draw", "auto", chatRequirements{}, "conduit", "trace", "parent", nil)
+	if !errors.Is(err, ErrPollTimeout) {
+		t.Fatalf("err=%v", err)
+	}
+	if elapsed := time.Since(started); elapsed > 250*time.Millisecond {
+		t.Fatalf("generation budget was ignored for %s", elapsed)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("open attempts=%d", calls.Load())
+	}
+}
+
+func TestStartImageGenerationReturnsTimeoutAfterResumeOpenTimeouts(t *testing.T) {
+	var resumeCalls atomic.Int32
+	var canceled atomic.Int32
+	httpClient := &http.Client{Transport: roundTripperFunc(func(request *http.Request) (*http.Response, error) {
+		switch request.URL.Path {
+		case "/backend-api/f/conversation":
+			return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("data: {\"type\":\"resume_conversation_token\",\"token\":\"resume-token\",\"conversation_id\":\"conv-1\"}\n\n")), Request: request}, nil
+		case "/backend-api/f/conversation/resume":
+			resumeCalls.Add(1)
+			<-request.Context().Done()
+			canceled.Add(1)
+			return nil, request.Context().Err()
+		default:
+			return nil, fmt.Errorf("path=%s", request.URL.Path)
+		}
+	})}
+
+	cfg := config.Default()
+	cfg.ChatGPTBaseURL = "http://stream.test"
+	client := NewClient(cfg, WithHTTPClient(httpClient), WithSleep(func(context.Context, time.Duration) error { return nil }))
+	client.imageStreamOpenTimeout = 15 * time.Millisecond
+	_, _, _, err := client.startImageGeneration(context.Background(), accounts.Account{AccessToken: "token"}, "draw", "auto", chatRequirements{}, "conduit", "trace", "parent", nil)
+	if !errors.Is(err, errImageStreamOpenTimeout) {
+		t.Fatalf("err=%v", err)
+	}
+	if resumeCalls.Load() != maxImageResumeAttempts || canceled.Load() != maxImageResumeAttempts {
+		t.Fatalf("resumes=%d canceled=%d", resumeCalls.Load(), canceled.Load())
+	}
+}
+
+func TestStartImageGenerationRetriesResumeRequestsUpToLimit(t *testing.T) {
+	var resumeCalls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/backend-api/f/conversation":
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte("data: {\"type\":\"resume_conversation_token\",\"token\":\"resume-token\",\"conversation_id\":\"conv-1\"}\n\n"))
+		case "/backend-api/f/conversation/resume":
+			if resumeCalls.Add(1) < maxImageResumeAttempts {
+				http.Error(w, "temporary gateway error", http.StatusBadGateway)
+				return
+			}
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte("data: {\"conversation_id\":\"conv-1\",\"message\":{\"author\":{\"role\":\"tool\"},\"content\":{\"parts\":[{\"asset_pointer\":\"file-service://file_00000000aaaaaaaaaaaaaaaaaaaaaaaa\"}]}}}\n\n"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	cfg := config.Default()
+	cfg.ChatGPTBaseURL = srv.URL
+	client := NewClient(cfg, WithHTTPClient(srv.Client()), WithSleep(func(context.Context, time.Duration) error { return nil }))
+	conversationID, fileIDs, _, err := client.startImageGeneration(context.Background(), accounts.Account{AccessToken: "token"}, "draw", "auto", chatRequirements{}, "conduit", "trace", "parent", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resumeCalls.Load() != maxImageResumeAttempts || conversationID != "conv-1" || len(fileIDs) != 1 || fileIDs[0] != "file_00000000aaaaaaaaaaaaaaaaaaaaaaaa" {
+		t.Fatalf("resumes=%d conversation=%q files=%#v", resumeCalls.Load(), conversationID, fileIDs)
 	}
 }
 
@@ -226,12 +423,71 @@ func TestStartImageGenerationRetriesTransientStartError(t *testing.T) {
 	}
 }
 
+func TestStartImageGenerationReturnsInitialRateLimitWithoutSameAccountRetry(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/backend-api/f/conversation" {
+			http.NotFound(w, r)
+			return
+		}
+		hits.Add(1)
+		w.Header().Set("Retry-After", "30")
+		http.Error(w, "rate limited", http.StatusTooManyRequests)
+	}))
+	defer srv.Close()
+
+	cfg := config.Default()
+	cfg.ChatGPTBaseURL = srv.URL
+	client := NewClient(cfg, WithHTTPClient(srv.Client()), WithSleep(func(context.Context, time.Duration) error { return nil }))
+	_, _, _, err := client.startImageGeneration(context.Background(), accounts.Account{AccessToken: "token"}, "draw", "auto", chatRequirements{}, "conduit", "trace", "parent", nil)
+	var upstream *UpstreamError
+	if !errors.As(err, &upstream) || upstream.StatusCode != http.StatusTooManyRequests || upstream.RetryAfter != 30 {
+		t.Fatalf("err=%#v", err)
+	}
+	if hits.Load() != 1 {
+		t.Fatalf("same account start retries=%d", hits.Load())
+	}
+}
+
+func TestStartImageGenerationReturnsResumeRateLimitWithoutSameAccountRetry(t *testing.T) {
+	var resumeHits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/backend-api/f/conversation":
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte("data: {\"type\":\"resume_conversation_token\",\"token\":\"resume-token\",\"conversation_id\":\"conv-1\"}\n\n"))
+		case "/backend-api/f/conversation/resume":
+			resumeHits.Add(1)
+			w.Header().Set("Retry-After", "30")
+			http.Error(w, "rate limited", http.StatusTooManyRequests)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	cfg := config.Default()
+	cfg.ChatGPTBaseURL = srv.URL
+	client := NewClient(cfg, WithHTTPClient(srv.Client()), WithSleep(func(context.Context, time.Duration) error { return nil }))
+	_, _, _, err := client.startImageGeneration(context.Background(), accounts.Account{AccessToken: "token"}, "draw", "auto", chatRequirements{}, "conduit", "trace", "parent", nil)
+	var upstream *UpstreamError
+	if !errors.As(err, &upstream) || upstream.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("err=%#v", err)
+	}
+	if resumeHits.Load() != 1 {
+		t.Fatalf("same account resume retries=%d", resumeHits.Load())
+	}
+}
+
 func TestImageResumeRetryPolicy(t *testing.T) {
 	if !isRetryableResumeError(errors.New("connection reset")) {
 		t.Fatal("network errors must be retryable")
 	}
 	if isRetryableResumeError(context.Canceled) || isRetryableResumeError(context.DeadlineExceeded) {
 		t.Fatal("context termination must not be retryable")
+	}
+	if isRetryableResumeError(ErrImageGenerationTerminated) {
+		t.Fatal("terminal image-tool status must not resume the same conversation")
 	}
 	if !isRetryableResumeError(&UpstreamError{StatusCode: http.StatusBadGateway}) {
 		t.Fatal("502 must be retryable")
@@ -258,6 +514,19 @@ func TestImagePollRetryPolicyIncludesBrokenConnections(t *testing.T) {
 		if !isRetryableImagePollError(err) {
 			t.Fatalf("error must be retryable: %v", err)
 		}
+	}
+}
+
+func TestAdaptiveImagePollDelayBacksOffToTenSeconds(t *testing.T) {
+	base := 3 * time.Second
+	want := []time.Duration{3 * time.Second, 4500 * time.Millisecond, 6750 * time.Millisecond, 10 * time.Second, 10 * time.Second}
+	for attempt, expected := range want {
+		if got := adaptiveImagePollDelay(base, attempt); got != expected {
+			t.Fatalf("attempt=%d delay=%s want=%s", attempt, got, expected)
+		}
+	}
+	if got := adaptiveImagePollDelay(12*time.Second, 4); got != 12*time.Second {
+		t.Fatalf("explicit slower interval changed to %s", got)
 	}
 }
 

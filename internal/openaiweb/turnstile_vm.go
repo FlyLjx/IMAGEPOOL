@@ -5,6 +5,7 @@ import (
 	"context"
 	_ "embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -16,7 +17,17 @@ import (
 	"imagepool/internal/accounts"
 )
 
-const turnstileVMTimeout = 75 * time.Second
+const (
+	turnstileVMTimeout       = 75 * time.Second
+	turnstileVMMaxConcurrent = 2
+)
+
+var ErrTurnstileVMCapacity = errors.New("turnstile VM concurrency limit reached")
+
+// The fallback starts a Node process and can consume substantial memory and
+// CPU. Keep this process-wide so multiple Client instances cannot overcommit
+// the host when several accounts receive a new challenge at once.
+var turnstileVMSlots = make(chan struct{}, turnstileVMMaxConcurrent)
 
 //go:embed turnstile_vm.mjs
 var embeddedTurnstileVMScript []byte
@@ -45,6 +56,26 @@ func (c *Client) runTurnstileVM(ctx context.Context, account accounts.Account, d
 	if strings.TrimSpace(dx) == "" {
 		return "", fmt.Errorf("turnstile challenge has no dx program")
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	timeout := turnstileVMTimeout
+	if deadline, ok := ctx.Deadline(); ok {
+		if remaining := time.Until(deadline); remaining > 0 && remaining < timeout {
+			timeout = remaining
+		}
+	}
+	runCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	release, err := acquireTurnstileVMSlot(runCtx)
+	if err != nil {
+		return "", err
+	}
+	defer release()
+
 	script, err := turnstileVMScriptPath()
 	if err != nil {
 		return "", err
@@ -71,14 +102,6 @@ func (c *Client) runTurnstileVM(ctx context.Context, account accounts.Account, d
 	if err != nil {
 		return "", fmt.Errorf("encode turnstile VM input: %w", err)
 	}
-	timeout := turnstileVMTimeout
-	if deadline, ok := ctx.Deadline(); ok {
-		if remaining := time.Until(deadline); remaining > 0 && remaining < timeout {
-			timeout = remaining
-		}
-	}
-	runCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
 	command := strings.TrimSpace(os.Getenv("IMAGE_POOL_TURNSTILE_VM_COMMAND"))
 	if command == "" {
 		command = "node"
@@ -90,11 +113,33 @@ func (c *Client) runTurnstileVM(ctx context.Context, account accounts.Account, d
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		if runCtx.Err() != nil {
-			return "", fmt.Errorf("turnstile VM timed out after %s", timeout.Round(time.Second))
+			if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
+				return "", fmt.Errorf("turnstile VM timed out after %s: %w", timeout.Round(time.Second), runCtx.Err())
+			}
+			return "", fmt.Errorf("turnstile VM canceled: %w", runCtx.Err())
 		}
 		return "", fmt.Errorf("turnstile VM execution failed: %s", conciseTurnstileVMError(stderr.String(), err.Error()))
 	}
 	return parseTurnstileVMOutput(stdout.Bytes())
+}
+
+func acquireTurnstileVMSlot(ctx context.Context) (func(), error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	select {
+	case turnstileVMSlots <- struct{}{}:
+		if err := ctx.Err(); err != nil {
+			<-turnstileVMSlots
+			return nil, err
+		}
+		return func() { <-turnstileVMSlots }, nil
+	case <-ctx.Done():
+		return nil, fmt.Errorf("%w: %w", ErrTurnstileVMCapacity, ctx.Err())
+	}
 }
 
 func turnstileVMScriptPath() (string, error) {

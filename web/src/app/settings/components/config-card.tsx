@@ -99,7 +99,6 @@ export function ConfigCard() {
   const setRefreshAccountConcurrency = useSettingsStore((state) => state.setRefreshAccountConcurrency);
   const setImageRetentionDays = useSettingsStore((state) => state.setImageRetentionDays);
   const setImagePollTimeoutSecs = useSettingsStore((state) => state.setImagePollTimeoutSecs);
-  const setImageTaskTimeoutSecs = useSettingsStore((state) => state.setImageTaskTimeoutSecs);
   const setImageWebModelSlug = useSettingsStore((state) => state.setImageWebModelSlug);
   const setLogLevel = useSettingsStore((state) => state.setLogLevel);
   const setProxy = useSettingsStore((state) => state.setProxy);
@@ -216,11 +215,12 @@ export function ConfigCard() {
           </Col>
           <Col xs={24} md={12} xl={6}>
             <NumberInput
-              label="生图总超时"
-              value={String(config.image_task_timeout_secs ?? "")}
-              onChange={setImageTaskTimeoutSecs}
-              placeholder="0"
-              help="单位秒；0 表示不设置任务总时限，单个账号超时后立即切换账号。"
+              label="生图总预算"
+              value="300"
+              onChange={() => {}}
+              placeholder="300"
+              help="固定 300 秒；从首个账号分配后开始计时，旧配置会自动迁移。"
+              disabled
             />
           </Col>
           <Col xs={24} lg={12}>

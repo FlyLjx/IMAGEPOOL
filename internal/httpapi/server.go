@@ -102,6 +102,20 @@ func (s *Server) StartBackground(ctx context.Context) {
 	s.autoRefresh.Start(ctx)
 }
 
+// Close flushes service-owned buffered state. Shared stores and the task
+// manager are owned by main and are closed separately.
+func (s *Server) Close() {
+	if s == nil {
+		return
+	}
+	if s.auth != nil {
+		s.auth.Close()
+	}
+	if s.metrics != nil {
+		s.metrics.Close()
+	}
+}
+
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	startedAt := time.Now()
 	tracked := isTrackedPath(r.URL.Path)
@@ -245,7 +259,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodGet && r.URL.Path == "/api/accounts/recovery-logs":
 		s.handleAccountRecoveryLogs(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/api/accounts":
-		items := s.accounts.PublicList()
+		items := s.publicAccounts()
 		writeJSON(w, http.StatusOK, map[string]any{"items": items, "accounts": items})
 	case r.Method == http.MethodGet && r.URL.Path == "/api/accounts/summary":
 		summary := s.accounts.Summary()
@@ -296,6 +310,90 @@ func (s *Server) currentConfig() config.Config {
 	s.cfgMu.RLock()
 	defer s.cfgMu.RUnlock()
 	return s.cfg
+}
+
+// publicAccounts preserves the existing account response shape while removing
+// any raw upstream diagnostic retained in last-error metadata.
+func (s *Server) publicAccounts() []map[string]any {
+	if s == nil || s.accounts == nil {
+		return nil
+	}
+	items := s.accounts.PublicList()
+	for i := range items {
+		items[i] = publicAccount(items[i])
+	}
+	return items
+}
+
+func publicAccount(item map[string]any) map[string]any {
+	if item == nil {
+		return nil
+	}
+	out := make(map[string]any, len(item))
+	for key, value := range item {
+		out[key] = publicAccountValue(key, value)
+	}
+	return out
+}
+
+func publicAccountValue(key string, value any) any {
+	switch typed := value.(type) {
+	case string:
+		if isPublicErrorField(key) {
+			return openaiweb.PublicErrorText(typed)
+		}
+		return typed
+	case map[string]any:
+		out := make(map[string]any, len(typed))
+		for childKey, childValue := range typed {
+			out[childKey] = publicAccountValue(childKey, childValue)
+		}
+		return out
+	case map[string]string:
+		out := make(map[string]string, len(typed))
+		for childKey, childValue := range typed {
+			if isPublicErrorField(childKey) {
+				out[childKey] = openaiweb.PublicErrorText(childValue)
+			} else {
+				out[childKey] = childValue
+			}
+		}
+		return out
+	case []any:
+		out := make([]any, len(typed))
+		for i := range typed {
+			out[i] = publicAccountValue(key, typed[i])
+		}
+		return out
+	default:
+		return value
+	}
+}
+
+func isPublicErrorField(key string) bool {
+	key = strings.ToLower(strings.TrimSpace(key))
+	return key == "error" || strings.HasSuffix(key, "_error")
+}
+
+func publicCredentialRecoveryLogs(items []accounts.CredentialRecoveryLog) []accounts.CredentialRecoveryLog {
+	if len(items) == 0 {
+		return nil
+	}
+	out := append([]accounts.CredentialRecoveryLog(nil), items...)
+	for i := range out {
+		out[i].Message = openaiweb.PublicErrorText(out[i].Message)
+		out[i].Error = openaiweb.PublicErrorText(out[i].Error)
+	}
+	return out
+}
+
+func publicRefreshProgress(progress accounts.RefreshProgress) accounts.RefreshProgress {
+	progress.Error = openaiweb.PublicErrorText(progress.Error)
+	progress.Results = append([]accounts.RefreshItem(nil), progress.Results...)
+	for i := range progress.Results {
+		progress.Results[i].Error = openaiweb.PublicErrorText(progress.Results[i].Error)
+	}
+	return progress
 }
 
 func (s *Server) setConfig(cfg config.Config) {
@@ -539,7 +637,7 @@ func (s *Server) streamChatCompletion(w http.ResponseWriter, r *http.Request, bo
 		return nil
 	})
 	if err != nil {
-		writeSSE(w, map[string]any{"error": err.Error()})
+		writeSSE(w, map[string]any{"error": openaiweb.PublicErrorMessage(err)})
 	} else {
 		writeSSE(w, map[string]any{"id": id, "object": "chat.completion.chunk", "created": created, "model": model, "choices": []any{map[string]any{"index": 0, "delta": map[string]any{}, "finish_reason": "stop"}}})
 	}
@@ -591,7 +689,7 @@ func (s *Server) streamResponses(w http.ResponseWriter, r *http.Request, req ope
 		return nil
 	})
 	if err != nil {
-		writeSSEEvent(w, "error", map[string]any{"type": "error", "error": map[string]any{"message": err.Error()}})
+		writeSSEEvent(w, "error", map[string]any{"type": "error", "error": map[string]any{"message": openaiweb.PublicErrorMessage(err)}})
 	} else {
 		writeSSEEvent(w, "response.completed", map[string]any{"type": "response.completed", "response": map[string]any{"id": id, "object": "response", "status": "completed", "model": model}})
 	}
@@ -686,7 +784,7 @@ func (s *Server) streamAnthropicMessages(w http.ResponseWriter, r *http.Request,
 		return nil
 	})
 	if err != nil {
-		writeSSEEvent(w, "error", map[string]any{"type": "error", "error": map[string]any{"message": err.Error()}})
+		writeSSEEvent(w, "error", map[string]any{"type": "error", "error": map[string]any{"message": openaiweb.PublicErrorMessage(err)}})
 	} else {
 		writeSSEEvent(w, "content_block_stop", map[string]any{"type": "content_block_stop", "index": 0})
 		writeSSEEvent(w, "message_delta", map[string]any{"type": "message_delta", "delta": map[string]any{"stop_reason": "end_turn"}, "usage": map[string]any{"output_tokens": roughTextTokens(output)}})
@@ -705,7 +803,7 @@ func (s *Server) streamImage(w http.ResponseWriter, r *http.Request, req images.
 	identity, _ := auth.IdentityFromContext(r.Context())
 	_, resp, err := s.tasks.RunGenerationForOwner(r.Context(), identity.ID, req)
 	if err != nil {
-		fmt.Fprintf(w, "data: %s\n\n", mustJSON(map[string]any{"error": err.Error()}))
+		fmt.Fprintf(w, "data: %s\n\n", mustJSON(map[string]any{"error": openaiweb.PublicErrorMessage(err)}))
 	} else {
 		fmt.Fprintf(w, "data: %s\n\n", mustJSON(resp.MarshalForOpenAI()))
 	}
@@ -839,7 +937,7 @@ func (s *Server) handleAccountImport(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"added": added, "skipped": skipped, "refreshed": refreshed, "errors": issues, "items": s.accounts.PublicList()})
+	writeJSON(w, http.StatusOK, map[string]any{"added": added, "skipped": skipped, "refreshed": refreshed, "errors": issues, "items": s.publicAccounts()})
 }
 
 func (s *Server) importAccountsAndValidate(items []accounts.Account) (added, skipped, refreshed int, issues []map[string]string, err error) {
@@ -873,13 +971,13 @@ func (s *Server) importAccountsAndValidate(items []accounts.Account) (added, ski
 		case "success":
 			refreshed++
 		case "removed":
-			issues = append(issues, map[string]string{"access_token": result.Token, "error": "token invalidated and removed"})
+			issues = append(issues, map[string]string{"access_token": result.Token, "error": openaiweb.PublicCredentialInvalidMessage})
 		default:
 			message := strings.TrimSpace(result.Error)
 			if message == "" {
 				message = "account validation failed"
 			}
-			issues = append(issues, map[string]string{"access_token": result.Token, "error": message})
+			issues = append(issues, map[string]string{"access_token": result.Token, "error": openaiweb.PublicErrorText(message)})
 		}
 	}
 	return added, skipped, refreshed, issues, nil
@@ -902,7 +1000,7 @@ func (s *Server) handleAccountsDelete(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"removed": removed, "items": s.accounts.PublicList()})
+	writeJSON(w, http.StatusOK, map[string]any{"removed": removed, "items": s.publicAccounts()})
 }
 
 func (s *Server) handleAccountUpdate(w http.ResponseWriter, r *http.Request) {
@@ -954,7 +1052,7 @@ func (s *Server) handleAccountUpdate(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": map[string]any{"message": "account not found"}})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"item": item.Public(), "items": s.accounts.PublicList()})
+	writeJSON(w, http.StatusOK, map[string]any{"item": publicAccount(item.Public()), "items": s.publicAccounts()})
 }
 
 func (s *Server) handleAccountRecoveryLogs(w http.ResponseWriter, r *http.Request) {
@@ -962,7 +1060,7 @@ func (s *Server) handleAccountRecoveryLogs(w http.ResponseWriter, r *http.Reques
 	if limit <= 0 {
 		limit = 200
 	}
-	items := s.accounts.CredentialRecoveryLogs(strings.TrimSpace(r.URL.Query().Get("email")), limit)
+	items := publicCredentialRecoveryLogs(s.accounts.CredentialRecoveryLogs(strings.TrimSpace(r.URL.Query().Get("email")), limit))
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
@@ -996,7 +1094,7 @@ func (s *Server) handleAccountRefreshProgress(w http.ResponseWriter, r *http.Req
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": map[string]any{"message": "progress not found"}})
 		return
 	}
-	writeJSON(w, http.StatusOK, progress)
+	writeJSON(w, http.StatusOK, publicRefreshProgress(progress))
 }
 
 func (s *Server) handleAccountImageTest(w http.ResponseWriter, r *http.Request) {
@@ -1022,16 +1120,19 @@ func (s *Server) handleAccountImageTest(w http.ResponseWriter, r *http.Request) 
 	identity, _ := auth.IdentityFromContext(r.Context())
 	task, response, err := s.tasks.RunGenerationWithAccountForOwner(r.Context(), identity.ID, body.AccessToken, images.Request{Prompt: body.Prompt, Model: body.Model, Size: body.Size, Quality: body.Quality, N: 1, OutputBaseURL: baseURL(r)})
 	if err != nil {
-		message := err.Error()
+		message := openaiweb.PublicErrorMessage(err)
 		code := "upstream_error"
+		if openaiweb.IsAuthenticationError(err) {
+			code = "account_credential_invalid"
+		}
 		if openaiweb.IsInteractiveChallengeError(err) {
 			message = "ChatGPT 当前要求 Turnstile 人机验证；这不是账号失效或额度不足，需在正常浏览器会话完成验证后再试。"
 			code = "interactive_challenge_required"
 		}
-		writeJSON(w, statusFromError(err), map[string]any{"ok": false, "error": message, "code": code, "task_id": task.ID, "items": s.accounts.PublicList()})
+		writeJSON(w, statusFromError(err), map[string]any{"ok": false, "error": message, "code": code, "task_id": task.ID, "items": s.publicAccounts()})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "created": response.Created, "image_count": len(response.Data), "task_id": task.ID, "items": s.accounts.PublicList()})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "created": response.Created, "image_count": len(response.Data), "task_id": task.ID, "items": s.publicAccounts()})
 }
 
 func (s *Server) handleOAuthStart(w http.ResponseWriter, r *http.Request) {
@@ -1069,7 +1170,7 @@ func (s *Server) handleOAuthFinish(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"added": added, "skipped": skipped, "refreshed": refreshed, "errors": issues, "items": s.accounts.PublicList()})
+	writeJSON(w, http.StatusOK, map[string]any{"added": added, "skipped": skipped, "refreshed": refreshed, "errors": issues, "items": s.publicAccounts()})
 }
 
 func (s *Server) handleDebugChatGPTWeb(w http.ResponseWriter, r *http.Request) {
@@ -1180,7 +1281,7 @@ func (s *Server) handleExternalAccountsImport(w http.ResponseWriter, r *http.Req
 	}
 	summary := s.accounts.Summary()
 	active, _ := summary["active"].(int)
-	response := map[string]any{"ok": true, "added": added, "skipped": skipped, "refreshed": refreshed, "errors": issues, "valid_account_count": active, "healthy": active > 0, "status": "ok", "items": s.accounts.PublicList()}
+	response := map[string]any{"ok": true, "added": added, "skipped": skipped, "refreshed": refreshed, "errors": issues, "valid_account_count": active, "healthy": active > 0, "status": "ok", "items": s.publicAccounts()}
 	writeJSON(w, http.StatusOK, response)
 }
 
@@ -1568,7 +1669,7 @@ func (s *Server) handleProxyClearanceTest(w http.ResponseWriter, r *http.Request
 	if clearance.Mode == "flaresolverr" {
 		solution, err := proxyservice.SolveFlareSolverr(r.Context(), runtime, target)
 		if err != nil {
-			writeJSON(w, http.StatusOK, map[string]any{"result": map[string]any{"ok": false, "status": "failed", "latency_ms": 0, "has_cookies": false, "user_agent": "", "error": err.Error(), "runtime": proxyservice.RuntimeStatus(runtime)}})
+			writeJSON(w, http.StatusOK, map[string]any{"result": map[string]any{"ok": false, "status": "failed", "latency_ms": 0, "has_cookies": false, "user_agent": "", "error": openaiweb.PublicErrorMessage(err), "runtime": proxyservice.RuntimeStatus(runtime)}})
 			return
 		}
 		runtime.Clearance.CFCookies = solution.Cookies
@@ -1799,13 +1900,9 @@ func (s *Server) parseEditRequest(r *http.Request) (images.Request, string, erro
 			}
 		}
 	}
-	refs := []openaiweb.ImageInput{}
-	for _, source := range sources {
-		img, err := openaiweb.ImageInputFromSource(context.Background(), http.DefaultClient, source)
-		if err != nil {
-			return images.Request{}, "", err
-		}
-		refs = append(refs, img)
+	refs, err := s.imageInputsFromSources(r.Context(), sources)
+	if err != nil {
+		return images.Request{}, "", err
 	}
 	return images.Request{Prompt: body.Prompt, Model: body.Model, N: body.N, Size: body.Size, Quality: body.Quality, ResponseFormat: body.ResponseFormat, References: refs}, body.ClientTaskID, nil
 }
@@ -2012,16 +2109,18 @@ func writeError(w http.ResponseWriter, status int, err error) {
 		errType, code = "request_canceled", "request_canceled"
 	case errors.Is(err, openaiweb.ErrContentPolicy):
 		errType, code = "invalid_request_error", "content_policy_violation"
-	case errors.Is(err, context.DeadlineExceeded):
+	case isImageTimeoutError(err):
 		errType, code = "timeout_error", "upstream_timeout"
+	case openaiweb.IsAuthenticationError(err):
+		errType, code = "authentication_error", "account_credential_invalid"
 	}
-	writeJSON(w, status, map[string]any{"error": map[string]any{"message": err.Error(), "type": errType, "code": code}})
+	writeJSON(w, status, map[string]any{"error": map[string]any{"message": openaiweb.PublicErrorMessage(err), "type": errType, "code": code}})
 }
 func statusFromError(err error) int {
 	if errors.Is(err, context.Canceled) {
 		return statusClientClosedRequest
 	}
-	if errors.Is(err, context.DeadlineExceeded) {
+	if isImageTimeoutError(err) {
 		return http.StatusGatewayTimeout
 	}
 	if errors.Is(err, openaiweb.ErrContentPolicy) {
@@ -2041,6 +2140,15 @@ func statusFromError(err error) int {
 		return http.StatusPreconditionRequired
 	}
 	return http.StatusBadGateway
+}
+
+// Image generation converts lower-level context deadlines into stable
+// user-facing sentinels so the account dispatcher can classify them. Preserve
+// their HTTP timeout semantics instead of incorrectly returning a 502.
+func isImageTimeoutError(err error) bool {
+	return errors.Is(err, context.DeadlineExceeded) ||
+		errors.Is(err, openaiweb.ErrPollTimeout) ||
+		errors.Is(err, openaiweb.ErrImagePreparationTimeout)
 }
 
 func metricCallStatus(statusCode int, errorMessage string) string {

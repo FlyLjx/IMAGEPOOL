@@ -113,7 +113,7 @@ func Default() Config {
 		ImagePollTimeoutSecs:                180,
 		ImagePollIntervalSecs:               3,
 		ImagePollInitialWaitSecs:            0,
-		ImageTaskTimeoutSecs:                0,
+		ImageTaskTimeoutSecs:                300,
 		ImageSettleSecs:                     2,
 		ImageAccountPrecheckIntervalMinutes: 10,
 		ImageAccountPrecheckConcurrency:     6,
@@ -274,7 +274,7 @@ func (c Config) Normalize() Config {
 	if strings.TrimSpace(c.ImageWebModelSlug) == "" {
 		c.ImageWebModelSlug = d.ImageWebModelSlug
 	}
-	if c.ImagePollTimeoutSecs <= 0 || c.ImagePollTimeoutSecs == 60 {
+	if c.ImagePollTimeoutSecs < d.ImagePollTimeoutSecs {
 		c.ImagePollTimeoutSecs = d.ImagePollTimeoutSecs
 	}
 	if c.ImagePollTimeoutSecs > 180 {
@@ -286,12 +286,10 @@ func (c Config) Normalize() Config {
 	if c.ImagePollInitialWaitSecs < 0 {
 		c.ImagePollInitialWaitSecs = 0
 	}
-	if c.ImageTaskTimeoutSecs < 0 {
-		c.ImageTaskTimeoutSecs = 0
-	}
-	if c.ImageTaskTimeoutSecs > 300 {
-		c.ImageTaskTimeoutSecs = 300
-	}
+	// The request budget must leave room for a short preparation phase plus a
+	// full 180-second submitted generation. Older configurations, including
+	// zero (unlimited), are all migrated to the fixed 300-second budget.
+	c.ImageTaskTimeoutSecs = d.ImageTaskTimeoutSecs
 	if c.ImageSettleSecs < 0 {
 		c.ImageSettleSecs = 0
 	}

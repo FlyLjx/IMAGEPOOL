@@ -38,6 +38,21 @@ func (b *accountInfoRefreshBackend) GetAccountInfo(context.Context, string) (ope
 type cacheBackend struct {
 	*fakeBackend
 	downloadedAccount accounts.Account
+	downloadErr       error
+}
+
+type blockingCacheBackend struct {
+	*fakeBackend
+	generated       chan struct{}
+	downloadStarted chan struct{}
+	allowDownload   chan struct{}
+	cacheMu         sync.Mutex
+	downloads       int
+}
+
+type contextImageBackend struct {
+	*fakeBackend
+	generate func(context.Context, accounts.Account, openaiweb.ImageRequest) (openaiweb.ImageResult, error)
 }
 
 type serialImageBackend struct {
@@ -83,7 +98,50 @@ func (b *serialImageBackend) stats() (calls, max int) {
 
 func (c *cacheBackend) DownloadImageFor(ctx context.Context, account accounts.Account, imageURL string) ([]byte, error) {
 	c.downloadedAccount = account
+	if c.downloadErr != nil {
+		return nil, c.downloadErr
+	}
 	return []byte{0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a, 0x00}, nil
+}
+
+func (b *blockingCacheBackend) GenerateImage(ctx context.Context, account accounts.Account, req openaiweb.ImageRequest) (openaiweb.ImageResult, error) {
+	result, err := b.fakeBackend.GenerateImage(ctx, account, req)
+	if err == nil {
+		select {
+		case b.generated <- struct{}{}:
+		default:
+		}
+	}
+	return result, err
+}
+
+func (b *blockingCacheBackend) DownloadImageFor(ctx context.Context, account accounts.Account, imageURL string) ([]byte, error) {
+	b.cacheMu.Lock()
+	b.downloads++
+	block := b.downloads == 1
+	b.cacheMu.Unlock()
+	if block {
+		select {
+		case b.downloadStarted <- struct{}{}:
+		default:
+		}
+		select {
+		case <-b.allowDownload:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	return []byte{0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a, 0x00}, nil
+}
+
+func (b *contextImageBackend) GenerateImage(ctx context.Context, account accounts.Account, req openaiweb.ImageRequest) (openaiweb.ImageResult, error) {
+	return b.generate(ctx, account, req)
+}
+
+func setTaskTimeoutForTest(service *Service, timeout float64) {
+	service.cfgMu.Lock()
+	service.cfg.ImageTaskTimeoutSecs = timeout
+	service.cfgMu.Unlock()
 }
 
 func (f *fakeBackend) GenerateImage(ctx context.Context, account accounts.Account, req openaiweb.ImageRequest) (openaiweb.ImageResult, error) {
@@ -236,12 +294,42 @@ func TestGenerateSwitchesAccountsAfterConversationPollTimeout(t *testing.T) {
 	}
 }
 
+func TestGenerateRateLimitedAccountCoolsAndSwitchesImmediately(t *testing.T) {
+	store := accounts.NewStore([]accounts.Account{
+		{Email: "fallback", AccessToken: "fallback", CreatedAt: 1, Extra: map[string]any{}},
+		{Email: "limited", AccessToken: "limited", CreatedAt: 2, Extra: map[string]any{}},
+	}, "")
+	backend := &fakeBackend{errs: []error{&openaiweb.UpstreamError{Path: "/backend-api/f/conversation", StatusCode: 429, RetryAfter: 30}}}
+	response, err := NewService(config.Default(), store, backend).Generate(context.Background(), Request{Prompt: "draw"})
+	if err != nil || backend.calls != 2 || response.AccountEmail != "fallback" {
+		t.Fatalf("response=%#v err=%v calls=%d", response, err, backend.calls)
+	}
+	limited, found := store.Get("limited")
+	if !found || limited.ImageFailures != 1 || limited.Extra["image_cooldown_until"] == nil || limited.Extra["image_cooldown_reason"] != "rate_limited" {
+		t.Fatalf("limited=%#v found=%v", limited, found)
+	}
+}
+
+func TestGenerateDoesNotCoolAccountForTurnstileVMCapacity(t *testing.T) {
+	store := accounts.NewStore([]accounts.Account{{AccessToken: "token", CreatedAt: 1, Extra: map[string]any{}}}, "")
+	capacity := fmt.Errorf("%w: %w", openaiweb.ErrTurnstileVMCapacity, context.DeadlineExceeded)
+	_, err := NewService(config.Default(), store, &fakeBackend{errs: []error{capacity}}).Generate(context.Background(), Request{Prompt: "draw"})
+	if !errors.Is(err, openaiweb.ErrTurnstileVMCapacity) {
+		t.Fatalf("err=%v", err)
+	}
+	account, found := store.Get("token")
+	if !found || account.ImageFailures != 0 || account.LastError != "" || account.Extra["image_cooldown_until"] != nil {
+		t.Fatalf("global VM congestion changed account state: %#v", account)
+	}
+}
+
 func TestGenerateAppliesSingleTaskDeadlineAcrossRetries(t *testing.T) {
 	cfg := config.Default()
-	cfg.ImageTaskTimeoutSecs = 0.02
 	store := accounts.NewStore([]accounts.Account{{Email: "a@example", AccessToken: "token"}}, "")
 	backend := &serialImageBackend{fakeBackend: &fakeBackend{}, started: make(chan struct{}, 1), release: make(chan struct{})}
-	_, err := NewService(cfg, store, backend).Generate(context.Background(), Request{Prompt: "draw"})
+	service := NewService(cfg, store, backend)
+	setTaskTimeoutForTest(service, 0.02)
+	_, err := service.Generate(context.Background(), Request{Prompt: "draw"})
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("err=%v", err)
 	}
@@ -414,6 +502,153 @@ func TestGenerateCachesRemoteImageLocally(t *testing.T) {
 	}
 }
 
+func TestGenerateReleasesImageLeaseBeforeCaching(t *testing.T) {
+	cfg := config.Default()
+	cfg.ImageOutputDir = t.TempDir()
+	store := accounts.NewStore([]accounts.Account{{AccessToken: "token", CreatedAt: 1}}, "")
+	backend := &blockingCacheBackend{
+		fakeBackend:     &fakeBackend{},
+		generated:       make(chan struct{}, 2),
+		downloadStarted: make(chan struct{}, 1),
+		allowDownload:   make(chan struct{}),
+	}
+	service := NewService(cfg, store, backend, storage.NewService(cfg))
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := service.Generate(context.Background(), Request{Prompt: "first"})
+		firstDone <- err
+	}()
+	select {
+	case <-backend.generated:
+	case <-time.After(time.Second):
+		t.Fatal("first generation did not start")
+	}
+	select {
+	case <-backend.downloadStarted:
+	case <-time.After(time.Second):
+		t.Fatal("first cache download did not start")
+	}
+
+	secondDone := make(chan error, 1)
+	go func() {
+		_, err := service.Generate(context.Background(), Request{Prompt: "second"})
+		secondDone <- err
+	}()
+	select {
+	case <-backend.generated:
+		// The second request reached its upstream generation while the first
+		// response was still being cached.
+	case <-time.After(300 * time.Millisecond):
+		close(backend.allowDownload)
+		t.Fatal("cache download retained the image lease")
+	}
+	close(backend.allowDownload)
+	for _, done := range []<-chan error{firstDone, secondDone} {
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("generation did not finish")
+		}
+	}
+}
+
+func TestGenerateRemovesAccountAfterAuthenticatedCacheDownloadFailure(t *testing.T) {
+	cfg := config.Default()
+	cfg.ImageOutputDir = t.TempDir()
+	store := accounts.NewStore([]accounts.Account{{AccessToken: "token", CreatedAt: 1}}, "")
+	backend := &cacheBackend{
+		fakeBackend: &fakeBackend{},
+		downloadErr: &openaiweb.UpstreamError{Path: "/backend-api/files/file/download", StatusCode: 401, Body: `{"error":{"code":"token_revoked"}}`},
+	}
+	response, err := NewService(cfg, store, backend, storage.NewService(cfg)).Generate(context.Background(), Request{Prompt: "draw"})
+	if err != nil || len(response.Data) != 1 || response.Data[0].URL != "https://example.com/image.png" {
+		t.Fatalf("response=%#v err=%v", response, err)
+	}
+	if backend.calls != 1 {
+		t.Fatalf("image generation retried after cache failure: calls=%d", backend.calls)
+	}
+	if _, found := store.Get("token"); found {
+		t.Fatalf("invalid cache-download account was not removed: %#v", store.List())
+	}
+}
+
+func TestGenerateSharesOneTaskDeadlineAcrossAccountRetries(t *testing.T) {
+	cfg := config.Default()
+	cfg.MaxImageAttempts = 2
+	store := accounts.NewStore([]accounts.Account{{AccessToken: "first", CreatedAt: 1}, {AccessToken: "second", CreatedAt: 2}}, "")
+	var mu sync.Mutex
+	calls := 0
+	backend := &contextImageBackend{fakeBackend: &fakeBackend{}, generate: func(ctx context.Context, account accounts.Account, req openaiweb.ImageRequest) (openaiweb.ImageResult, error) {
+		mu.Lock()
+		calls++
+		call := calls
+		mu.Unlock()
+		if call == 1 {
+			select {
+			case <-time.After(75 * time.Millisecond):
+				return openaiweb.ImageResult{}, openaiweb.ErrPollTimeout
+			case <-ctx.Done():
+				return openaiweb.ImageResult{}, ctx.Err()
+			}
+		}
+		<-ctx.Done()
+		return openaiweb.ImageResult{}, ctx.Err()
+	}}
+	started := time.Now()
+	service := NewService(cfg, store, backend)
+	setTaskTimeoutForTest(service, 0.12)
+	_, err := service.Generate(context.Background(), Request{Prompt: "draw"})
+	if err == nil {
+		t.Fatal("expected shared task deadline")
+	}
+	if elapsed := time.Since(started); elapsed > 280*time.Millisecond {
+		t.Fatalf("retries extended the task deadline: %s", elapsed)
+	}
+	mu.Lock()
+	gotCalls := calls
+	mu.Unlock()
+	if gotCalls != 2 {
+		t.Fatalf("calls=%d, want two account attempts", gotCalls)
+	}
+}
+
+func TestGenerateWithAccountStartsTaskDeadlineAfterLease(t *testing.T) {
+	cfg := config.Default()
+	store := accounts.NewStore([]accounts.Account{{AccessToken: "token", CreatedAt: 1}}, "")
+	_, err := store.AcquireAccountForImage(context.Background(), "token", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend := &contextImageBackend{fakeBackend: &fakeBackend{}, generate: func(ctx context.Context, account accounts.Account, req openaiweb.ImageRequest) (openaiweb.ImageResult, error) {
+		select {
+		case <-time.After(20 * time.Millisecond):
+			return openaiweb.ImageResult{URLs: []string{"https://example.com/image.png"}, AccountEmail: account.Email}, nil
+		case <-ctx.Done():
+			return openaiweb.ImageResult{}, ctx.Err()
+		}
+	}}
+	service := NewService(cfg, store, backend)
+	setTaskTimeoutForTest(service, 0.08)
+	done := make(chan error, 1)
+	go func() {
+		_, err := service.GenerateWithAccount(context.Background(), "token", Request{Prompt: "draw"})
+		done <- err
+	}()
+	time.Sleep(120 * time.Millisecond)
+	store.ReleaseImage("token")
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("specific-account request did not finish")
+	}
+}
+
 func TestFiftyConcurrentTasksDispatchWithoutReadinessGate(t *testing.T) {
 	cfg := config.Default()
 	items := make([]accounts.Account, 0, 50)
@@ -464,6 +699,55 @@ func TestFiftyConcurrentTasksDispatchWithoutReadinessGate(t *testing.T) {
 			}
 		case <-time.After(2 * time.Second):
 			t.Fatal("concurrent image task did not complete")
+		}
+	}
+}
+
+func TestFiftyConcurrentAutoDispatchUsesPoolAccounts(t *testing.T) {
+	cfg := config.Default()
+	items := make([]accounts.Account, 0, 50)
+	for index := 0; index < 50; index++ {
+		token := fmt.Sprintf("pool-token-%02d", index)
+		items = append(items, accounts.Account{Email: token + "@example.test", AccessToken: token, Status: "正常", Extra: map[string]any{}})
+	}
+	release := make(chan struct{})
+	backend := &serialImageBackend{
+		fakeBackend: &fakeBackend{},
+		started:     make(chan struct{}, len(items)),
+		release:     release,
+	}
+	service := NewService(cfg, accounts.NewStore(items, ""), backend)
+	start := make(chan struct{})
+	done := make(chan error, len(items))
+	for range items {
+		go func() {
+			<-start
+			_, err := service.Generate(context.Background(), Request{Prompt: "draw"})
+			done <- err
+		}()
+	}
+	close(start)
+	for range items {
+		select {
+		case <-backend.started:
+		case <-time.After(time.Second):
+			close(release)
+			t.Fatal("automatic pool dispatch did not reach full account concurrency")
+		}
+	}
+	if calls, maxActive := backend.stats(); calls != len(items) || maxActive != len(items) {
+		close(release)
+		t.Fatalf("calls=%d max_active=%d", calls, maxActive)
+	}
+	close(release)
+	for range items {
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("automatic pool task did not complete")
 		}
 	}
 }

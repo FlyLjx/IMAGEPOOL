@@ -72,8 +72,18 @@ type Backend interface {
 }
 
 var (
-	ErrContentPolicy = errors.New("content policy violation")
-	ErrPollTimeout   = errors.New("image poll timeout")
+	ErrContentPolicy             = errors.New("content policy violation")
+	ErrPollTimeout               = errors.New("image poll timeout")
+	ErrImagePreparationTimeout   = errors.New("image preparation timeout")
+	ErrImageGenerationTerminated = errors.New("image generation terminated")
+)
+
+const (
+	// PublicCredentialInvalidMessage is intentionally independent of the
+	// upstream response. Upstream OAuth bodies can contain endpoint and token
+	// details which must never reach API consumers or persisted task history.
+	PublicCredentialInvalidMessage = "账号凭证已失效，已自动删除并切换账号重试"
+	PublicUpstreamFailureMessage   = "上游服务请求失败，请稍后重试"
 )
 
 type UpstreamError struct {
@@ -85,6 +95,108 @@ type UpstreamError struct {
 
 func (e *UpstreamError) Error() string {
 	return fmt.Sprintf("upstream %s status=%d body=%s", e.Path, e.StatusCode, e.Body)
+}
+
+// PublicErrorMessage returns an API-safe representation of err. It must only
+// be used at output boundaries: callers still receive the original error and
+// can therefore classify a revoked credential and remove or retry it.
+func PublicErrorMessage(err error) string {
+	if err == nil {
+		return ""
+	}
+	if IsAuthenticationError(err) {
+		return PublicCredentialInvalidMessage
+	}
+	return PublicErrorText(err.Error())
+}
+
+// PublicErrorText redacts raw upstream diagnostics that may already have been
+// flattened into a string (for example a persisted legacy task record).
+func PublicErrorText(message string) string {
+	message = strings.TrimSpace(message)
+	if message == "" {
+		return ""
+	}
+	if IsAuthenticationError(errors.New(message)) {
+		return PublicCredentialInvalidMessage
+	}
+	lower := strings.ToLower(message)
+	if strings.Contains(lower, "upstream ") ||
+		strings.Contains(lower, "/backend-api/") ||
+		strings.Contains(lower, "access_token") ||
+		strings.Contains(lower, "refresh_token") ||
+		strings.Contains(lower, "id_token") ||
+		strings.Contains(lower, "authorization:") ||
+		strings.Contains(lower, "bearer ") ||
+		strings.Contains(lower, "oauth token") {
+		return PublicUpstreamFailureMessage
+	}
+	return message
+}
+
+// PublicAttemptLogs copies logs for API output and removes raw upstream
+// diagnostics from each attempt without changing the internal source slice.
+func PublicAttemptLogs(attempts []AttemptLog) []AttemptLog {
+	if len(attempts) == 0 {
+		return nil
+	}
+	out := make([]AttemptLog, len(attempts))
+	copy(out, attempts)
+	for i := range out {
+		out[i].Error = PublicErrorText(out[i].Error)
+	}
+	return out
+}
+
+// PublicProgressEvent copies an event before it is stored or emitted to a
+// client. Retry diagnostics are sometimes carried in Details rather than the
+// human-readable message, so both locations are sanitized.
+func PublicProgressEvent(event ProgressEvent) ProgressEvent {
+	event.Message = PublicErrorText(event.Message)
+	event.Details = PublicDetails(event.Details)
+	return event
+}
+
+// PublicDetails recursively copies common JSON-compatible detail values and
+// redacts embedded error strings. Values outside these forms are left intact.
+func PublicDetails(details map[string]any) map[string]any {
+	if len(details) == 0 {
+		return nil
+	}
+	out := make(map[string]any, len(details))
+	for key, value := range details {
+		out[key] = publicDetailValue(value)
+	}
+	return out
+}
+
+func publicDetailValue(value any) any {
+	switch typed := value.(type) {
+	case string:
+		return PublicErrorText(typed)
+	case map[string]any:
+		return PublicDetails(typed)
+	case []any:
+		out := make([]any, len(typed))
+		for i := range typed {
+			out[i] = publicDetailValue(typed[i])
+		}
+		return out
+	case map[string]string:
+		out := make(map[string]string, len(typed))
+		for key, item := range typed {
+			out[key] = PublicErrorText(item)
+		}
+		return out
+	case []string:
+		out := make([]string, len(typed))
+		for i := range typed {
+			out[i] = PublicErrorText(typed[i])
+		}
+		return out
+	default:
+		return value
+	}
 }
 
 func IsTokenInvalidError(err error) bool {
@@ -132,6 +244,9 @@ func IsInteractiveChallengeError(err error) bool {
 	if err == nil {
 		return false
 	}
+	if errors.Is(err, ErrTurnstileVMCapacity) {
+		return false
+	}
 	text := strings.ToLower(err.Error())
 	return strings.Contains(text, "chat requirements requires turnstile token") ||
 		strings.Contains(text, "chat requirements requires arkose token")
@@ -155,9 +270,21 @@ func IsRetryableImageError(err error) bool {
 	if errors.Is(err, ErrContentPolicy) {
 		return false
 	}
-	text := strings.ToLower(err.Error())
-	if IsAuthenticationError(err) || IsNoFreeImageQuotaError(err) || errors.Is(err, ErrPollTimeout) {
+	if errors.Is(err, ErrTurnstileVMCapacity) {
 		return true
+	}
+	text := strings.ToLower(err.Error())
+	if IsAuthenticationError(err) || IsNoFreeImageQuotaError(err) || errors.Is(err, ErrPollTimeout) || errors.Is(err, ErrImagePreparationTimeout) || errors.Is(err, ErrImageGenerationTerminated) {
+		return true
+	}
+	var upstream *UpstreamError
+	if errors.As(err, &upstream) {
+		switch upstream.StatusCode {
+		case 408, 409, 425, 429:
+			return true
+		default:
+			return upstream.StatusCode >= 500
+		}
 	}
 	return strings.Contains(text, "image generation failed") ||
 		strings.Contains(text, "failed to generate image") ||

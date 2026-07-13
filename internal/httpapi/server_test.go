@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -33,8 +35,19 @@ type apiBackend struct{}
 type validatingAPIBackend struct {
 	apiBackend
 	mu              sync.Mutex
+	generateErr     error
 	readinessErrs   map[string]error
 	readinessTokens []string
+}
+
+func (b *validatingAPIBackend) GenerateImage(ctx context.Context, account accounts.Account, req openaiweb.ImageRequest) (openaiweb.ImageResult, error) {
+	b.mu.Lock()
+	err := b.generateErr
+	b.mu.Unlock()
+	if err != nil {
+		return openaiweb.ImageResult{}, err
+	}
+	return b.apiBackend.GenerateImage(ctx, account, req)
 }
 
 func (b *validatingAPIBackend) CheckImageReady(ctx context.Context, token string) error {
@@ -100,6 +113,17 @@ func testServer(t *testing.T) http.Handler {
 	return newTestServer(cfg)
 }
 
+func testServerWithGenerateError(t *testing.T, generateErr error) http.Handler {
+	t.Helper()
+	cfg := config.Default()
+	cfg.AuthKeyFile = filepath.Join(t.TempDir(), "auth-keys.json")
+	cfg.ImageOutputDir = filepath.Join(t.TempDir(), "images")
+	cfg.CallLogFile = filepath.Join(t.TempDir(), "calls.json")
+	cfg.ImageTagsFile = filepath.Join(t.TempDir(), "tags.json")
+	cfg.RegisterFile = filepath.Join(t.TempDir(), "register.json")
+	return newTestServerWithBackend(cfg, &validatingAPIBackend{generateErr: generateErr})
+}
+
 func TestHealthAndAuth(t *testing.T) {
 	srv := httptest.NewServer(testServer(t))
 	defer srv.Close()
@@ -153,6 +177,60 @@ func TestErrorClassificationDoesNotTreatCanceledOrRejectedRequestsAsFailures(t *
 	}
 	if got := metricCallStatus(http.StatusBadRequest, "content policy violation"); got != "rejected" {
 		t.Fatalf("rejected metric status=%q", got)
+	}
+}
+
+func TestImageTimeoutSentinelsReturnGatewayTimeout(t *testing.T) {
+	for name, err := range map[string]error{
+		"generation":  fmt.Errorf("generation: %w", openaiweb.ErrPollTimeout),
+		"preparation": fmt.Errorf("preparation: %w", openaiweb.ErrImagePreparationTimeout),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if status := statusFromError(err); status != http.StatusGatewayTimeout {
+				t.Fatalf("status=%d", status)
+			}
+			recorder := httptest.NewRecorder()
+			writeError(recorder, statusFromError(err), err)
+			var body struct {
+				Error struct {
+					Type string `json:"type"`
+					Code string `json:"code"`
+				} `json:"error"`
+			}
+			if decodeErr := json.NewDecoder(recorder.Body).Decode(&body); decodeErr != nil {
+				t.Fatal(decodeErr)
+			}
+			if recorder.Code != http.StatusGatewayTimeout || body.Error.Type != "timeout_error" || body.Error.Code != "upstream_timeout" {
+				t.Fatalf("status=%d body=%#v", recorder.Code, body)
+			}
+		})
+	}
+}
+
+func TestImageGenerationEndpointReturnsTimeoutError(t *testing.T) {
+	srv := httptest.NewServer(testServerWithGenerateError(t, openaiweb.ErrPollTimeout))
+	defer srv.Close()
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/v1/images/generations", strings.NewReader(`{"prompt":"draw"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer k")
+	response, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	var body struct {
+		Error struct {
+			Type string `json:"type"`
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusGatewayTimeout || body.Error.Type != "timeout_error" || body.Error.Code != "upstream_timeout" {
+		t.Fatalf("status=%d body=%#v", response.StatusCode, body)
 	}
 }
 
@@ -252,6 +330,118 @@ func TestImageGenerationEndpoint(t *testing.T) {
 	if tasksResponse.StatusCode != http.StatusOK || len(taskPayload.Items) != 1 || taskPayload.Items[0].Status != tasks.StatusSucceeded {
 		t.Fatalf("task status=%d payload=%#v", tasksResponse.StatusCode, taskPayload)
 	}
+}
+
+func TestCredentialFailureNeverLeaksUpstreamDiagnostics(t *testing.T) {
+	raw := &openaiweb.UpstreamError{Path: "/backend-api/files", StatusCode: http.StatusUnauthorized, Body: `{"error":{"code":"token_revoked","message":"invalidated oauth token"}}`}
+	assertRedacted := func(t *testing.T, body []byte) {
+		t.Helper()
+		text := strings.ToLower(string(body))
+		for _, leaked := range []string{"/backend-api/", "token_revoked", "invalidated oauth token", "body="} {
+			if strings.Contains(text, leaked) {
+				t.Fatalf("response leaked %q: %s", leaked, body)
+			}
+		}
+	}
+	assertPublicMessage := func(t *testing.T, body []byte) {
+		t.Helper()
+		if !strings.Contains(string(body), openaiweb.PublicCredentialInvalidMessage) {
+			t.Fatalf("missing public credential message: %s", body)
+		}
+	}
+
+	t.Run("json", func(t *testing.T) {
+		srv := httptest.NewServer(testServerWithGenerateError(t, raw))
+		defer srv.Close()
+		req, _ := http.NewRequest(http.MethodPost, srv.URL+"/v1/images/generations", strings.NewReader(`{"prompt":"draw"}`))
+		req.Header.Set("Authorization", "Bearer k")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("status=%d body=%s", resp.StatusCode, body)
+		}
+		var payload struct {
+			Error struct {
+				Type string `json:"type"`
+				Code string `json:"code"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal(body, &payload); err != nil {
+			t.Fatal(err)
+		}
+		if payload.Error.Type != "authentication_error" || payload.Error.Code != "account_credential_invalid" {
+			t.Fatalf("payload=%s", body)
+		}
+		assertRedacted(t, body)
+		assertPublicMessage(t, body)
+	})
+
+	t.Run("sse", func(t *testing.T) {
+		srv := httptest.NewServer(testServerWithGenerateError(t, raw))
+		defer srv.Close()
+		req, _ := http.NewRequest(http.MethodPost, srv.URL+"/v1/images/generations", strings.NewReader(`{"prompt":"draw","stream":true}`))
+		req.Header.Set("Authorization", "Bearer k")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status=%d body=%s", resp.StatusCode, body)
+		}
+		assertRedacted(t, body)
+		assertPublicMessage(t, body)
+	})
+
+	t.Run("task-status", func(t *testing.T) {
+		srv := httptest.NewServer(testServerWithGenerateError(t, raw))
+		defer srv.Close()
+		create, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/image-tasks/generations", strings.NewReader(`{"prompt":"draw"}`))
+		create.Header.Set("Authorization", "Bearer k")
+		created, err := http.DefaultClient.Do(create)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var submitted tasks.Task
+		if err := json.NewDecoder(created.Body).Decode(&submitted); err != nil {
+			created.Body.Close()
+			t.Fatal(err)
+		}
+		created.Body.Close()
+		if submitted.ID == "" {
+			t.Fatalf("submitted=%#v", submitted)
+		}
+
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			request, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/image-tasks/"+submitted.ID+"/status", nil)
+			request.Header.Set("Authorization", "Bearer k")
+			response, err := http.DefaultClient.Do(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			body, _ := io.ReadAll(response.Body)
+			response.Body.Close()
+			assertRedacted(t, body)
+			var task tasks.Task
+			if err := json.Unmarshal(body, &task); err != nil {
+				t.Fatal(err)
+			}
+			if task.Status == tasks.StatusFailed {
+				if task.Error != openaiweb.PublicCredentialInvalidMessage || task.RealtimeStatus != openaiweb.PublicCredentialInvalidMessage {
+					t.Fatalf("task=%#v", task)
+				}
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		t.Fatal("task did not reach failed state")
+	})
 }
 
 func TestCompactTaskListOmitsLogsAndLegacyAlias(t *testing.T) {

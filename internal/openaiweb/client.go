@@ -24,9 +24,31 @@ import (
 
 const (
 	defaultUserAgent         = accounts.DefaultBrowserUserAgent
-	defaultClientVersion     = "prod-a194cd50d4416d3c0b47c740f206b12ce60f5887"
-	defaultClientBuildNumber = "6708908"
+	defaultClientVersion     = "prod-de97061a1c9aff3931a7342defd6241031cd316a"
+	defaultClientBuildNumber = "8160987"
+	bootstrapResourcesTTL    = 5 * time.Minute
+	// Keep setup failures from consuming the full image-generation window. A
+	// submitted image still receives the complete poll timeout below.
+	defaultImagePreparationTimeout = 30 * time.Second
 )
+
+type bootstrapResourcesCacheKey struct {
+	accessToken string
+	proxy       string
+}
+
+type bootstrapResourcesCacheEntry struct {
+	scripts   []string
+	build     string
+	expiresAt time.Time
+}
+
+type bootstrapResourcesFlight struct {
+	done    chan struct{}
+	scripts []string
+	build   string
+	err     error
+}
 
 type Client struct {
 	baseURL                   string
@@ -36,6 +58,8 @@ type Client struct {
 	pollInitialWait           time.Duration
 	pollHeartbeatInterval     time.Duration
 	pollRequestTimeout        time.Duration
+	imagePreparationTimeout   time.Duration
+	imageStreamOpenTimeout    time.Duration
 	imageStreamIdleTimeout    time.Duration
 	settle                    time.Duration
 	checkBeforeHit            bool
@@ -49,6 +73,11 @@ type Client struct {
 	tlsMu                     sync.Mutex
 	tlsClients                map[string]*http.Client
 	tlsResources              map[string]*http.Client
+	tlsStreamClients          map[string]*http.Client
+	bootstrapMu               sync.Mutex
+	bootstrapResources        map[bootstrapResourcesCacheKey]bootstrapResourcesCacheEntry
+	bootstrapFlights          map[bootstrapResourcesCacheKey]*bootstrapResourcesFlight
+	now                       func() time.Time
 	newID                     func() string
 	sleep                     func(context.Context, time.Duration) error
 	bootstrapClearanceRefresh func(context.Context) (*Client, error)
@@ -84,9 +113,9 @@ func NewClient(cfg config.Config, opts ...ClientOption) *Client {
 	}
 	c := &Client{
 		baseURL: strings.TrimRight(cfg.ChatGPTBaseURL, "/"), imageModelSlug: cfg.ImageWebModelSlug,
-		pollTimeout: seconds(cfg.ImagePollTimeoutSecs), pollInterval: seconds(cfg.ImagePollIntervalSecs), pollInitialWait: seconds(cfg.ImagePollInitialWaitSecs), pollHeartbeatInterval: 15 * time.Second, pollRequestTimeout: 20 * time.Second, imageStreamIdleTimeout: 8 * time.Second, settle: seconds(cfg.ImageSettleSecs),
+		pollTimeout: seconds(cfg.ImagePollTimeoutSecs), pollInterval: seconds(cfg.ImagePollIntervalSecs), pollInitialWait: seconds(cfg.ImagePollInitialWaitSecs), pollHeartbeatInterval: 15 * time.Second, pollRequestTimeout: 20 * time.Second, imagePreparationTimeout: defaultImagePreparationTimeout, imageStreamOpenTimeout: defaultImageStreamOpenTimeout, imageStreamIdleTimeout: defaultImageStreamIdleWindow, settle: seconds(cfg.ImageSettleSecs),
 		checkBeforeHit: cfg.ImageCheckBeforeHitEnabled, settleEnabled: cfg.ImageSettleEnabled,
-		httpClient: httpClient, resourceClient: resourceClient, proxyRuntime: cfg.ProxyRuntime, transport: cfg.UpstreamTransport, timeout: seconds(cfg.RequestTimeoutSecs), tlsClients: map[string]*http.Client{}, tlsResources: map[string]*http.Client{}, newID: newUUID,
+		httpClient: httpClient, resourceClient: resourceClient, proxyRuntime: cfg.ProxyRuntime, transport: cfg.UpstreamTransport, timeout: seconds(cfg.RequestTimeoutSecs), tlsClients: map[string]*http.Client{}, tlsResources: map[string]*http.Client{}, tlsStreamClients: map[string]*http.Client{}, bootstrapResources: map[bootstrapResourcesCacheKey]bootstrapResourcesCacheEntry{}, bootstrapFlights: map[bootstrapResourcesCacheKey]*bootstrapResourcesFlight{}, now: time.Now, newID: newUUID,
 		sleep: func(ctx context.Context, d time.Duration) error {
 			if d <= 0 {
 				return nil
@@ -275,35 +304,44 @@ func (c *Client) GenerateImage(ctx context.Context, account accounts.Account, re
 		progress = func(ProgressEvent) {}
 	}
 	backendModel := c.imageSlug(req.Model)
+	attemptCtx, cancelAttempt := c.imageAttemptContext(ctx)
+	defer cancelAttempt()
+	preparationCtx, cancelPreparation := c.imagePreparationContext(attemptCtx)
+	defer cancelPreparation()
 
 	progress(ProgressEvent{Progress: "uploading", Message: "上传参考图"})
 	refs := make([]uploadMeta, 0, len(req.References))
 	for i, image := range req.References {
-		meta, err := c.uploadImage(ctx, account, image, i+1, len(req.References))
+		meta, err := c.uploadImage(preparationCtx, account, image, i+1, len(req.References))
 		if err != nil {
-			return ImageResult{}, err
+			return ImageResult{}, c.imagePreparationError(ctx, err)
 		}
 		refs = append(refs, meta)
 	}
 	progress(ProgressEvent{Progress: "bootstrapping", Message: "初始化 ChatGPT Web 会话"})
-	scripts, dataBuild, err := c.bootstrapWithResources(ctx, account)
+	scripts, dataBuild, err := c.bootstrapWithResources(preparationCtx, account)
 	if err != nil {
-		return ImageResult{}, err
+		return ImageResult{}, c.imagePreparationError(ctx, err)
 	}
 	progress(ProgressEvent{Progress: "getting_token", Message: "获取 sentinel token"})
-	requirements, err := c.chatRequirements(ctx, account, scripts, dataBuild)
+	requirements, err := c.chatRequirements(preparationCtx, account, scripts, dataBuild)
 	if err != nil {
-		return ImageResult{}, err
+		return ImageResult{}, c.imagePreparationError(ctx, err)
 	}
 	progress(ProgressEvent{Progress: "preparing_conversation", Message: "准备生图会话"})
-	conduit, turnTraceID, parentMessageID, err := c.prepareImageConversation(ctx, account, req.Prompt, backendModel, requirements, refs)
+	conduit, turnTraceID, parentMessageID, err := c.prepareImageConversation(preparationCtx, account, req.Prompt, backendModel, requirements, refs)
 	if err != nil {
-		return ImageResult{}, err
+		return ImageResult{}, c.imagePreparationError(ctx, err)
 	}
+	// The preparation deadline must not continue to constrain a conversation
+	// after it has been accepted by the upstream.
+	cancelPreparation()
 	progress(ProgressEvent{Progress: "starting_generation", Message: "提交生图请求"})
-	conversationID, fileIDs, sedimentIDs, err := c.startImageGeneration(ctx, account, req.Prompt, backendModel, requirements, conduit, turnTraceID, parentMessageID, refs)
+	generationCtx, cancelGeneration := c.imageGenerationContext(attemptCtx)
+	defer cancelGeneration()
+	conversationID, fileIDs, sedimentIDs, err := c.startImageGenerationWithinBudget(generationCtx, account, req.Prompt, backendModel, requirements, conduit, turnTraceID, parentMessageID, refs)
 	if err != nil {
-		return ImageResult{}, err
+		return ImageResult{}, imageAttemptError(ctx, generationCtx, err)
 	}
 	progress(ProgressEvent{Progress: "image_stream_resolve_start", Message: "解析图片结果", Details: map[string]any{"conversation_id": conversationID}})
 	uploadedFileIDs := make([]string, 0, len(refs))
@@ -312,23 +350,77 @@ func (c *Client) GenerateImage(ctx context.Context, account accounts.Account, re
 			uploadedFileIDs = append(uploadedFileIDs, ref.FileID)
 		}
 	}
-	urls, err := c.resolveConversationImageURLs(ctx, account, conversationID, fileIDs, sedimentIDs, true, progress, uploadedFileIDs...)
+	urls, err := c.resolveConversationImageURLs(generationCtx, account, conversationID, fileIDs, sedimentIDs, true, progress, uploadedFileIDs...)
 	if err != nil {
-		return ImageResult{}, err
+		return ImageResult{}, imageAttemptError(ctx, generationCtx, err)
 	}
 	if len(urls) == 0 {
 		return ImageResult{}, fmt.Errorf("upstream completed without generating images")
 	}
 	out := ImageResult{URLs: urls, ConversationID: conversationID, AccountEmail: account.Email, BackendModel: backendModel}
 	if strings.EqualFold(req.ResponseFormat, "b64_json") {
-		b64, err := c.downloadBase64(ctx, account, urls)
+		b64, err := c.downloadBase64(generationCtx, account, urls)
 		if err != nil {
-			return ImageResult{}, err
+			return ImageResult{}, imageAttemptError(ctx, generationCtx, err)
 		}
 		out.B64JSON = b64
 		out.URLs = nil
 	}
 	return out, nil
+}
+
+func imageAttemptError(parent, generationCtx context.Context, err error) error {
+	if errors.Is(err, context.DeadlineExceeded) && (parent == nil || parent.Err() == nil) {
+		return imageGenerationError(generationCtx, err)
+	}
+	return err
+}
+
+// imageAttemptContext contains every network phase for one account. Setup is
+// separately capped so a hung bootstrap or upload cannot consume the full
+// generation window, while the outer task context limits account switching.
+func (c *Client) imageAttemptContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithTimeout(ctx, c.imagePreparationBudget()+c.imageGenerationBudget())
+}
+
+func (c *Client) imagePreparationContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithTimeout(ctx, c.imagePreparationBudget())
+}
+
+func (c *Client) imagePreparationBudget() time.Duration {
+	timeout := c.imagePreparationTimeout
+	if timeout <= 0 {
+		return defaultImagePreparationTimeout
+	}
+	return timeout
+}
+
+func (c *Client) imageGenerationBudget() time.Duration {
+	timeout := c.pollTimeout
+	if timeout <= 0 {
+		return 180 * time.Second
+	}
+	return timeout
+}
+
+func (c *Client) imagePreparationError(parent context.Context, err error) error {
+	// VM capacity is process-wide congestion, not an account-specific setup
+	// timeout. Its wrapped deadline comes from waiting for a VM slot, so keep
+	// the sentinel intact for the dispatcher to handle without cooling an
+	// otherwise healthy account.
+	if errors.Is(err, ErrTurnstileVMCapacity) {
+		return err
+	}
+	if errors.Is(err, context.DeadlineExceeded) && (parent == nil || parent.Err() == nil) {
+		return fmt.Errorf("%w: ChatGPT 生图准备超时（已等待 %.0f 秒）", ErrImagePreparationTimeout, c.imagePreparationBudget().Seconds())
+	}
+	return err
 }
 
 func (c *Client) imageSlug(model string) string {
@@ -348,6 +440,51 @@ func (c *Client) bootstrap(ctx context.Context, account accounts.Account) error 
 }
 
 func (c *Client) bootstrapWithResources(ctx context.Context, account accounts.Account) ([]string, string, error) {
+	key := bootstrapResourcesKey(account)
+	now := c.bootstrapNow()
+	c.bootstrapMu.Lock()
+	if cached, ok := c.bootstrapResources[key]; ok {
+		if now.Before(cached.expiresAt) {
+			scripts, build := cloneBootstrapScripts(cached.scripts), cached.build
+			c.bootstrapMu.Unlock()
+			return scripts, build, nil
+		}
+		delete(c.bootstrapResources, key)
+	}
+	if flight := c.bootstrapFlights[key]; flight != nil {
+		c.bootstrapMu.Unlock()
+		select {
+		case <-flight.done:
+			return cloneBootstrapScripts(flight.scripts), flight.build, flight.err
+		case <-ctx.Done():
+			return nil, "", ctx.Err()
+		}
+	}
+	if c.bootstrapFlights == nil {
+		c.bootstrapFlights = map[bootstrapResourcesCacheKey]*bootstrapResourcesFlight{}
+	}
+	flight := &bootstrapResourcesFlight{done: make(chan struct{})}
+	c.bootstrapFlights[key] = flight
+	c.bootstrapMu.Unlock()
+
+	scripts, build, err := c.bootstrapWithResourcesUncached(ctx, account)
+	c.bootstrapMu.Lock()
+	delete(c.bootstrapFlights, key)
+	flight.scripts = cloneBootstrapScripts(scripts)
+	flight.build = build
+	flight.err = err
+	if err == nil {
+		if c.bootstrapResources == nil {
+			c.bootstrapResources = map[bootstrapResourcesCacheKey]bootstrapResourcesCacheEntry{}
+		}
+		c.bootstrapResources[key] = bootstrapResourcesCacheEntry{scripts: cloneBootstrapScripts(scripts), build: build, expiresAt: c.bootstrapNow().Add(bootstrapResourcesTTL)}
+	}
+	close(flight.done)
+	c.bootstrapMu.Unlock()
+	return scripts, build, err
+}
+
+func (c *Client) bootstrapWithResourcesUncached(ctx context.Context, account accounts.Account) ([]string, string, error) {
 	scripts, build, err := c.bootstrapWithResourcesOnce(ctx, account)
 	if err == nil || !isBootstrapCloudflareError(err) || c.bootstrapClearanceRefresh == nil {
 		return scripts, build, err
@@ -360,7 +497,38 @@ func (c *Client) bootstrapWithResources(ctx context.Context, account accounts.Ac
 		return scripts, build, err
 	}
 	log.Printf("ChatGPT bootstrap HTTP 403; refreshed FlareSolverr clearance and retrying once")
-	return refreshed.bootstrapWithResourcesOnce(ctx, account)
+	scripts, build, err = refreshed.bootstrapWithResourcesOnce(ctx, account)
+	if err == nil && refreshed != c {
+		refreshed.cacheBootstrapResources(account, scripts, build)
+	}
+	return scripts, build, err
+}
+
+func bootstrapResourcesKey(account accounts.Account) bootstrapResourcesCacheKey {
+	return bootstrapResourcesCacheKey{accessToken: strings.TrimSpace(account.AccessToken), proxy: strings.TrimSpace(account.Proxy)}
+}
+
+func cloneBootstrapScripts(scripts []string) []string {
+	return append([]string(nil), scripts...)
+}
+
+func (c *Client) bootstrapNow() time.Time {
+	if c != nil && c.now != nil {
+		return c.now()
+	}
+	return time.Now()
+}
+
+func (c *Client) cacheBootstrapResources(account accounts.Account, scripts []string, build string) {
+	if c == nil {
+		return
+	}
+	c.bootstrapMu.Lock()
+	defer c.bootstrapMu.Unlock()
+	if c.bootstrapResources == nil {
+		c.bootstrapResources = map[bootstrapResourcesCacheKey]bootstrapResourcesCacheEntry{}
+	}
+	c.bootstrapResources[bootstrapResourcesKey(account)] = bootstrapResourcesCacheEntry{scripts: cloneBootstrapScripts(scripts), build: build, expiresAt: c.bootstrapNow().Add(bootstrapResourcesTTL)}
 }
 
 func (c *Client) bootstrapWithResourcesOnce(ctx context.Context, account accounts.Account) ([]string, string, error) {
@@ -408,7 +576,7 @@ func (c *Client) chatRequirements(ctx context.Context, account accounts.Account,
 	}
 	proofToken := ""
 	if po, _ := prepare["proofofwork"].(map[string]any); truthy(po["required"]) {
-		token, err := buildProofToken(str(po["seed"]), str(po["difficulty"]), c.userAgent(account), scripts, dataBuild)
+		token, err := buildProofToken(ctx, str(po["seed"]), str(po["difficulty"]), c.userAgent(account), scripts, dataBuild)
 		if err != nil {
 			return chatRequirements{}, err
 		}
@@ -456,44 +624,33 @@ func (c *Client) prepareImageConversation(ctx context.Context, account accounts.
 	path := "/backend-api/f/conversation/prepare"
 	turnTraceID := c.newID()
 	parentMessageID := c.newID()
-	conduit := ""
-	for _, state := range []string{"none", "sent", "success"} {
-		payload := map[string]any{
-			"action":                 "next",
-			"fork_from_shared_post":  false,
-			"parent_message_id":      parentMessageID,
-			"model":                  model,
-			"client_prepare_state":   state,
-			"timezone_offset_min":    -480,
-			"timezone":               "Asia/Shanghai",
-			"conversation_mode":      map[string]any{"kind": "primary_assistant"},
-			"system_hints":           []string{},
-			"supports_buffering":     true,
-			"supported_encodings":    []string{"v1"},
-			"client_contextual_info": map[string]any{"app_name": "chatgpt.com"},
-			"thinking_effort":        "standard",
-		}
-		if state != "none" {
-			payload["partial_query"] = map[string]any{
-				"id":      c.newID(),
-				"author":  map[string]any{"role": "user"},
-				"content": imageMessageContent(prompt, refs),
-			}
-		}
-		if mimeTypes := imageAttachmentMIMETypes(refs); len(mimeTypes) > 0 {
-			payload["attachment_mime_types"] = mimeTypes
-		}
-		var out struct {
-			ConduitToken string `json:"conduit_token"`
-		}
-		requestConduit := conduit
-		if requestConduit == "" {
-			requestConduit = "no-token"
-		}
-		if err := c.doJSON(ctx, account, http.MethodPost, path, path, payload, c.imageHeaders(requirements, requestConduit, "*/*", turnTraceID), &out); err != nil {
-			return "", "", "", fmt.Errorf("prepare conversation(%s): %w", state, err)
-		}
-		conduit = strings.TrimSpace(out.ConduitToken)
+	payload := map[string]any{
+		"action":                 "next",
+		"fork_from_shared_post":  false,
+		"parent_message_id":      parentMessageID,
+		"model":                  model,
+		"client_prepare_state":   "none",
+		"timezone_offset_min":    -480,
+		"timezone":               "Asia/Shanghai",
+		"conversation_mode":      map[string]any{"kind": "primary_assistant"},
+		"system_hints":           []string{},
+		"supports_buffering":     true,
+		"supported_encodings":    []string{"v1"},
+		"client_contextual_info": map[string]any{"app_name": "chatgpt.com"},
+		"thinking_effort":        "standard",
+	}
+	if mimeTypes := imageAttachmentMIMETypes(refs); len(mimeTypes) > 0 {
+		payload["attachment_mime_types"] = mimeTypes
+	}
+	var out struct {
+		ConduitToken string `json:"conduit_token"`
+	}
+	if err := c.doJSON(ctx, account, http.MethodPost, path, path, payload, c.imageHeaders(requirements, "no-token", "*/*", turnTraceID), &out); err != nil {
+		return "", "", "", fmt.Errorf("prepare conversation(none): %w", err)
+	}
+	conduit := strings.TrimSpace(out.ConduitToken)
+	if conduit == "" {
+		return "", "", "", fmt.Errorf("prepare conversation(none): missing conduit_token")
 	}
 	return conduit, turnTraceID, parentMessageID, nil
 }
@@ -534,12 +691,23 @@ func (c *Client) downloadImageFor(ctx context.Context, account accounts.Account,
 		return nil, err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		if readErr != nil {
+			return nil, readErr
+		}
+		if c.isUpstreamURL(imageURL) {
+			path := imageURL
+			if target, parseErr := url.Parse(imageURL); parseErr == nil {
+				path = target.RequestURI()
+			}
+			return nil, &UpstreamError{Path: path, StatusCode: resp.StatusCode, Body: string(body)}
+		}
+		return nil, fmt.Errorf("download image status=%d", resp.StatusCode)
+	}
 	data, readErr := io.ReadAll(io.LimitReader(resp.Body, 100<<20))
 	if readErr != nil {
 		return nil, readErr
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("download image status=%d", resp.StatusCode)
 	}
 	return data, nil
 }
@@ -626,6 +794,19 @@ func (c *Client) clientFor(account accounts.Account, resource bool) *http.Client
 	return c.httpClient
 }
 
+func (c *Client) streamClientFor(account accounts.Account) *http.Client {
+	if c.transport == "tls_client" && !c.customHTTP && strings.TrimSpace(account.AccessToken) != "" {
+		return c.tlsStreamClientFor(account)
+	}
+	client := c.clientFor(account, false)
+	if client == nil {
+		return nil
+	}
+	clone := *client
+	clone.Timeout = 0
+	return &clone
+}
+
 func (c *Client) tlsClientFor(account accounts.Account, resource bool) *http.Client {
 	key := strings.TrimSpace(account.AccessToken) + "\n" + strings.TrimSpace(account.Proxy)
 	c.tlsMu.Lock()
@@ -653,4 +834,39 @@ func (c *Client) tlsClientFor(account accounts.Account, resource bool) *http.Cli
 	}
 	cache[key] = client
 	return client
+}
+
+func (c *Client) tlsStreamClientFor(account accounts.Account) *http.Client {
+	key := strings.TrimSpace(account.AccessToken) + "\n" + strings.TrimSpace(account.Proxy)
+	c.tlsMu.Lock()
+	if cached := c.tlsStreamClients[key]; cached != nil {
+		c.tlsMu.Unlock()
+		return cached
+	}
+	c.tlsMu.Unlock()
+
+	// Reuse the normal client's jar so bootstrap cookies remain available to the
+	// SSE request, while using a separate client without a total timeout.
+	normal := c.tlsClientFor(account, false)
+	runtime := c.proxyRuntime
+	if proxyURL := strings.TrimSpace(account.Proxy); proxyURL != "" {
+		runtime.Enabled = true
+		runtime.EgressMode = "single_proxy"
+		runtime.ProxyURL = proxyURL
+		runtime.ResourceProxyURL = proxyURL
+	}
+	stream, err := browsertransport.NewStreamingHTTPClient(runtime, false, browsertransport.CookieJarForHTTPClient(normal))
+	if err != nil || stream == nil {
+		clone := *normal
+		clone.Timeout = 0
+		return &clone
+	}
+
+	c.tlsMu.Lock()
+	defer c.tlsMu.Unlock()
+	if cached := c.tlsStreamClients[key]; cached != nil {
+		return cached
+	}
+	c.tlsStreamClients[key] = stream
+	return stream
 }

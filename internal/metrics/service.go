@@ -15,7 +15,10 @@ import (
 	"imagepool/internal/persistence"
 )
 
-const defaultMaxEntries = 5000
+const (
+	defaultMaxEntries = 5000
+	persistDebounce   = 150 * time.Millisecond
+)
 
 type Call struct {
 	ID         string         `json:"id"`
@@ -51,12 +54,18 @@ type Stability struct {
 
 type Service struct {
 	mu       sync.RWMutex
+	persist  sync.Mutex
 	path     string
 	state    persistence.Store
 	max      int
 	calls    []Call
 	now      func() time.Time
 	sequence uint64
+	dirty    bool
+	wake     chan struct{}
+	stop     chan struct{}
+	done     chan struct{}
+	close    sync.Once
 }
 
 func NewService(path string) *Service {
@@ -70,6 +79,12 @@ func NewServiceWithPersistence(state persistence.Store) *Service {
 func newService(path string, state persistence.Store) *Service {
 	s := &Service{path: strings.TrimSpace(path), state: state, max: defaultMaxEntries, now: time.Now}
 	_ = s.load()
+	if s.path != "" || s.state != nil {
+		s.wake = make(chan struct{}, 1)
+		s.stop = make(chan struct{})
+		s.done = make(chan struct{})
+		go s.persistenceLoop()
+	}
 	return s
 }
 
@@ -78,7 +93,6 @@ func (s *Service) Record(call Call) {
 		return
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if call.Time.IsZero() {
 		call.Time = s.now()
 	}
@@ -106,7 +120,9 @@ func (s *Service) Record(call Call) {
 	if len(s.calls) > s.max {
 		s.calls = append([]Call(nil), s.calls[len(s.calls)-s.max:]...)
 	}
-	_ = s.saveLocked()
+	s.dirty = true
+	s.mu.Unlock()
+	s.signalPersistence()
 }
 
 func (s *Service) List(kind, startDate, endDate string) []Call {
@@ -144,11 +160,12 @@ func (s *Service) Delete(ids []string) int {
 		}
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if len(wanted) == 0 {
 		removed := len(s.calls)
 		s.calls = nil
-		_ = s.saveLocked()
+		s.dirty = true
+		s.mu.Unlock()
+		s.signalPersistence()
 		return removed
 	}
 	next := s.calls[:0]
@@ -162,7 +179,11 @@ func (s *Service) Delete(ids []string) int {
 	}
 	s.calls = next
 	if removed > 0 {
-		_ = s.saveLocked()
+		s.dirty = true
+	}
+	s.mu.Unlock()
+	if removed > 0 {
+		s.signalPersistence()
 	}
 	return removed
 }
@@ -370,9 +391,104 @@ func (s *Service) load() error {
 	return nil
 }
 
-func (s *Service) saveLocked() error {
+func (s *Service) signalPersistence() {
+	if s == nil || s.wake == nil {
+		return
+	}
+	select {
+	case s.wake <- struct{}{}:
+	default:
+	}
+}
+
+func (s *Service) persistenceLoop() {
+	defer close(s.done)
+	for {
+		select {
+		case <-s.wake:
+			timer := time.NewTimer(persistDebounce)
+			select {
+			case <-timer.C:
+				_ = s.persistPending()
+			case <-s.stop:
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				_ = s.persistPending()
+				return
+			}
+		case <-s.stop:
+			_ = s.persistPending()
+			return
+		}
+	}
+}
+
+// Flush writes the current in-memory call history. Normal request handling
+// uses the debounce loop above; this is intended for tests and graceful
+// shutdown so no completed request is lost when the container exits.
+func (s *Service) Flush() error {
+	if s == nil {
+		return nil
+	}
+	for {
+		err := s.persistPending()
+		if err != nil {
+			return err
+		}
+		s.mu.RLock()
+		dirty := s.dirty
+		s.mu.RUnlock()
+		if !dirty {
+			return nil
+		}
+	}
+}
+
+// Close stops the persistence worker after flushing pending metrics. It does
+// not close the shared persistence.Store, which is owned by the application.
+func (s *Service) Close() {
+	if s == nil || s.stop == nil {
+		return
+	}
+	s.close.Do(func() {
+		close(s.stop)
+		<-s.done
+		_ = s.Flush()
+	})
+}
+
+func (s *Service) persistPending() error {
+	if s == nil {
+		return nil
+	}
+	s.persist.Lock()
+	defer s.persist.Unlock()
+
+	s.mu.Lock()
+	if !s.dirty {
+		s.mu.Unlock()
+		return nil
+	}
+	calls := append([]Call(nil), s.calls...)
+	s.dirty = false
+	s.mu.Unlock()
+
+	err := s.save(calls)
+	if err != nil {
+		s.mu.Lock()
+		s.dirty = true
+		s.mu.Unlock()
+	}
+	return err
+}
+
+func (s *Service) save(calls []Call) error {
 	if s.state != nil {
-		return s.state.Save(context.Background(), "calls", s.calls)
+		return s.state.Save(context.Background(), "calls", calls)
 	}
 	if s.path == "" {
 		return nil
@@ -380,7 +496,7 @@ func (s *Service) saveLocked() error {
 	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
 		return err
 	}
-	data, err := json.MarshalIndent(s.calls, "", "  ")
+	data, err := json.MarshalIndent(calls, "", "  ")
 	if err != nil {
 		return err
 	}

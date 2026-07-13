@@ -3,8 +3,10 @@ package images
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
+	"net/http"
 	"net/url"
 	"strings"
 	"sync"
@@ -89,8 +91,9 @@ func (s *Service) currentConfig() config.Config {
 }
 
 func (s *Service) Generate(ctx context.Context, req Request) (Response, error) {
-	ctx, cancel := s.taskContext(ctx)
-	defer cancel()
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if req.N <= 0 {
 		req.N = 1
 	}
@@ -245,8 +248,9 @@ func (s *Service) checkAccountDetails(ctx context.Context, account accounts.Acco
 }
 
 func (s *Service) GenerateWithAccount(ctx context.Context, token string, req Request) (Response, error) {
-	ctx, cancel := s.taskContext(ctx)
-	defer cancel()
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	account, ok := s.store.Get(token)
 	if !ok {
 		return Response{}, fmt.Errorf("account not found")
@@ -257,7 +261,17 @@ func (s *Service) GenerateWithAccount(ctx context.Context, token string, req Req
 	if err != nil {
 		return Response{}, err
 	}
-	defer s.store.ReleaseImage(account.AccessToken)
+	taskCtx, cancel := s.taskContext(ctx)
+	defer cancel()
+	released := false
+	release := func() {
+		if released {
+			return
+		}
+		s.store.ReleaseImage(account.AccessToken)
+		released = true
+	}
+	defer release()
 	if req.N <= 0 {
 		req.N = 1
 	}
@@ -265,11 +279,9 @@ func (s *Service) GenerateWithAccount(ctx context.Context, token string, req Req
 	if err != nil {
 		return Response{}, err
 	}
-	result, err := s.backend.GenerateImage(ctx, account, req)
+	result, err := s.backend.GenerateImage(taskCtx, account, req)
 	if err != nil {
-		if !openaiweb.IsInteractiveChallengeError(err) {
-			_ = s.store.MarkFailure(account.AccessToken, err)
-		}
+		s.recordImageFailure(account.AccessToken, err)
 		if openaiweb.IsAuthenticationError(err) {
 			_, _ = s.store.RemoveInvalidToken(account.AccessToken, err.Error())
 		} else if openaiweb.IsNoFreeImageQuotaError(err) {
@@ -277,8 +289,12 @@ func (s *Service) GenerateWithAccount(ctx context.Context, token string, req Req
 		}
 		return Response{}, err
 	}
-	result = s.cacheResult(ctx, account, result, req.OutputBaseURL)
 	_ = s.store.MarkImageSuccess(account.AccessToken)
+	// Downloads only need the immutable account identity; releasing the image
+	// lease here lets the next queued generation start while the local cache is
+	// populated.
+	release()
+	result = s.cacheResult(taskCtx, account, result, req.OutputBaseURL)
 	return responseFromResult(result), nil
 }
 
@@ -294,6 +310,9 @@ func (s *Service) taskContext(parent context.Context) (context.Context, context.
 }
 
 func (s *Service) generateOne(ctx context.Context, req Request) (openaiweb.ImageResult, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	exclude := map[string]bool{}
 	attempts := []openaiweb.AttemptLog{}
 	maxAttempts := s.currentConfig().MaxImageAttempts
@@ -303,8 +322,19 @@ func (s *Service) generateOne(ctx context.Context, req Request) (openaiweb.Image
 	var lastErr error
 	imageAttempts := 0
 	authenticationRetries := 0
+	var taskCtx context.Context
+	var cancelTask context.CancelFunc
+	defer func() {
+		if cancelTask != nil {
+			cancelTask()
+		}
+	}()
 	for imageAttempts < maxAttempts {
-		account, err := s.store.AcquireForImage(ctx, exclude, func() {
+		acquireCtx := ctx
+		if taskCtx != nil {
+			acquireCtx = taskCtx
+		}
+		account, err := s.store.AcquireForImage(acquireCtx, exclude, func() {
 			reportAccountWait(req, accounts.Account{})
 		})
 		if err != nil {
@@ -314,6 +344,9 @@ func (s *Service) generateOne(ctx context.Context, req Request) (openaiweb.Image
 			return openaiweb.ImageResult{Attempts: attempts}, err
 		}
 		exclude[account.AccessToken] = true
+		if taskCtx == nil {
+			taskCtx, cancelTask = s.taskContext(ctx)
+		}
 		log := openaiweb.AttemptLog{Attempt: len(attempts) + 1, AccountEmail: account.Email, Status: "running"}
 		account, err = s.prepareAccountForDispatch(account, req)
 		if err != nil {
@@ -333,11 +366,11 @@ func (s *Service) generateOne(ctx context.Context, req Request) (openaiweb.Image
 		}
 		log.AccountEmail = account.Email
 		imageAttempts++
-		result, err := s.backend.GenerateImage(ctx, account, req)
+		result, err := s.backend.GenerateImage(taskCtx, account, req)
 		if err == nil {
-			result = s.cacheResult(ctx, account, result, req.OutputBaseURL)
 			_ = s.store.MarkImageSuccess(account.AccessToken)
 			s.store.ReleaseImage(account.AccessToken)
+			result = s.cacheResult(taskCtx, account, result, req.OutputBaseURL)
 			log.Status = "success"
 			log.BackendModel = result.BackendModel
 			log.ConversationID = result.ConversationID
@@ -348,9 +381,7 @@ func (s *Service) generateOne(ctx context.Context, req Request) (openaiweb.Image
 		lastErr = err
 		log.Status = "failed"
 		log.Error = err.Error()
-		if !openaiweb.IsInteractiveChallengeError(err) {
-			_ = s.store.MarkFailure(account.AccessToken, err)
-		}
+		s.recordImageFailure(account.AccessToken, err)
 		authenticationError := openaiweb.IsAuthenticationError(err)
 		if authenticationError {
 			removed, _ := s.store.RemoveInvalidToken(account.AccessToken, err.Error())
@@ -382,6 +413,40 @@ func (s *Service) generateOne(ctx context.Context, req Request) (openaiweb.Image
 		lastErr = fmt.Errorf("image generation failed")
 	}
 	return openaiweb.ImageResult{Attempts: attempts}, lastErr
+}
+
+// recordImageFailure applies dispatch backoff once for each failed attempt.
+// Authentication and quota failures retain their existing caller-specific
+// handling below; temporary upstream failures instead cool the account so
+// parallel tasks do not immediately select it again.
+func (s *Service) recordImageFailure(token string, err error) {
+	if s == nil || s.store == nil || err == nil || openaiweb.IsInteractiveChallengeError(err) {
+		return
+	}
+	// A full Turnstile VM pool is process-wide congestion rather than a
+	// failure of this account. Do not cool or mark every waiting account.
+	if errors.Is(err, openaiweb.ErrTurnstileVMCapacity) {
+		return
+	}
+	if openaiweb.IsAuthenticationError(err) || openaiweb.IsNoFreeImageQuotaError(err) {
+		_ = s.store.MarkFailure(token, err)
+		return
+	}
+	if errors.Is(err, openaiweb.ErrImageGenerationTerminated) {
+		_ = s.store.MarkImageGenerationTerminated(token, err)
+		return
+	}
+	var upstream *openaiweb.UpstreamError
+	if errors.As(err, &upstream) && (upstream.StatusCode == http.StatusTooManyRequests || upstream.StatusCode >= http.StatusInternalServerError) {
+		retryAfter := time.Duration(max(0, upstream.RetryAfter)) * time.Second
+		_ = s.store.MarkImageHTTPFailure(token, upstream.StatusCode, retryAfter, err)
+		return
+	}
+	if errors.Is(err, openaiweb.ErrPollTimeout) || openaiweb.IsRetryableImageError(err) {
+		_ = s.store.MarkImageUpstreamFailure(token, err)
+		return
+	}
+	_ = s.store.MarkFailure(token, err)
 }
 
 // prepareAccountForDispatch performs only local bookkeeping. GenerateImage is
@@ -419,7 +484,7 @@ func reportAuthenticationRetry(req Request, account accounts.Account, err error,
 	if req.Progress == nil {
 		return
 	}
-	details := map[string]any{"retry": retry, "max_retries": maxAuthenticationRetries, "error": err.Error()}
+	details := map[string]any{"retry": retry, "max_retries": maxAuthenticationRetries, "error": openaiweb.PublicErrorMessage(err)}
 	if account.Email != "" {
 		details["account_email"] = account.Email
 	}
@@ -444,10 +509,24 @@ func (s *Service) cacheResult(ctx context.Context, account accounts.Account, res
 	}
 	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
 	urls := make([]string, 0, len(result.URLs))
+	credentialInvalid := false
 	for _, remoteURL := range result.URLs {
+		if credentialInvalid {
+			urls = append(urls, remoteURL)
+			continue
+		}
 		data, err := downloader.DownloadImageFor(ctx, account, remoteURL)
 		if err != nil {
 			log.Printf("image cache download failed: %v", err)
+			if isCacheDownloadAuthenticationFailure(err) {
+				credentialInvalid = true
+				removed, removeErr := s.store.RemoveInvalidToken(account.AccessToken, err.Error())
+				if removeErr != nil {
+					log.Printf("remove account after image cache authentication failure: %v", removeErr)
+				} else if removed {
+					log.Printf("removed account after image cache authentication failure")
+				}
+			}
 			urls = append(urls, remoteURL)
 			continue
 		}
@@ -466,6 +545,18 @@ func (s *Service) cacheResult(ctx context.Context, account accounts.Account, res
 	}
 	result.URLs = urls
 	return result
+}
+
+// Cache downloads normally use short-lived external URLs. Only a token
+// revocation or a 401 from an account-scoped upstream request proves that the
+// account itself is invalid, so an unrelated expired asset URL cannot evict a
+// healthy account.
+func isCacheDownloadAuthenticationFailure(err error) bool {
+	if openaiweb.IsTokenInvalidError(err) {
+		return true
+	}
+	var upstream *openaiweb.UpstreamError
+	return errors.As(err, &upstream) && upstream.StatusCode == http.StatusUnauthorized
 }
 
 func (s *Service) ListModels(ctx context.Context) ([]string, error) {
@@ -513,6 +604,7 @@ func responseFromResult(result openaiweb.ImageResult) Response {
 }
 
 func (r Response) MarshalForOpenAI() map[string]any {
+	r.Attempts = openaiweb.PublicAttemptLogs(r.Attempts)
 	data, _ := json.Marshal(r)
 	var out map[string]any
 	_ = json.Unmarshal(data, &out)

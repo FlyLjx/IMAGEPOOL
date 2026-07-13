@@ -11,16 +11,23 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"imagepool/internal/accounts"
 )
 
 const (
-	maxSSEDataLineSize     = 16 * 1024 * 1024
-	maxImageStartAttempts  = 3
-	maxImageResumeAttempts = 1
+	maxSSEDataLineSize            = 16 * 1024 * 1024
+	maxImageStartAttempts         = 3
+	maxImageResumeAttempts        = 10
+	maxAdaptiveImagePollInterval  = 10 * time.Second
+	defaultImageStreamOpenTimeout = 60 * time.Second
+	legacyImageStreamIdleWindow   = 8 * time.Second
+	defaultImageStreamIdleWindow  = 60 * time.Second
 )
+
+var errImageStreamOpenTimeout = errors.New("image stream open timeout")
 
 type imageStreamState struct {
 	conversationID string
@@ -30,7 +37,62 @@ type imageStreamState struct {
 	sedimentIDs    []string
 }
 
+type imageGenerationStartedAtKey struct{}
+
+type imageStreamOpenGate struct {
+	mu       sync.Mutex
+	opened   bool
+	timedOut bool
+	cancel   context.CancelFunc
+	timer    *time.Timer
+}
+
+func (g *imageStreamOpenGate) expire() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.opened {
+		return
+	}
+	g.timedOut = true
+	g.cancel()
+}
+
+func (g *imageStreamOpenGate) finish() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.opened = true
+	if g.timer != nil {
+		g.timer.Stop()
+	}
+	return g.timedOut
+}
+
+type cancelOnCloseReadCloser struct {
+	io.ReadCloser
+	once     sync.Once
+	cancel   context.CancelFunc
+	closeErr error
+}
+
+func (r *cancelOnCloseReadCloser) Close() error {
+	r.once.Do(func() {
+		r.closeErr = r.ReadCloser.Close()
+		r.cancel()
+	})
+	return r.closeErr
+}
+
 func (c *Client) startImageGeneration(ctx context.Context, account accounts.Account, prompt, model string, requirements chatRequirements, conduit, turnTraceID, parentMessageID string, refs []uploadMeta) (conversationID string, fileIDs []string, sedimentIDs []string, err error) {
+	ctx, cancel := c.imageGenerationContext(ctx)
+	defer cancel()
+	return c.startImageGenerationWithinBudget(ctx, account, prompt, model, requirements, conduit, turnTraceID, parentMessageID, refs)
+}
+
+// startImageGenerationWithinBudget is used after GenerateImage has created a
+// shared generation context. Keeping the wrapper above preserves the same
+// limit for direct callers and tests without creating a second 180-second
+// window inside an account attempt.
+func (c *Client) startImageGenerationWithinBudget(ctx context.Context, account accounts.Account, prompt, model string, requirements chatRequirements, conduit, turnTraceID, parentMessageID string, refs []uploadMeta) (conversationID string, fileIDs []string, sedimentIDs []string, err error) {
 	path := "/backend-api/f/conversation"
 	if parentMessageID == "" {
 		parentMessageID = c.newID()
@@ -47,7 +109,7 @@ func (c *Client) startImageGeneration(ctx context.Context, account accounts.Acco
 	payload := map[string]any{
 		"action":            "next",
 		"messages":          []any{map[string]any{"id": c.newID(), "author": map[string]any{"role": "user"}, "create_time": float64(time.Now().UnixNano()) / 1e9, "content": content, "metadata": metadata}},
-		"parent_message_id": parentMessageID, "model": model, "client_prepare_state": "success", "timezone_offset_min": -480, "timezone": "Asia/Shanghai",
+		"parent_message_id": parentMessageID, "model": model, "client_prepare_state": "sent", "timezone_offset_min": -480, "timezone": "Asia/Shanghai",
 		"conversation_mode": map[string]any{"kind": "primary_assistant"}, "enable_message_followups": true, "system_hints": []string{"picture_v2"}, "supports_buffering": true, "supported_encodings": []string{"v1"},
 		"client_contextual_info":               map[string]any{"is_dark_mode": false, "time_since_loaded": 1200, "page_height": 1072, "page_width": 1724, "pixel_ratio": 1.2, "screen_height": 1440, "screen_width": 2560, "app_name": "chatgpt.com"},
 		"paragen_cot_summary_display_override": "allow", "force_parallel_switch": "auto", "thinking_effort": "standard",
@@ -61,14 +123,14 @@ func (c *Client) startImageGeneration(ctx context.Context, account accounts.Acco
 	headers["OAI-Telemetry"] = "[1,null]"
 	resp, err := c.openImageGenerationStream(ctx, account, path, body, headers)
 	if err != nil {
-		return "", nil, nil, err
+		return "", nil, nil, imageGenerationError(ctx, err)
 	}
 	defer resp.Body.Close()
 	state := &imageStreamState{}
 	foundReferences, streamDone, streamErr := c.consumeImageStream(ctx, resp.Body, refs, state)
 	if streamErr != nil {
 		if ctx.Err() != nil {
-			return state.conversationID, state.fileIDs, state.sedimentIDs, ctx.Err()
+			return state.conversationID, state.fileIDs, state.sedimentIDs, imageGenerationError(ctx, ctx.Err())
 		}
 		if state.conversationID == "" || !isRetryableResumeError(streamErr) {
 			return state.conversationID, state.fileIDs, state.sedimentIDs, streamErr
@@ -81,40 +143,79 @@ func (c *Client) startImageGeneration(ctx context.Context, account accounts.Acco
 		return state.conversationID, state.fileIDs, state.sedimentIDs, nil
 	}
 
+	var lastResumeErr error
 	for attempt := 0; attempt < maxImageResumeAttempts && ctx.Err() == nil; attempt++ {
 		resumeBody, resumeErr := c.resumeImageGeneration(ctx, account, turnTraceID, state)
 		if resumeErr != nil {
+			// A resumed conversation is account-scoped, but a pool can recover
+			// faster by cooling this account and submitting a new conversation on
+			// another account than by holding the lease through ten 429 retries.
+			if isImageStartRateLimited(resumeErr) {
+				return state.conversationID, state.fileIDs, state.sedimentIDs, resumeErr
+			}
 			if isResumePollingFallback(resumeErr) {
 				break
 			}
 			if !isRetryableResumeError(resumeErr) {
-				return state.conversationID, state.fileIDs, state.sedimentIDs, resumeErr
+				return state.conversationID, state.fileIDs, state.sedimentIDs, imageGenerationError(ctx, resumeErr)
 			}
+			lastResumeErr = resumeErr
 			if attempt+1 >= maxImageResumeAttempts {
 				break
 			}
 			if err := c.sleep(ctx, imageResumeRetryDelay(attempt)); err != nil {
-				return state.conversationID, state.fileIDs, state.sedimentIDs, err
+				return state.conversationID, state.fileIDs, state.sedimentIDs, imageGenerationError(ctx, err)
 			}
 			continue
 		}
 		foundReferences, streamDone, streamErr = c.consumeImageStream(ctx, resumeBody, refs, state)
 		if streamErr != nil {
 			if ctx.Err() != nil {
-				return state.conversationID, state.fileIDs, state.sedimentIDs, ctx.Err()
+				return state.conversationID, state.fileIDs, state.sedimentIDs, imageGenerationError(ctx, ctx.Err())
 			}
 			if !isRetryableResumeError(streamErr) {
-				return state.conversationID, state.fileIDs, state.sedimentIDs, streamErr
+				return state.conversationID, state.fileIDs, state.sedimentIDs, imageGenerationError(ctx, streamErr)
 			}
+			lastResumeErr = streamErr
 		}
 		if foundReferences || streamDone {
 			break
 		}
 	}
 	if ctx.Err() != nil {
-		return state.conversationID, state.fileIDs, state.sedimentIDs, ctx.Err()
+		return state.conversationID, state.fileIDs, state.sedimentIDs, imageGenerationError(ctx, ctx.Err())
+	}
+	if !foundReferences && !streamDone && errors.Is(lastResumeErr, errImageStreamOpenTimeout) {
+		return state.conversationID, state.fileIDs, state.sedimentIDs, lastResumeErr
 	}
 	return state.conversationID, state.fileIDs, state.sedimentIDs, nil
+}
+
+// imageGenerationContext bounds a single submitted image conversation. This
+// prevents repeated stream-open or resume attempts from extending one account
+// attempt to the reverse proxy's much longer request timeout.
+func (c *Client) imageGenerationContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx = context.WithValue(ctx, imageGenerationStartedAtKey{}, time.Now())
+	return context.WithTimeout(ctx, c.imageGenerationBudget())
+}
+
+func imageGenerationError(ctx context.Context, err error) error {
+	if errors.Is(err, context.DeadlineExceeded) {
+		if ctx != nil {
+			if started, ok := ctx.Value(imageGenerationStartedAtKey{}).(time.Time); ok {
+				elapsed := int(time.Since(started).Round(time.Second).Seconds())
+				if elapsed < 1 {
+					elapsed = 1
+				}
+				return fmt.Errorf("%w: ChatGPT 生图任务已等待 %d 秒", ErrPollTimeout, elapsed)
+			}
+		}
+		return fmt.Errorf("%w: ChatGPT 生图任务超时", ErrPollTimeout)
+	}
+	return err
 }
 
 func (c *Client) openImageGenerationStream(ctx context.Context, account accounts.Account, path string, body []byte, headers map[string]string) (*http.Response, error) {
@@ -127,7 +228,7 @@ func (c *Client) openImageGenerationStream(ctx context.Context, account accounts
 		for key, value := range headers {
 			request.Header.Set(key, value)
 		}
-		resp, err := c.clientFor(account, false).Do(request)
+		resp, err := c.openImageStream(ctx, c.streamClientFor(account), request)
 		if err == nil {
 			if statusErr := ensureOK(resp, path); statusErr == nil {
 				return resp, nil
@@ -137,6 +238,12 @@ func (c *Client) openImageGenerationStream(ctx context.Context, account accounts
 			}
 		} else {
 			lastErr = err
+		}
+		// A conversation has not been created yet, so a pool dispatcher can
+		// immediately cool this account and try another one. Retrying a 429 on
+		// the same account only adds load while other accounts are idle.
+		if isImageStartRateLimited(lastErr) {
+			return nil, lastErr
 		}
 		if !isRetryableResumeError(lastErr) {
 			return nil, lastErr
@@ -154,14 +261,75 @@ func (c *Client) openImageGenerationStream(ctx context.Context, account accounts
 	return nil, lastErr
 }
 
+func isImageStartRateLimited(err error) bool {
+	var upstream *UpstreamError
+	return errors.As(err, &upstream) && upstream.StatusCode == http.StatusTooManyRequests
+}
+
+// openImageStream bounds only the time to receive the initial response. Once
+// headers arrive, the timer is stopped and the response body remains governed
+// by the stream idle window instead of a full-request deadline.
+func (c *Client) openImageStream(ctx context.Context, client *http.Client, request *http.Request) (*http.Response, error) {
+	if client == nil {
+		return nil, fmt.Errorf("image stream client is unavailable")
+	}
+	timeout := c.imageStreamOpenTimeout
+	if timeout <= 0 {
+		timeout = defaultImageStreamOpenTimeout
+	}
+	openCtx, cancel := context.WithCancel(ctx)
+	gate := &imageStreamOpenGate{cancel: cancel}
+	gate.timer = time.AfterFunc(timeout, gate.expire)
+
+	response, err := client.Do(request.WithContext(openCtx))
+	timedOut := gate.finish()
+	if err != nil {
+		if response != nil && response.Body != nil {
+			_ = response.Body.Close()
+		}
+		cancel()
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if timedOut {
+			return nil, fmt.Errorf("%w after %.0f seconds", errImageStreamOpenTimeout, timeout.Seconds())
+		}
+		return nil, err
+	}
+	if timedOut {
+		if response != nil && response.Body != nil {
+			_ = response.Body.Close()
+		}
+		cancel()
+		return nil, fmt.Errorf("%w after %.0f seconds", errImageStreamOpenTimeout, timeout.Seconds())
+	}
+	if response.Body == nil {
+		response.Body = http.NoBody
+	}
+	response.Body = &cancelOnCloseReadCloser{ReadCloser: response.Body, cancel: cancel}
+	return response, nil
+}
+
 func (c *Client) consumeImageStream(ctx context.Context, body io.ReadCloser, refs []uploadMeta, state *imageStreamState) (foundReferences, streamDone bool, err error) {
 	defer body.Close()
 	readCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	payloads := make(chan string, 1)
+	activity := make(chan struct{}, 1)
 	readErrors := make(chan error, 1)
 	go func() {
-		readErrors <- forEachSSEData(body, func(payload string) bool {
+		readErrors <- forEachSSEData(body, func() bool {
+			select {
+			case <-readCtx.Done():
+				return false
+			default:
+			}
+			select {
+			case activity <- struct{}{}:
+			default:
+			}
+			return true
+		}, func(payload string) bool {
 			select {
 			case payloads <- payload:
 				return true
@@ -173,24 +341,35 @@ func (c *Client) consumeImageStream(ctx context.Context, body io.ReadCloser, ref
 	}()
 
 	idleTimeout := c.imageStreamIdleTimeout
-	if idleTimeout <= 0 {
-		idleTimeout = 60 * time.Second
+	if idleTimeout <= 0 || idleTimeout == legacyImageStreamIdleWindow {
+		// Eight seconds was the previous built-in value. It closed healthy
+		// ChatGPT streams before tool heartbeats could be observed.
+		idleTimeout = defaultImageStreamIdleWindow
 	}
 	idleTimer := time.NewTimer(idleTimeout)
 	defer idleTimer.Stop()
+	streamTimeout := c.pollTimeout
+	if streamTimeout <= 0 {
+		streamTimeout = 180 * time.Second
+	}
+	streamTimer := time.NewTimer(streamTimeout)
+	defer streamTimer.Stop()
+	resetIdleTimer := func() {
+		if !idleTimer.Stop() {
+			select {
+			case <-idleTimer.C:
+			default:
+			}
+		}
+		idleTimer.Reset(idleTimeout)
+	}
 	for {
 		select {
 		case payload, ok := <-payloads:
 			if !ok {
 				return false, false, <-readErrors
 			}
-			if !idleTimer.Stop() {
-				select {
-				case <-idleTimer.C:
-				default:
-				}
-			}
-			idleTimer.Reset(idleTimeout)
+			resetIdleTimer()
 			payload = strings.TrimSpace(payload)
 			if payload == "" || payload == `"v1"` {
 				continue
@@ -202,11 +381,15 @@ func (c *Client) consumeImageStream(ctx context.Context, body io.ReadCloser, ref
 			if json.Unmarshal([]byte(payload), &value) != nil {
 				continue
 			}
+			if terminalErr := findImageGenerationTerminalError(value); terminalErr != nil {
+				return false, false, terminalErr
+			}
 			if token, conversationID, ok := extractResumeConversationToken(value); ok {
 				state.resumeToken = token
 				if state.conversationID == "" {
 					state.conversationID = conversationID
 				}
+				state.offset++
 				continue
 			}
 			if state.conversationID == "" {
@@ -224,10 +407,16 @@ func (c *Client) consumeImageStream(ctx context.Context, body io.ReadCloser, ref
 			if len(state.fileIDs) > 0 || len(state.sedimentIDs) > 0 {
 				return true, false, nil
 			}
+		case <-activity:
+			resetIdleTimer()
 		case <-idleTimer.C:
 			cancel()
 			_ = body.Close()
 			return false, false, nil
+		case <-streamTimer.C:
+			cancel()
+			_ = body.Close()
+			return false, false, fmt.Errorf("%w: ChatGPT 生图流超时（已等待 %.0f 秒）", ErrPollTimeout, streamTimeout.Seconds())
 		case <-ctx.Done():
 			cancel()
 			_ = body.Close()
@@ -263,7 +452,7 @@ func (c *Client) resumeImageGeneration(ctx context.Context, account accounts.Acc
 	for key, value := range c.headers(account, path, path, extra) {
 		request.Header.Set(key, value)
 	}
-	resp, err := c.clientFor(account, false).Do(request)
+	resp, err := c.openImageStream(ctx, c.streamClientFor(account), request)
 	if err != nil {
 		return nil, err
 	}
@@ -275,7 +464,7 @@ func (c *Client) resumeImageGeneration(ctx context.Context, account accounts.Acc
 }
 
 func isRetryableResumeError(err error) bool {
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ErrImageGenerationTerminated) || errors.Is(err, ErrPollTimeout) {
 		return false
 	}
 	var upstream *UpstreamError
@@ -309,7 +498,8 @@ func imageResumeRetryDelay(attempt int) time.Duration {
 // forEachSSEData implements the SSE framing rules needed by ChatGPT's stream:
 // a single event can contain multiple data lines, and events are separated by
 // a blank line. Scanner also reassembles HTTP chunks that split a line.
-func forEachSSEData(body io.Reader, handle func(string) bool) error {
+// onActivity receives every inbound line, including comment heartbeats.
+func forEachSSEData(body io.Reader, onActivity func() bool, handle func(string) bool) error {
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 0, 64*1024), maxSSEDataLineSize)
 	dataLines := []string{}
@@ -322,6 +512,9 @@ func forEachSSEData(body io.Reader, handle func(string) bool) error {
 		return handle(payload)
 	}
 	for scanner.Scan() {
+		if onActivity != nil && !onActivity() {
+			return nil
+		}
 		line := strings.TrimSuffix(scanner.Text(), "\r")
 		if line == "" {
 			if !dispatch() {
@@ -403,6 +596,9 @@ func (c *Client) resolveConversationImageURLs(ctx context.Context, account accou
 	if poll && conversationID != "" {
 		f, s, err := c.pollImageResultsWithProgress(ctx, account, conversationID, fileIDs, sedimentIDs, progress, excluded)
 		if err != nil {
+			if errors.Is(err, ErrImageGenerationTerminated) {
+				return nil, err
+			}
 			if len(fileIDs) == 0 && len(sedimentIDs) == 0 {
 				return nil, err
 			}
@@ -461,6 +657,12 @@ func (c *Client) pollImageResultsWithProgress(ctx context.Context, account accou
 		lastHeartbeat = now
 	}
 	lastHit := ""
+	pollMisses := 0
+	waitForNextPoll := func() error {
+		delay := adaptiveImagePollDelay(c.pollInterval, pollMisses)
+		pollMisses++
+		return c.sleep(ctx, delay)
+	}
 	for time.Now().Before(deadline) {
 		reportHeartbeat()
 		pollCtx, cancel := c.pollRequestContext(ctx, deadline)
@@ -472,10 +674,15 @@ func (c *Client) pollImageResultsWithProgress(ctx context.Context, account accou
 			// their document is available for polling. Keep the same account and
 			// conversation ID; switching accounts cannot access this conversation.
 			if IsConversationInaccessibleError(err) || isRetryableImagePollError(err) {
-				_ = c.sleep(ctx, c.pollInterval)
+				if err := waitForNextPoll(); err != nil {
+					return nil, nil, err
+				}
 				continue
 			}
 			return nil, nil, err
+		}
+		if terminalErr := findImageGenerationTerminalError(conversation); terminalErr != nil {
+			return nil, nil, terminalErr
 		}
 		var f, s []string
 		if len(excludedFileIDs) > 0 {
@@ -500,11 +707,32 @@ func (c *Client) pollImageResultsWithProgress(ctx context.Context, account accou
 		if policy := findContentPolicyText(conversation); policy != "" {
 			return nil, nil, fmt.Errorf("%w: %s", ErrContentPolicy, policy)
 		}
-		if err := c.sleep(ctx, c.pollInterval); err != nil {
+		if err := waitForNextPoll(); err != nil {
 			return nil, nil, err
 		}
 	}
 	return nil, nil, fmt.Errorf("%w: ChatGPT 生图超时（已等待 %.0f 秒）", ErrPollTimeout, c.pollTimeout.Seconds())
+}
+
+// adaptiveImagePollDelay retains a quick first check while preventing a
+// large pool of slow conversations from repeatedly hammering the same
+// upstream endpoint. Explicit configurations above ten seconds are honored.
+func adaptiveImagePollDelay(base time.Duration, missed int) time.Duration {
+	if base <= 0 {
+		base = 3 * time.Second
+	}
+	capDelay := maxAdaptiveImagePollInterval
+	if base > capDelay {
+		capDelay = base
+	}
+	delay := base
+	for attempt := 0; attempt < missed && delay < capDelay; attempt++ {
+		delay = time.Duration(float64(delay) * 1.5)
+		if delay > capDelay {
+			delay = capDelay
+		}
+	}
+	return delay
 }
 
 func (c *Client) pollRequestContext(ctx context.Context, deadline time.Time) (context.Context, context.CancelFunc) {

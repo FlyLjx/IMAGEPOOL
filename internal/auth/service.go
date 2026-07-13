@@ -22,6 +22,8 @@ import (
 const (
 	RoleAdmin = "admin"
 	RoleUser  = "user"
+
+	authPersistDebounce = 150 * time.Millisecond
 )
 
 type Identity struct {
@@ -88,12 +90,19 @@ type keyFile struct {
 
 type Service struct {
 	mu        sync.RWMutex
+	persist   sync.Mutex
 	legacy    *Auth
 	path      string
 	state     persistence.Store
 	keys      []keyRecord
 	now       func() time.Time
 	randomKey func() (string, error)
+	dirty     bool
+	revision  uint64
+	wake      chan struct{}
+	stop      chan struct{}
+	done      chan struct{}
+	close     sync.Once
 }
 
 func NewService(adminKeys []string, path string) *Service {
@@ -119,6 +128,12 @@ func newService(adminKeys []string, path string, state persistence.Store) *Servi
 		},
 	}
 	_ = s.load()
+	if s.path != "" || s.state != nil {
+		s.wake = make(chan struct{}, 1)
+		s.stop = make(chan struct{})
+		s.done = make(chan struct{})
+		go s.persistenceLoop()
+	}
 	return s
 }
 
@@ -140,9 +155,9 @@ func (s *Service) Authenticate(key string) (Identity, bool) {
 		return Identity{}, false
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.legacy != nil {
 		if _, ok := s.legacy.keys[key]; ok {
+			s.mu.Unlock()
 			return Identity{ID: "admin", Name: "Administrator", Role: RoleAdmin}, true
 		}
 	}
@@ -153,9 +168,13 @@ func (s *Service) Authenticate(key string) (Identity, bool) {
 			continue
 		}
 		item.LastUsedAt = s.now().In(time.Local).Format(time.RFC3339)
-		_ = s.saveLocked()
-		return identityFromRecord(*item), true
+		identity := identityFromRecord(*item)
+		s.markDirtyLocked()
+		s.mu.Unlock()
+		s.signalPersistence()
+		return identity, true
 	}
+	s.mu.Unlock()
 	return Identity{}, false
 }
 
@@ -170,11 +189,11 @@ func (s *Service) UpdateAdminKeys(keys []string) {
 
 func (s *Service) CreateUserKey(name string) (PublicKey, string, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	name = s.uniqueNameLocked(name, "")
 	for attempts := 0; attempts < 5; attempts++ {
 		raw, err := s.randomKey()
 		if err != nil {
+			s.mu.Unlock()
 			return PublicKey{}, "", err
 		}
 		if s.isAdminKey(raw) || s.hasHashLocked(hashKey(raw), "") {
@@ -183,11 +202,15 @@ func (s *Service) CreateUserKey(name string) (PublicKey, string, error) {
 		now := s.now().In(time.Local).Format(time.RFC3339)
 		item := keyRecord{ID: randomID(), Name: name, Role: RoleUser, KeyHash: hashKey(raw), Enabled: true, CreatedAt: now, Limits: normalizeLimits(Limits{}), Usage: Usage{Date: dateKey(s.now()), Requests: 0, Images: 0}}
 		s.keys = append(s.keys, item)
-		if err := s.saveLocked(); err != nil {
+		s.markDirtyLocked()
+		snapshot, revision := s.snapshotLocked()
+		s.mu.Unlock()
+		if err := s.persistSnapshot(snapshot, revision); err != nil {
 			return PublicKey{}, "", err
 		}
 		return publicFromRecord(item), raw, nil
 	}
+	s.mu.Unlock()
 	return PublicKey{}, "", fmt.Errorf("unable to generate a unique user key")
 }
 
@@ -209,7 +232,6 @@ func (s *Service) UpdateUserKey(id string, update KeyUpdate) (PublicKey, bool, e
 		return PublicKey{}, false, nil
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	for i := range s.keys {
 		item := &s.keys[i]
 		if item.ID != id || item.Role != RoleUser {
@@ -224,9 +246,11 @@ func (s *Service) UpdateUserKey(id string, update KeyUpdate) (PublicKey, bool, e
 		if update.Key != nil {
 			raw := strings.TrimSpace(*update.Key)
 			if raw == "" {
+				s.mu.Unlock()
 				return PublicKey{}, false, fmt.Errorf("key is required")
 			}
 			if s.isAdminKey(raw) || s.hasHashLocked(hashKey(raw), item.ID) {
+				s.mu.Unlock()
 				return PublicKey{}, false, fmt.Errorf("key already exists")
 			}
 			item.KeyHash = hashKey(raw)
@@ -234,11 +258,16 @@ func (s *Service) UpdateUserKey(id string, update KeyUpdate) (PublicKey, bool, e
 		if update.Limits != nil {
 			item.Limits = normalizeLimits(*update.Limits)
 		}
-		if err := s.saveLocked(); err != nil {
+		result := publicFromRecord(*item)
+		s.markDirtyLocked()
+		snapshot, revision := s.snapshotLocked()
+		s.mu.Unlock()
+		if err := s.persistSnapshot(snapshot, revision); err != nil {
 			return PublicKey{}, false, err
 		}
-		return publicFromRecord(*item), true, nil
+		return result, true, nil
 	}
+	s.mu.Unlock()
 	return PublicKey{}, false, nil
 }
 
@@ -248,7 +277,6 @@ func (s *Service) DeleteUserKey(id string) (bool, error) {
 		return false, nil
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	next := s.keys[:0]
 	removed := false
 	for _, item := range s.keys {
@@ -260,9 +288,13 @@ func (s *Service) DeleteUserKey(id string) (bool, error) {
 	}
 	s.keys = next
 	if !removed {
+		s.mu.Unlock()
 		return false, nil
 	}
-	return true, s.saveLocked()
+	s.markDirtyLocked()
+	snapshot, revision := s.snapshotLocked()
+	s.mu.Unlock()
+	return true, s.persistSnapshot(snapshot, revision)
 }
 
 func (s *Service) Consume(identity Identity, endpoint, model string, requestUnits, imageUnits int) error {
@@ -274,34 +306,42 @@ func (s *Service) Consume(identity Identity, endpoint, model string, requestUnit
 	requestUnits = max(0, requestUnits)
 	imageUnits = max(0, imageUnits)
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	for i := range s.keys {
 		item := &s.keys[i]
 		if item.ID != identity.ID || item.Role != RoleUser {
 			continue
 		}
 		if !item.Enabled {
+			s.mu.Unlock()
 			return &QuotaError{Message: "user key is disabled", StatusCode: http.StatusUnauthorized}
 		}
 		limits := normalizeLimits(item.Limits)
 		if len(limits.AllowedEndpoints) > 0 && !contains(limits.AllowedEndpoints, endpoint) {
+			s.mu.Unlock()
 			return &QuotaError{Message: "user key is not allowed to access this endpoint", StatusCode: http.StatusForbidden}
 		}
 		if len(limits.AllowedModels) > 0 && model != "" && !contains(limits.AllowedModels, model) {
+			s.mu.Unlock()
 			return &QuotaError{Message: "user key is not allowed to use this model", StatusCode: http.StatusForbidden}
 		}
 		usage := normalizeUsage(item.Usage, s.now())
 		nextRequests := usage.Requests + requestUnits
 		nextImages := usage.Images + imageUnits
 		if limits.DailyRequests > 0 && nextRequests > limits.DailyRequests {
+			s.mu.Unlock()
 			return &QuotaError{Message: "daily request quota exhausted", StatusCode: http.StatusTooManyRequests}
 		}
 		if limits.DailyImages > 0 && nextImages > limits.DailyImages {
+			s.mu.Unlock()
 			return &QuotaError{Message: "daily image quota exhausted", StatusCode: http.StatusTooManyRequests}
 		}
 		item.Usage = Usage{Date: usage.Date, Requests: nextRequests, Images: nextImages}
-		return s.saveLocked()
+		s.markDirtyLocked()
+		s.mu.Unlock()
+		s.signalPersistence()
+		return nil
 	}
+	s.mu.Unlock()
 	return &QuotaError{Message: "user key no longer exists", StatusCode: http.StatusUnauthorized}
 }
 
@@ -345,9 +385,139 @@ func (s *Service) load() error {
 	return nil
 }
 
-func (s *Service) saveLocked() error {
+func (s *Service) markDirtyLocked() {
+	s.revision++
+	s.dirty = true
+}
+
+func (s *Service) snapshotLocked() (keyFile, uint64) {
+	keys := make([]keyRecord, len(s.keys))
+	for i := range s.keys {
+		keys[i] = cloneRecord(s.keys[i])
+	}
+	return keyFile{Keys: keys}, s.revision
+}
+
+func cloneRecord(item keyRecord) keyRecord {
+	item.Limits.AllowedModels = append([]string(nil), item.Limits.AllowedModels...)
+	item.Limits.AllowedEndpoints = append([]string(nil), item.Limits.AllowedEndpoints...)
+	return item
+}
+
+func (s *Service) signalPersistence() {
+	if s == nil || s.wake == nil {
+		return
+	}
+	select {
+	case s.wake <- struct{}{}:
+	default:
+	}
+}
+
+func (s *Service) persistenceLoop() {
+	defer close(s.done)
+	for {
+		select {
+		case <-s.wake:
+			timer := time.NewTimer(authPersistDebounce)
+			select {
+			case <-timer.C:
+				_ = s.persistPending()
+			case <-s.stop:
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				_ = s.persistPending()
+				return
+			}
+		case <-s.stop:
+			_ = s.persistPending()
+			return
+		}
+	}
+}
+
+// Flush persists all updates that were accepted in memory before it returns.
+// Requests normally use the debounce worker so storage latency never holds the
+// auth lock; Flush is for tests and graceful shutdown.
+func (s *Service) Flush() error {
+	if s == nil {
+		return nil
+	}
+	for {
+		if err := s.persistPending(); err != nil {
+			return err
+		}
+		s.mu.RLock()
+		dirty := s.dirty
+		s.mu.RUnlock()
+		if !dirty {
+			return nil
+		}
+	}
+}
+
+// Close stops the auth persistence worker after flushing accepted usage and
+// last-used updates. The shared persistence.Store remains owned by the app.
+func (s *Service) Close() {
+	if s == nil || s.stop == nil {
+		return
+	}
+	s.close.Do(func() {
+		close(s.stop)
+		<-s.done
+		_ = s.Flush()
+	})
+}
+
+func (s *Service) persistPending() error {
+	if s == nil {
+		return nil
+	}
+	s.persist.Lock()
+	defer s.persist.Unlock()
+
+	s.mu.Lock()
+	if !s.dirty {
+		s.mu.Unlock()
+		return nil
+	}
+	snapshot, revision := s.snapshotLocked()
+	s.mu.Unlock()
+	return s.saveSnapshot(snapshot, revision)
+}
+
+func (s *Service) persistSnapshot(snapshot keyFile, revision uint64) error {
+	s.persist.Lock()
+	defer s.persist.Unlock()
+	return s.saveSnapshot(snapshot, revision)
+}
+
+// saveSnapshot is called with s.persist held and never holds s.mu while I/O
+// runs. A revision check keeps a concurrent request update dirty for the next
+// batched write instead of acknowledging an older snapshot.
+func (s *Service) saveSnapshot(snapshot keyFile, revision uint64) error {
+	err := s.save(snapshot)
+	s.mu.Lock()
+	if err == nil && s.revision == revision {
+		s.dirty = false
+	} else {
+		s.dirty = true
+	}
+	more := s.dirty
+	s.mu.Unlock()
+	if err == nil && more {
+		s.signalPersistence()
+	}
+	return err
+}
+
+func (s *Service) save(shaped keyFile) error {
 	if s.state != nil {
-		return s.state.Save(context.Background(), "auth_keys", keyFile{Keys: s.keys})
+		return s.state.Save(context.Background(), "auth_keys", shaped)
 	}
 	if s.path == "" {
 		return nil
@@ -355,7 +525,7 @@ func (s *Service) saveLocked() error {
 	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
 		return err
 	}
-	data, err := json.MarshalIndent(keyFile{Keys: s.keys}, "", "  ")
+	data, err := json.MarshalIndent(shaped, "", "  ")
 	if err != nil {
 		return err
 	}
