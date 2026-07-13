@@ -133,21 +133,32 @@ export function useVersionCheck(canUpdate = false) {
 }
 
 async function fetchLatestPublishedVersion() {
-  try {
-    const resolverURL = `${releaseVersionResolverURL}&_t=${Date.now()}`;
-    const response = await fetch(resolverURL, { cache: "no-store" });
-    if (response.ok) {
-      const payload = await (response.json() as Promise<{ version?: string }>);
-      const version = String(payload.version || "").trim().replace(/^v/, "");
-      if (toVersionParts(version)) return version;
-    }
-  } catch {
-    // Fall through to GitHub when jsDelivr is unavailable.
+  const lookups = await Promise.allSettled([
+    fetchResolvedReleaseVersion(),
+    fetchGitHubReleaseVersion(),
+  ]);
+  const versions = lookups
+    .filter((result): result is PromiseFulfilledResult<string> => result.status === "fulfilled")
+    .map((result) => result.value)
+    .filter((version) => Boolean(toVersionParts(version)));
+  if (!versions.length) {
+    throw new Error("all release lookups failed");
   }
+  return versions.reduce((latest, version) => (isNewerVersion(version, latest) ? version : latest));
+}
 
-  const response = await fetch(githubLatestReleaseURL, { cache: "no-store" });
+async function fetchResolvedReleaseVersion() {
+  const resolverURL = `${releaseVersionResolverURL}&_t=${Date.now()}`;
+  const response = await fetch(resolverURL, { cache: "no-store" });
+  if (!response.ok) throw new Error(`jsDelivr release lookup failed: HTTP ${response.status}`);
+  const payload = await (response.json() as Promise<{ version?: string }>);
+  return String(payload.version || "").trim().replace(/^v/, "");
+}
+
+async function fetchGitHubReleaseVersion() {
+  const response = await fetch(`${githubLatestReleaseURL}?_t=${Date.now()}`, { cache: "no-store" });
   if (response.status === 404) return "";
-  if (!response.ok) throw new Error(`release lookup failed: HTTP ${response.status}`);
+  if (!response.ok) throw new Error(`GitHub release lookup failed: HTTP ${response.status}`);
   const release = await (response.json() as Promise<{ tag_name?: string }>);
   return String(release.tag_name || "").trim().replace(/^v/, "");
 }
