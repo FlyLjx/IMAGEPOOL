@@ -170,9 +170,6 @@ type SettingsStore = {
   setImagePollTimeoutSecs: (value: string) => void;
   setImageTaskTimeoutSecs: (value: string) => void;
   setImageWebModelSlug: (value: string) => void;
-  setImageAccountPrecheckIntervalMinutes: (value: string) => void;
-  setImageAccountPrecheckConcurrency: (value: string) => void;
-  setImageAccountPrecheckTimeoutSecs: (value: string) => void;
   setAutoRemoveInvalidAccounts: (value: boolean) => void;
   setAutoRemoveRateLimitedAccounts: (value: boolean) => void;
   setAutoReloginAfterRefresh: (value: boolean) => void;
@@ -361,18 +358,6 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
 
   setImageWebModelSlug: (value) => {
     set((state) => (state.config ? { config: { ...state.config, image_web_model_slug: value } } : {}));
-  },
-
-  setImageAccountPrecheckIntervalMinutes: (value) => {
-    set((state) => (state.config ? { config: { ...state.config, image_account_precheck_interval_minutes: value } } : {}));
-  },
-
-  setImageAccountPrecheckConcurrency: (value) => {
-    set((state) => (state.config ? { config: { ...state.config, image_account_precheck_concurrency: value } } : {}));
-  },
-
-  setImageAccountPrecheckTimeoutSecs: (value) => {
-    set((state) => (state.config ? { config: { ...state.config, image_account_precheck_timeout_secs: value } } : {}));
   },
 
   setAutoRemoveInvalidAccounts: (value) => {

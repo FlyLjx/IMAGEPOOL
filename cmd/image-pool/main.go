@@ -67,6 +67,7 @@ func main() {
 	if state != nil {
 		taskManager = tasks.NewManagerWithPersistence(imageService, state)
 	}
+	defer taskManager.Close()
 	configUpdated := func(next config.Config) {
 		setTimezone(next.Timezone)
 		imageService.UpdateConfig(next)

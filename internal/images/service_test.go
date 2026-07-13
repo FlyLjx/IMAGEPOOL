@@ -180,58 +180,30 @@ func TestGenerateAppliesSingleTaskDeadlineAcrossRetries(t *testing.T) {
 	}
 }
 
-func TestGeneratePrechecksUnverifiedTokenBeforeImageCall(t *testing.T) {
+func TestGenerateSkipsDuplicateReadinessPrecheck(t *testing.T) {
 	store := accounts.NewStore([]accounts.Account{{Email: "old", AccessToken: "old", CreatedAt: 1}, {Email: "new", AccessToken: "new", CreatedAt: 2}}, "")
 	backend := &fakeBackend{readinessErrs: map[string]error{"new": errors.New("token invalidated (/backend-api/sentinel/chat-requirements/prepare)")}}
 	response, err := NewService(config.Default(), store, backend).Generate(context.Background(), Request{Prompt: "draw", Model: "gpt-image-2"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if backend.calls != 1 || response.AccountEmail != "old" {
+	if backend.calls != 1 || response.AccountEmail != "new" {
 		t.Fatalf("calls=%d response=%#v", backend.calls, response)
 	}
-	if _, found := store.Get("new"); found {
-		t.Fatalf("invalid token was not removed: %#v", store.List())
+	if _, found := store.Get("new"); !found {
+		t.Fatalf("dispatch removed an account without a generation failure: %#v", store.List())
 	}
-	if len(backend.readinessTokens) != 2 || backend.readinessTokens[0] != "new" || backend.readinessTokens[1] != "old" {
-		t.Fatalf("readiness checks=%#v", backend.readinessTokens)
-	}
-	if len(backend.modelTokens) != 0 {
-		t.Fatalf("image precheck must not request the model list: %#v", backend.modelTokens)
+	if len(backend.readinessTokens) != 0 {
+		t.Fatalf("normal dispatch repeated readiness checks: %#v", backend.readinessTokens)
 	}
 }
 
-func TestGenerateRevalidatesTokenAndSwitchesWhenItIsInvalidated(t *testing.T) {
-	freshAt := time.Now().UTC().Format(time.RFC3339)
-	store := accounts.NewStore([]accounts.Account{
-		{Email: "old", AccessToken: "old", CreatedAt: 1, Status: "正常", Extra: map[string]any{"last_account_refresh_at": freshAt}},
-		{Email: "new", AccessToken: "new", CreatedAt: 2, Status: "正常", Extra: map[string]any{"last_account_refresh_at": freshAt}},
-	}, "")
-	checks := map[string]int{}
-	backend := &fakeBackend{readinessFn: func(token string) error {
-		checks[token]++
-		if token == "new" && checks[token] == 2 {
-			return errors.New("token invalidated (/backend-api/sentinel/chat-requirements/prepare)")
-		}
-		return nil
-	}}
-	service := NewService(config.Default(), store, backend)
-	first, err := service.Generate(context.Background(), Request{Prompt: "first"})
-	if err != nil || first.AccountEmail != "new" {
-		t.Fatalf("first=%#v err=%v", first, err)
-	}
-	second, err := service.Generate(context.Background(), Request{Prompt: "second"})
-	if err != nil || second.AccountEmail != "old" {
-		t.Fatalf("second=%#v err=%v", second, err)
-	}
-	if backend.calls != 2 {
-		t.Fatalf("image calls=%d", backend.calls)
-	}
-	if got := backend.readinessTokens; len(got) != 3 || got[0] != "new" || got[1] != "new" || got[2] != "old" {
-		t.Fatalf("readiness checks=%#v", got)
-	}
-	if _, found := store.Get("new"); found {
-		t.Fatalf("invalidated account was not removed: %#v", store.List())
+func TestManualCheckStillRunsFullReadinessValidation(t *testing.T) {
+	store := accounts.NewStore([]accounts.Account{{Email: "user@example.test", AccessToken: "token"}}, "")
+	backend := &fakeBackend{readinessErrs: map[string]error{"token": errors.New("token invalidated")}}
+	_, err := NewService(config.Default(), store, backend).CheckAccount(context.Background(), "token")
+	if err == nil || len(backend.readinessTokens) != 1 || backend.readinessTokens[0] != "token" {
+		t.Fatalf("err=%v readiness=%#v", err, backend.readinessTokens)
 	}
 }
 
@@ -375,114 +347,22 @@ func TestGenerateCachesRemoteImageLocally(t *testing.T) {
 	}
 }
 
-func TestGenerateWithAccountBoundsTotalPrecheckWait(t *testing.T) {
+func TestFiftyConcurrentTasksDispatchWithoutReadinessGate(t *testing.T) {
 	cfg := config.Default()
-	cfg.ImageAccountPrecheckConcurrency = 1
-	cfg.ImageAccountPrecheckTimeoutSecs = 0.05
-	freshAt := time.Now().UTC().Format(time.RFC3339)
-	store := accounts.NewStore([]accounts.Account{
-		{Email: "first", AccessToken: "first", Status: "正常", Extra: map[string]any{"last_account_refresh_at": freshAt}},
-		{Email: "second", AccessToken: "second", Status: "正常", Extra: map[string]any{"last_account_refresh_at": freshAt}},
-	}, "")
-	entered := make(chan struct{})
-	release := make(chan struct{})
-	released := false
-	releaseFirst := func() {
-		if !released {
-			close(release)
-			released = true
-		}
-	}
-	backend := &fakeBackend{readinessFn: func(token string) error {
-		if token != "first" {
-			return nil
-		}
-		select {
-		case entered <- struct{}{}:
-		default:
-		}
-		<-release
-		return nil
-	}}
-	service := NewService(cfg, store, backend)
-	firstDone := make(chan error, 1)
-	go func() {
-		_, err := service.GenerateWithAccount(context.Background(), "first", Request{Prompt: "first"})
-		firstDone <- err
-	}()
-	select {
-	case <-entered:
-	case <-time.After(time.Second):
-		releaseFirst()
-		t.Fatal("first account did not enter precheck")
-	}
-
-	secondDone := make(chan error, 1)
-	started := time.Now()
-	go func() {
-		_, err := service.GenerateWithAccount(context.Background(), "second", Request{Prompt: "second"})
-		secondDone <- err
-	}()
-	select {
-	case err := <-secondDone:
-		if !errors.Is(err, context.DeadlineExceeded) {
-			releaseFirst()
-			t.Fatalf("second precheck error=%v", err)
-		}
-		if elapsed := time.Since(started); elapsed > 250*time.Millisecond {
-			releaseFirst()
-			t.Fatalf("second precheck waited too long: %s", elapsed)
-		}
-	case <-time.After(time.Second):
-		releaseFirst()
-		t.Fatal("precheck queue did not honor its total timeout")
-	}
-	releaseFirst()
-	select {
-	case err := <-firstDone:
-		if err != nil {
-			t.Fatalf("first generation error=%v", err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("first generation did not finish")
-	}
-}
-
-func TestPrecheckGateLimitsThirtyConcurrentTasks(t *testing.T) {
-	cfg := config.Default()
-	cfg.ImageAccountPrecheckConcurrency = 6
-	cfg.ImageAccountPrecheckTimeoutSecs = 2
-	freshAt := time.Now().UTC().Format(time.RFC3339)
-	items := make([]accounts.Account, 0, 30)
-	for i := 0; i < 30; i++ {
+	items := make([]accounts.Account, 0, 50)
+	for i := 0; i < 50; i++ {
 		token := fmt.Sprintf("token-%02d", i)
-		items = append(items, accounts.Account{Email: token + "@example.test", AccessToken: token, Status: "正常", Extra: map[string]any{"last_account_refresh_at": freshAt}})
+		items = append(items, accounts.Account{Email: token + "@example.test", AccessToken: token, Status: "正常"})
 	}
-	entered := make(chan struct{}, 30)
 	release := make(chan struct{})
-	var metricsMu sync.Mutex
-	active, maxActive := 0, 0
 	backend := &serialImageBackend{
-		fakeBackend: &fakeBackend{readinessFn: func(string) error {
-			metricsMu.Lock()
-			active++
-			if active > maxActive {
-				maxActive = active
-			}
-			metricsMu.Unlock()
-			entered <- struct{}{}
-			<-release
-			metricsMu.Lock()
-			active--
-			metricsMu.Unlock()
-			return nil
-		}},
-		started: make(chan struct{}, 30),
-		release: release,
+		fakeBackend: &fakeBackend{},
+		started:     make(chan struct{}, 50),
+		release:     release,
 	}
 	service := NewService(cfg, accounts.NewStore(items, ""), backend)
 	start := make(chan struct{})
-	done := make(chan error, 30)
+	done := make(chan error, 50)
 	for _, account := range items {
 		token := account.AccessToken
 		go func() {
@@ -492,21 +372,21 @@ func TestPrecheckGateLimitsThirtyConcurrentTasks(t *testing.T) {
 		}()
 	}
 	close(start)
-	for i := 0; i < cfg.ImageAccountPrecheckConcurrency; i++ {
+	for range items {
 		select {
-		case <-entered:
+		case <-backend.started:
 		case <-time.After(time.Second):
 			close(release)
-			t.Fatal("not enough prechecks entered the gate")
+			t.Fatal("concurrent generation was blocked before the backend call")
 		}
 	}
-	time.Sleep(50 * time.Millisecond)
-	metricsMu.Lock()
-	observedMax := maxActive
-	metricsMu.Unlock()
-	if observedMax != cfg.ImageAccountPrecheckConcurrency {
+	if calls, maxActive := backend.stats(); calls != len(items) || maxActive != len(items) {
 		close(release)
-		t.Fatalf("precheck concurrency=%d, want %d", observedMax, cfg.ImageAccountPrecheckConcurrency)
+		t.Fatalf("calls=%d max_active=%d", calls, maxActive)
+	}
+	if len(backend.readinessTokens) != 0 {
+		close(release)
+		t.Fatalf("readiness checks=%#v", backend.readinessTokens)
 	}
 	close(release)
 	for i := 0; i < len(items); i++ {

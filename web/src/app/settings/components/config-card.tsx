@@ -101,9 +101,6 @@ export function ConfigCard() {
   const setImagePollTimeoutSecs = useSettingsStore((state) => state.setImagePollTimeoutSecs);
   const setImageTaskTimeoutSecs = useSettingsStore((state) => state.setImageTaskTimeoutSecs);
   const setImageWebModelSlug = useSettingsStore((state) => state.setImageWebModelSlug);
-  const setImageAccountPrecheckIntervalMinutes = useSettingsStore((state) => state.setImageAccountPrecheckIntervalMinutes);
-  const setImageAccountPrecheckConcurrency = useSettingsStore((state) => state.setImageAccountPrecheckConcurrency);
-  const setImageAccountPrecheckTimeoutSecs = useSettingsStore((state) => state.setImageAccountPrecheckTimeoutSecs);
   const setLogLevel = useSettingsStore((state) => state.setLogLevel);
   const setProxy = useSettingsStore((state) => state.setProxy);
   const setBaseUrl = useSettingsStore((state) => state.setBaseUrl);
@@ -210,15 +207,6 @@ export function ConfigCard() {
           </Col>
           <Col xs={24} md={12} xl={6}>
             <NumberInput
-              label="生图账号预检间隔"
-              value={String(config.image_account_precheck_interval_minutes || "")}
-              onChange={setImageAccountPrecheckIntervalMinutes}
-              placeholder="10"
-              help="单位分钟，控制图片额度信息的刷新频率。"
-            />
-          </Col>
-          <Col xs={24} md={12} xl={6}>
-            <NumberInput
               label="图片轮询上限"
               value={String(config.image_poll_timeout_secs || "")}
               onChange={setImagePollTimeoutSecs}
@@ -233,24 +221,6 @@ export function ConfigCard() {
               onChange={setImageTaskTimeoutSecs}
               placeholder="120"
 			  help="单位秒，默认 120 秒、最高 300 秒。达到总上限后立即终止所有重试。"
-            />
-          </Col>
-          <Col xs={24} md={12} xl={6}>
-            <NumberInput
-              label="生图预检并发"
-              value={String(config.image_account_precheck_concurrency || "")}
-              onChange={setImageAccountPrecheckConcurrency}
-              placeholder="6"
-              help="同时执行 Sentinel 和额度验证的数量，避免 30 并发压满代理。"
-            />
-          </Col>
-          <Col xs={24} md={12} xl={6}>
-            <NumberInput
-              label="生图预检超时"
-              value={String(config.image_account_precheck_timeout_secs || "")}
-              onChange={setImageAccountPrecheckTimeoutSecs}
-              placeholder="75"
-              help="单位秒，包含等待预检队列及单次 Token 验证。"
             />
           </Col>
           <Col xs={24} lg={12}>

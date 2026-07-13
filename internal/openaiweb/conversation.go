@@ -18,7 +18,8 @@ import (
 
 const (
 	maxSSEDataLineSize     = 16 * 1024 * 1024
-	maxImageResumeAttempts = 12
+	maxImageStartAttempts  = 3
+	maxImageResumeAttempts = 2
 )
 
 type imageStreamState struct {
@@ -65,8 +66,13 @@ func (c *Client) startImageGeneration(ctx context.Context, account accounts.Acco
 	defer resp.Body.Close()
 	state := &imageStreamState{}
 	foundReferences, streamDone, streamErr := c.consumeImageStream(ctx, resp.Body, refs, state)
-	if streamErr != nil && state.conversationID == "" {
-		return "", nil, nil, streamErr
+	if streamErr != nil {
+		if ctx.Err() != nil {
+			return state.conversationID, state.fileIDs, state.sedimentIDs, ctx.Err()
+		}
+		if state.conversationID == "" || !isRetryableResumeError(streamErr) {
+			return state.conversationID, state.fileIDs, state.sedimentIDs, streamErr
+		}
 	}
 	if state.conversationID == "" {
 		return "", nil, nil, fmt.Errorf("conversation_id not found in stream")
@@ -93,19 +99,27 @@ func (c *Client) startImageGeneration(ctx context.Context, account accounts.Acco
 			continue
 		}
 		foundReferences, streamDone, streamErr = c.consumeImageStream(ctx, resumeBody, refs, state)
-		if streamErr != nil && !errors.Is(streamErr, context.Canceled) && !errors.Is(streamErr, context.DeadlineExceeded) {
-			return state.conversationID, state.fileIDs, state.sedimentIDs, streamErr
+		if streamErr != nil {
+			if ctx.Err() != nil {
+				return state.conversationID, state.fileIDs, state.sedimentIDs, ctx.Err()
+			}
+			if !isRetryableResumeError(streamErr) {
+				return state.conversationID, state.fileIDs, state.sedimentIDs, streamErr
+			}
 		}
 		if foundReferences || streamDone {
 			break
 		}
+	}
+	if ctx.Err() != nil {
+		return state.conversationID, state.fileIDs, state.sedimentIDs, ctx.Err()
 	}
 	return state.conversationID, state.fileIDs, state.sedimentIDs, nil
 }
 
 func (c *Client) openImageGenerationStream(ctx context.Context, account accounts.Account, path string, body []byte, headers map[string]string) (*http.Response, error) {
 	var lastErr error
-	for attempt := 0; attempt < maxImageResumeAttempts && ctx.Err() == nil; attempt++ {
+	for attempt := 0; attempt < maxImageStartAttempts && ctx.Err() == nil; attempt++ {
 		request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, bytes.NewReader(body))
 		if err != nil {
 			return nil, err
@@ -127,7 +141,7 @@ func (c *Client) openImageGenerationStream(ctx context.Context, account accounts
 		if !isRetryableResumeError(lastErr) {
 			return nil, lastErr
 		}
-		if attempt+1 >= maxImageResumeAttempts {
+		if attempt+1 >= maxImageStartAttempts {
 			return nil, lastErr
 		}
 		if err := c.sleep(ctx, imageResumeRetryDelay(attempt)); err != nil {
@@ -525,7 +539,9 @@ func isRetryableImagePollError(err error) bool {
 	message := strings.ToLower(strings.TrimSpace(err.Error()))
 	return strings.Contains(message, "timeout") ||
 		strings.Contains(message, "connection reset") ||
+		strings.Contains(message, "broken pipe") ||
 		strings.Contains(message, "connection refused") ||
+		strings.Contains(message, "unexpected eof") ||
 		strings.Contains(message, "temporarily unavailable")
 }
 

@@ -20,6 +20,8 @@ const (
 	StatusSucceeded = "success"
 	StatusFailed    = "error"
 	StatusCanceled  = "error"
+	taskCollection  = "tasks"
+	persistDebounce = 100 * time.Millisecond
 )
 
 type ImageService interface {
@@ -73,8 +75,14 @@ type Manager struct {
 	seq     uint64
 	service ImageService
 	state   persistence.Store
+	items   persistence.CollectionStore
 	tasks   map[string]*Task
 	cancels map[string]context.CancelFunc
+	dirty   map[string]struct{}
+	wake    chan struct{}
+	stop    chan struct{}
+	done    chan struct{}
+	close   sync.Once
 }
 
 func NewManager(service ImageService) *Manager {
@@ -86,8 +94,22 @@ func NewManagerWithPersistence(service ImageService, state persistence.Store) *M
 }
 
 func newManager(service ImageService, state persistence.Store) *Manager {
-	m := &Manager{service: service, state: state, tasks: map[string]*Task{}, cancels: map[string]context.CancelFunc{}}
+	m := &Manager{service: service, state: state, tasks: map[string]*Task{}, cancels: map[string]context.CancelFunc{}, dirty: map[string]struct{}{}}
+	if collection, ok := state.(persistence.CollectionStore); ok {
+		m.items = collection
+	}
+	if state != nil {
+		m.wake = make(chan struct{}, 1)
+		m.stop = make(chan struct{})
+		m.done = make(chan struct{})
+	}
 	m.load()
+	if state != nil {
+		go m.persistenceLoop()
+		if len(m.dirty) > 0 {
+			m.signalPersistence()
+		}
+	}
 	return m
 }
 
@@ -154,7 +176,7 @@ func (m *Manager) create(mode, ownerID, clientTaskID string, req images.Request,
 	task := &Task{ID: id, OwnerID: strings.TrimSpace(ownerID), ClientTaskID: clientTaskID, Mode: mode, Status: StatusQueued, Progress: "queued", ProgressPercent: 0, RealtimeStatus: "任务已提交", Prompt: req.Prompt, Model: req.Model, Size: req.Size, Quality: req.Quality, CreatedAt: now, UpdatedAt: now}
 	appendLog(task, LogEntry{Time: now, Level: "info", Event: "submitted", Progress: "queued", Message: "任务已提交"})
 	m.tasks[id] = task
-	m.saveLocked()
+	m.markDirtyLocked(id)
 	ctx, cancel := context.WithCancel(parent)
 	m.cancels[id] = cancel
 	snapshot := m.copyTask(task)
@@ -195,7 +217,7 @@ func (m *Manager) runWith(ctx context.Context, id string, req images.Request, ge
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	defer m.saveLocked()
+	defer m.markDirtyLocked(id)
 	task := m.tasks[id]
 	if task == nil {
 		return result, err
@@ -330,7 +352,7 @@ func (m *Manager) update(id string, fn func(*Task)) {
 	defer m.mu.Unlock()
 	if task := m.tasks[id]; task != nil {
 		fn(task)
-		m.saveLocked()
+		m.markDirtyLocked(id)
 	}
 }
 
@@ -339,9 +361,38 @@ func (m *Manager) load() {
 		return
 	}
 	var stored []Task
-	if err := m.state.Load(context.Background(), "tasks", &stored); err != nil && !errors.Is(err, persistence.ErrNotFound) {
+	loadedLegacy := false
+	if m.items != nil {
+		err := m.items.LoadCollection(context.Background(), taskCollection, &stored)
+		if err != nil && !errors.Is(err, persistence.ErrNotFound) {
+			return
+		}
+		if err == nil {
+			m.loadTasks(stored)
+			return
+		}
+	}
+	if err := m.state.Load(context.Background(), taskCollection, &stored); err != nil {
+		if !errors.Is(err, persistence.ErrNotFound) {
+			return
+		}
 		return
 	}
+	loadedLegacy = true
+	m.loadTasks(stored)
+	if loadedLegacy && m.items != nil && len(m.tasks) > 0 {
+		items := make(map[string]any, len(m.tasks))
+		for id, task := range m.tasks {
+			items[id] = m.copyTask(task)
+		}
+		if err := m.items.SaveCollectionItems(context.Background(), taskCollection, items); err == nil {
+			_ = m.state.Delete(context.Background(), taskCollection)
+			m.dirty = map[string]struct{}{}
+		}
+	}
+}
+
+func (m *Manager) loadTasks(stored []Task) {
 	for i := range stored {
 		task := stored[i]
 		if task.Status == StatusQueued || task.Status == StatusRunning {
@@ -354,20 +405,109 @@ func (m *Manager) load() {
 			task.FinishedAt = &now
 			task.UpdatedAt = now
 			appendLog(&task, LogEntry{Time: now, Level: "error", Event: "interrupted", Progress: "failed", Message: task.RealtimeStatus})
+			m.dirty[task.ID] = struct{}{}
 		}
 		m.tasks[task.ID] = &task
 	}
 }
 
-func (m *Manager) saveLocked() {
-	if m.state == nil {
+func (m *Manager) markDirtyLocked(id string) {
+	if m.state == nil || id == "" {
 		return
 	}
-	items := make([]Task, 0, len(m.tasks))
-	for _, task := range m.tasks {
-		items = append(items, m.copyTask(task))
+	m.dirty[id] = struct{}{}
+	m.signalPersistence()
+}
+
+func (m *Manager) signalPersistence() {
+	if m.wake == nil {
+		return
 	}
-	_ = m.state.Save(context.Background(), "tasks", items)
+	select {
+	case m.wake <- struct{}{}:
+	default:
+	}
+}
+
+func (m *Manager) persistenceLoop() {
+	defer close(m.done)
+	for {
+		select {
+		case <-m.wake:
+			timer := time.NewTimer(persistDebounce)
+			select {
+			case <-timer.C:
+				m.persistPending()
+			case <-m.stop:
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				m.persistPending()
+				return
+			}
+		case <-m.stop:
+			m.persistPending()
+			return
+		}
+	}
+}
+
+func (m *Manager) persistPending() {
+	m.mu.Lock()
+	if len(m.dirty) == 0 {
+		m.mu.Unlock()
+		return
+	}
+	ids := make([]string, 0, len(m.dirty))
+	for id := range m.dirty {
+		ids = append(ids, id)
+		delete(m.dirty, id)
+	}
+	collectionItems := make(map[string]any, len(ids))
+	for _, id := range ids {
+		if task := m.tasks[id]; task != nil {
+			collectionItems[id] = m.copyTask(task)
+		}
+	}
+	var document []Task
+	if m.items == nil {
+		document = make([]Task, 0, len(m.tasks))
+		for _, task := range m.tasks {
+			document = append(document, m.copyTask(task))
+		}
+	}
+	m.mu.Unlock()
+
+	var err error
+	if m.items != nil {
+		err = m.items.SaveCollectionItems(context.Background(), taskCollection, collectionItems)
+	} else {
+		err = m.state.Save(context.Background(), taskCollection, document)
+	}
+	if err == nil {
+		return
+	}
+	m.mu.Lock()
+	for _, id := range ids {
+		m.dirty[id] = struct{}{}
+	}
+	m.mu.Unlock()
+	m.signalPersistence()
+}
+
+// Close flushes pending task updates without closing the shared persistence
+// backend used by the other services.
+func (m *Manager) Close() {
+	if m == nil || m.stop == nil {
+		return
+	}
+	m.close.Do(func() {
+		close(m.stop)
+		<-m.done
+	})
 }
 
 func (m *Manager) copyTask(task *Task) Task {
@@ -403,7 +543,7 @@ func progressPercent(progress string) int {
 		return 10
 	case "checking_account":
 		return 15
-	case "account_validated":
+	case "account_validated", "account_ready":
 		return 22
 	case "account_precheck_failed":
 		return 18

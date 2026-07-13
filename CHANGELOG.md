@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.1.10 - 2026-07-13
+
++ [修复] 普通生图不再重复执行账号 bootstrap、Sentinel 和额度预检，账号分配后立即进入实际生图；实际请求返回失效凭证时仍自动删除账号。
++ [修复] SSE 无图片结果时限制空闲等待和恢复次数，提前转入会话轮询；连接 `broken pipe` 和 `unexpected EOF` 会继续轮询，不再直接返回 502。
++ [优化] 任务进度改为按任务批量异步写入 PostgreSQL，自动迁移旧版全量任务文档，避免高并发下反复重写数 MB JSONB 阻塞请求。
++ [调整] 设置页移除已停用的生图账号预检间隔、并发和超时配置。
+
 ## 0.1.9 - 2026-07-13
 
 + [修复] 对齐当前 ChatGPT Web 生图协议：三阶段 prepare 串联 conduit token，复用 parent/trace，支持异步图片任务和 `/f/conversation/resume` 续传。

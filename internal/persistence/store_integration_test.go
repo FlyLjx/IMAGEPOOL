@@ -40,4 +40,42 @@ func TestPostgresDocumentRoundTrip(t *testing.T) {
 	if err := store.Load(context.Background(), key, &output); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("err=%v", err)
 	}
+
+	collection := "test:collection-roundtrip"
+	defer store.DeleteCollection(context.Background(), collection)
+	if err := store.SaveCollectionItems(context.Background(), collection, map[string]any{
+		"a": map[string]any{"id": "a", "value": 1},
+		"b": map[string]any{"id": "b", "value": 2},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var collectionOutput []map[string]any
+	if err := store.LoadCollection(context.Background(), collection, &collectionOutput); err != nil {
+		t.Fatal(err)
+	}
+	if len(collectionOutput) != 2 {
+		t.Fatalf("collection=%#v", collectionOutput)
+	}
+	if err := store.SaveCollectionItems(context.Background(), collection, map[string]any{
+		"b": map[string]any{"id": "b", "value": 3},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	collectionOutput = nil
+	if err := store.LoadCollection(context.Background(), collection, &collectionOutput); err != nil {
+		t.Fatal(err)
+	}
+	values := map[string]int{}
+	for _, item := range collectionOutput {
+		values[item["id"].(string)] = int(item["value"].(float64))
+	}
+	if values["a"] != 1 || values["b"] != 3 {
+		t.Fatalf("collection values=%#v", values)
+	}
+	if err := store.DeleteCollection(context.Background(), collection); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.LoadCollection(context.Background(), collection, &collectionOutput); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("collection delete err=%v", err)
+	}
 }

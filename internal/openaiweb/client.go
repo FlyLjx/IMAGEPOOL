@@ -84,7 +84,7 @@ func NewClient(cfg config.Config, opts ...ClientOption) *Client {
 	}
 	c := &Client{
 		baseURL: strings.TrimRight(cfg.ChatGPTBaseURL, "/"), imageModelSlug: cfg.ImageWebModelSlug,
-		pollTimeout: seconds(cfg.ImagePollTimeoutSecs), pollInterval: seconds(cfg.ImagePollIntervalSecs), pollInitialWait: seconds(cfg.ImagePollInitialWaitSecs), pollHeartbeatInterval: 15 * time.Second, pollRequestTimeout: 20 * time.Second, imageStreamIdleTimeout: 60 * time.Second, settle: seconds(cfg.ImageSettleSecs),
+		pollTimeout: seconds(cfg.ImagePollTimeoutSecs), pollInterval: seconds(cfg.ImagePollIntervalSecs), pollInitialWait: seconds(cfg.ImagePollInitialWaitSecs), pollHeartbeatInterval: 15 * time.Second, pollRequestTimeout: 20 * time.Second, imageStreamIdleTimeout: 10 * time.Second, settle: seconds(cfg.ImageSettleSecs),
 		checkBeforeHit: cfg.ImageCheckBeforeHitEnabled, settleEnabled: cfg.ImageSettleEnabled,
 		httpClient: httpClient, resourceClient: resourceClient, proxyRuntime: cfg.ProxyRuntime, transport: cfg.UpstreamTransport, timeout: seconds(cfg.RequestTimeoutSecs), tlsClients: map[string]*http.Client{}, tlsResources: map[string]*http.Client{}, newID: newUUID,
 		sleep: func(ctx context.Context, d time.Duration) error {

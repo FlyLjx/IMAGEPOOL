@@ -3,10 +3,8 @@ package images
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log"
-	"net"
 	"net/url"
 	"strings"
 	"sync"
@@ -19,79 +17,11 @@ import (
 )
 
 type Service struct {
-	cfgMu        sync.RWMutex
-	cfg          config.Config
-	store        *accounts.Store
-	backend      openaiweb.Backend
-	storage      *storage.Service
-	precheckMu   sync.Mutex
-	prechecks    map[string]*accountPrecheckFlight
-	precheckGate *accountPrecheckGate
-}
-
-type accountPrecheckFlight struct {
-	done    chan struct{}
-	account accounts.Account
-	err     error
-}
-
-// accountPrecheckGate bounds expensive Web/Sentinel verification work across
-// all image tasks. It reads the current configured limit on each acquisition,
-// so settings changes apply without restarting the service.
-type accountPrecheckGate struct {
-	mu     sync.Mutex
-	active int
-	wake   chan struct{}
-}
-
-func newAccountPrecheckGate() *accountPrecheckGate {
-	return &accountPrecheckGate{wake: make(chan struct{})}
-}
-
-func (g *accountPrecheckGate) acquire(ctx context.Context, limit int, onWait func()) (func(), error) {
-	if limit <= 0 {
-		limit = 1
-	}
-	waited := false
-	for {
-		g.mu.Lock()
-		if g.active < limit {
-			g.active++
-			g.mu.Unlock()
-			return g.release, nil
-		}
-		wake := g.wake
-		g.mu.Unlock()
-		if !waited && onWait != nil {
-			onWait()
-			waited = true
-		}
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-wake:
-		}
-	}
-}
-
-func (g *accountPrecheckGate) release() {
-	g.mu.Lock()
-	if g.active > 0 {
-		g.active--
-	}
-	close(g.wake)
-	g.wake = make(chan struct{})
-	g.mu.Unlock()
-}
-
-func (g *accountPrecheckGate) notify() {
-	if g == nil {
-		return
-	}
-	g.mu.Lock()
-	close(g.wake)
-	g.wake = make(chan struct{})
-	g.mu.Unlock()
+	cfgMu   sync.RWMutex
+	cfg     config.Config
+	store   *accounts.Store
+	backend openaiweb.Backend
+	storage *storage.Service
 }
 
 type accountInfoBackend interface {
@@ -134,7 +64,7 @@ type Response struct {
 
 func NewService(cfg config.Config, store *accounts.Store, backend openaiweb.Backend, imageStorage ...*storage.Service) *Service {
 	cfg = cfg.Normalize()
-	service := &Service{cfg: cfg, store: store, backend: backend, prechecks: map[string]*accountPrecheckFlight{}, precheckGate: newAccountPrecheckGate()}
+	service := &Service{cfg: cfg, store: store, backend: backend}
 	if len(imageStorage) > 0 {
 		service.storage = imageStorage[0]
 	}
@@ -148,7 +78,6 @@ func (s *Service) UpdateConfig(cfg config.Config) {
 	s.cfgMu.Lock()
 	s.cfg = cfg.Normalize()
 	s.cfgMu.Unlock()
-	s.precheckGate.notify()
 }
 
 func (s *Service) currentConfig() config.Config {
@@ -233,9 +162,8 @@ func (s *Service) CheckAccount(ctx context.Context, token string) (accounts.Acco
 	return s.checkAccountDetails(ctx, account, result, true)
 }
 
-// CheckAccountLight is used by scheduled refreshes. The Sentinel handshake is
-// image-generation-specific and is performed by the dispatch precheck before
-// a real image request.
+// CheckAccountLight is used by scheduled refreshes. The actual image request
+// remains authoritative for the image-specific Sentinel handshake.
 func (s *Service) CheckAccountLight(ctx context.Context, token string) (accounts.AccountCheckResult, error) {
 	result := accounts.AccountCheckResult{ImageQuotaUnknown: true}
 	account, found := s.store.Get(token)
@@ -247,9 +175,7 @@ func (s *Service) CheckAccountLight(ctx context.Context, token string) (accounts
 	if err != nil {
 		return result, err
 	}
-	// Scheduled refreshes only need to confirm the account and its quota. The
-	// Sentinel handshake is image-generation-specific and is performed by the
-	// dispatch precheck immediately before a real image request.
+	// Scheduled refreshes only need to confirm the account and its quota.
 	return s.checkAccountDetails(ctx, account, result, false)
 }
 
@@ -333,12 +259,10 @@ func (s *Service) GenerateWithAccount(ctx context.Context, token string, req Req
 	if req.N <= 0 {
 		req.N = 1
 	}
-	account, err = s.precheckAccount(ctx, account, req)
+	account, err = s.prepareAccountForDispatch(account, req)
 	if err != nil {
-		reportAccountPrecheckFailure(req, account, err)
 		return Response{}, err
 	}
-	reportAccountProgress(req, "account_validated", "账号 Token 验证通过", account)
 	result, err := s.backend.GenerateImage(ctx, account, req)
 	if err != nil {
 		if !openaiweb.IsInteractiveChallengeError(err) {
@@ -388,7 +312,7 @@ func (s *Service) generateOne(ctx context.Context, req Request) (openaiweb.Image
 		}
 		exclude[account.AccessToken] = true
 		log := openaiweb.AttemptLog{Attempt: len(attempts) + 1, AccountEmail: account.Email, Status: "running"}
-		account, err = s.precheckAccount(ctx, account, req)
+		account, err = s.prepareAccountForDispatch(account, req)
 		if err != nil {
 			s.store.ReleaseImage(account.AccessToken)
 			lastErr = err
@@ -402,17 +326,9 @@ func (s *Service) generateOne(ctx context.Context, req Request) (openaiweb.Image
 				_ = s.store.MarkImageQuotaExhausted(account.AccessToken, err)
 			}
 			attempts = append(attempts, log)
-			reportAccountPrecheckFailure(req, account, err)
-			if isTransientPrecheckError(err) {
-				return openaiweb.ImageResult{Attempts: attempts}, fmt.Errorf("账号预检暂时不可用（代理或上游超时）: %w", err)
-			}
-			if openaiweb.IsInteractiveChallengeError(err) {
-				return openaiweb.ImageResult{Attempts: attempts}, err
-			}
 			continue
 		}
 		log.AccountEmail = account.Email
-		reportAccountProgress(req, "account_validated", "账号 Token 验证通过", account)
 		imageAttempts++
 		result, err := s.backend.GenerateImage(ctx, account, req)
 		if err == nil {
@@ -453,137 +369,20 @@ func (s *Service) generateOne(ctx context.Context, req Request) (openaiweb.Image
 	return openaiweb.ImageResult{Attempts: attempts}, lastErr
 }
 
-func (s *Service) precheckAccount(ctx context.Context, account accounts.Account, req Request) (accounts.Account, error) {
-	cfg := s.currentConfig()
-	timeout := time.Duration(cfg.ImageAccountPrecheckTimeoutSecs * float64(time.Second))
-	if timeout <= 0 {
-		timeout = 75 * time.Second
-	}
-	precheckCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	// The deadline covers both the global verification queue and the upstream
-	// checks. Otherwise a burst can wait several full verification windows.
-	release, err := s.precheckGate.acquire(precheckCtx, cfg.ImageAccountPrecheckConcurrency, func() {
-		reportAccountPrecheckWait(req, account, cfg.ImageAccountPrecheckConcurrency)
-	})
-	if err != nil {
-		return account, err
-	}
-	defer release()
-	reportAccountProgress(req, "checking_account", "验证账号 Token", account)
-
+// prepareAccountForDispatch performs only local bookkeeping. GenerateImage is
+// the authoritative token/Sentinel check, so normal dispatch does not repeat
+// the same upstream bootstrap immediately before generation.
+func (s *Service) prepareAccountForDispatch(account accounts.Account, req Request) (accounts.Account, error) {
+	var err error
 	account, err = s.ensureBrowserIdentity(account)
 	if err != nil {
 		return account, err
 	}
-	token := strings.TrimSpace(account.AccessToken)
-	if token == "" {
+	if strings.TrimSpace(account.AccessToken) == "" {
 		return account, fmt.Errorf("access token is required")
 	}
-	if err := s.checkImageReadiness(precheckCtx, account); err != nil {
-		return s.handleAccountPrecheckError(account, err)
-	}
-	if !s.accountNeedsPrecheck(account) {
-		return account, nil
-	}
-
-	s.precheckMu.Lock()
-	if pending := s.prechecks[token]; pending != nil {
-		s.precheckMu.Unlock()
-		select {
-		case <-pending.done:
-			return pending.account, pending.err
-		case <-precheckCtx.Done():
-			return account, precheckCtx.Err()
-		}
-	}
-	pending := &accountPrecheckFlight{done: make(chan struct{})}
-	s.prechecks[token] = pending
-	s.precheckMu.Unlock()
-
-	updated, err := s.refreshAccountForImage(precheckCtx, account)
-	s.precheckMu.Lock()
-	pending.account = updated
-	pending.err = err
-	delete(s.prechecks, token)
-	close(pending.done)
-	s.precheckMu.Unlock()
-	return updated, err
-}
-
-func (s *Service) accountNeedsPrecheck(account accounts.Account) bool {
-	interval := s.currentConfig().ImageAccountPrecheckIntervalMinutes
-	if interval <= 0 || strings.TrimSpace(account.Status) == "" || account.Extra == nil {
-		return true
-	}
-	if refreshRequired, _ := account.Extra["image_quota_refresh_required"].(bool); refreshRequired {
-		return true
-	}
-	raw := strings.TrimSpace(fmt.Sprint(account.Extra["last_account_refresh_at"]))
-	last, err := time.Parse(time.RFC3339, raw)
-	if err != nil {
-		return true
-	}
-	return time.Since(last) >= time.Duration(interval)*time.Minute
-}
-
-func (s *Service) refreshAccountForImage(ctx context.Context, account accounts.Account) (accounts.Account, error) {
-	check, err := s.checkAccountDetails(ctx, account, accounts.AccountCheckResult{ImageQuotaUnknown: true}, false)
-	if err != nil {
-		return s.handleAccountPrecheckError(account, err)
-	}
-	updated, found, recordErr := s.store.RecordRefresh(account.AccessToken, check, nil)
-	if recordErr != nil {
-		return account, recordErr
-	}
-	if !found {
-		return account, fmt.Errorf("account no longer available")
-	}
-	if !check.ImageQuotaUnknown && check.Quota <= 0 {
-		err := fmt.Errorf("no available free image quota")
-		_ = s.store.MarkImageQuotaExhausted(updated.AccessToken, err)
-		return updated, err
-	}
-	return updated, nil
-}
-
-func (s *Service) handleAccountPrecheckError(account accounts.Account, err error) (accounts.Account, error) {
-	if isTransientPrecheckError(err) {
-		return account, err
-	}
-	if !openaiweb.IsInteractiveChallengeError(err) {
-		if openaiweb.IsAuthenticationError(err) {
-			_, _ = s.store.RemoveInvalidToken(account.AccessToken, err.Error())
-		} else {
-			_, _, _ = s.store.RecordRefresh(account.AccessToken, accounts.AccountCheckResult{}, err)
-		}
-	}
-	return account, err
-}
-
-func isTransientPrecheckError(err error) bool {
-	if err == nil {
-		return false
-	}
-	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
-		return true
-	}
-	var networkErr net.Error
-	if errors.As(err, &networkErr) && (networkErr.Timeout() || networkErr.Temporary()) {
-		return true
-	}
-	var upstream *openaiweb.UpstreamError
-	if errors.As(err, &upstream) && (upstream.StatusCode == 408 || upstream.StatusCode == 429 || upstream.StatusCode >= 500) {
-		return true
-	}
-	message := strings.ToLower(strings.TrimSpace(err.Error()))
-	return strings.Contains(message, "timeout") ||
-		strings.Contains(message, "deadline exceeded") ||
-		strings.Contains(message, "connection reset") ||
-		strings.Contains(message, "connection refused") ||
-		strings.Contains(message, "no such host") ||
-		strings.Contains(message, "proxyconnect") ||
-		strings.Contains(message, "temporarily unavailable")
+	reportAccountProgress(req, "account_ready", "账号已分配，开始生图", account)
+	return account, nil
 }
 
 func reportAccountProgress(req Request, progress, message string, account accounts.Account) {
@@ -599,31 +398,6 @@ func reportAccountProgress(req Request, progress, message string, account accoun
 
 func reportAccountWait(req Request, account accounts.Account) {
 	reportAccountProgress(req, "waiting_account", "暂无空闲账号，任务排队等待", account)
-}
-
-func reportAccountPrecheckWait(req Request, account accounts.Account, limit int) {
-	message := "等待账号验证队列"
-	if limit > 0 {
-		message = fmt.Sprintf("等待账号验证队列（并发上限 %d）", limit)
-	}
-	reportAccountProgress(req, "waiting_account_precheck", message, account)
-}
-
-func reportAccountPrecheckFailure(req Request, account accounts.Account, err error) {
-	if req.Progress == nil {
-		return
-	}
-	details := map[string]any{"error": err.Error()}
-	if account.Email != "" {
-		details["account_email"] = account.Email
-	}
-	message := "账号 Token 验证失败，切换账号"
-	if openaiweb.IsAuthenticationError(err) {
-		message = "账号凭证失效，已标记失效并交由后台恢复，切换账号"
-	} else if isTransientPrecheckError(err) {
-		message = "账号预检超时或代理不可用，任务未切换账号"
-	}
-	req.Progress(openaiweb.ProgressEvent{Progress: "account_precheck_failed", Message: message, Details: details})
 }
 
 type imageDownloader interface {

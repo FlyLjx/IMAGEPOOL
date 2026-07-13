@@ -250,6 +250,17 @@ func TestImageResumeRetryPolicy(t *testing.T) {
 	}
 }
 
+func TestImagePollRetryPolicyIncludesBrokenConnections(t *testing.T) {
+	for _, err := range []error{
+		errors.New("write tcp 127.0.0.1:1234: write: broken pipe"),
+		errors.New("unexpected EOF"),
+	} {
+		if !isRetryableImagePollError(err) {
+			t.Fatalf("error must be retryable: %v", err)
+		}
+	}
+}
+
 func TestResolveConversationImageURLsUsesInitialReferenceBeforePolling(t *testing.T) {
 	var conversationHits atomic.Int32
 	var srv *httptest.Server
