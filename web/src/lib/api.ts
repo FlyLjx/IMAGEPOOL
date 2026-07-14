@@ -416,9 +416,40 @@ export type RegisterConfig = {
   }>;
 };
 
+export type SystemLoad = {
+  sampled_at: string;
+  cpu: {
+    usage_percent: number;
+    cores: number;
+    load_1: number;
+    load_5: number;
+    load_15: number;
+  };
+  memory: {
+    total_bytes: number;
+    used_bytes: number;
+    available_bytes: number;
+    usage_percent: number;
+  };
+  disk: {
+    path: string;
+    total_bytes: number;
+    used_bytes: number;
+    available_bytes: number;
+    usage_percent: number;
+  };
+  network: {
+    received_bytes: number;
+    sent_bytes: number;
+    receive_bytes_per_second: number;
+    send_bytes_per_second: number;
+  };
+};
+
 export type DashboardSummary = {
   version: string;
   generated_at: string;
+  system: SystemLoad;
   storage: {
     backend: {
       type?: string;
@@ -546,6 +577,10 @@ export async function fetchModels() {
 
 export async function fetchDashboard(runtimeWindowMinutes = 60) {
   return httpRequest<DashboardSummary>(`/api/dashboard?runtime_window_minutes=${encodeURIComponent(String(runtimeWindowMinutes))}`);
+}
+
+export async function fetchSystemLoad() {
+  return httpRequest<SystemLoad>("/api/system/load");
 }
 
 export async function debugChatGPTWeb(payload: ChatGPTWebDebugPayload) {

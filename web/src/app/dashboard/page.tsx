@@ -5,20 +5,19 @@ import { Alert, Button, Card, Empty, Progress, Select, Skeleton, Tag, Typography
 import {
   Activity,
   AlertCircle,
-  CheckCircle2,
-  Database,
+  Cpu,
   Gauge,
-  KeyRound,
+  HardDrive,
   LoaderCircle,
+  MemoryStick,
+  Network,
   RefreshCw,
-  Server,
-  ShieldAlert,
   TimerReset,
   UsersRound,
 } from "lucide-react";
 import { toast } from "sonner";
 
-import { fetchDashboard, type DashboardSummary } from "@/lib/api";
+import { fetchDashboard, fetchSystemLoad, type DashboardSummary, type SystemLoad } from "@/lib/api";
 import { formatShanghaiDateTime, formatShanghaiDateTimeParts } from "@/lib/datetime";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 import { cn } from "@/lib/utils";
@@ -57,6 +56,44 @@ function rateText(value: unknown) {
     .replace(/(\.\d*?)0+$/, "$1");
 }
 
+function finiteNumber(value: unknown) {
+  const numeric = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(numeric) ? numeric : 0;
+}
+
+function formatBytes(value: unknown) {
+  const bytes = Math.max(0, finiteNumber(value));
+  if (bytes < 1024) {
+    return `${Math.round(bytes)} B`;
+  }
+
+  const units = ["KB", "MB", "GB", "TB", "PB"];
+  const unitIndex = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)) - 1, units.length - 1);
+  const normalized = bytes / 1024 ** (unitIndex + 1);
+  const digits = normalized >= 100 ? 0 : normalized >= 10 ? 1 : 2;
+  return `${normalized.toFixed(digits).replace(/\.0+$/, "").replace(/(\.\d*?)0+$/, "$1")} ${units[unitIndex]}`;
+}
+
+function formatRate(value: unknown) {
+  return `${formatBytes(value)}/s`;
+}
+
+function loadPercent(value: unknown) {
+  return clamp(finiteNumber(value), 0, 100);
+}
+
+function newerSystemLoad(current: SystemLoad | null, next: SystemLoad) {
+  if (!current) {
+    return next;
+  }
+  const currentTime = Date.parse(current.sampled_at);
+  const nextTime = Date.parse(next.sampled_at);
+  if (Number.isFinite(currentTime) && Number.isFinite(nextTime) && nextTime < currentTime) {
+    return current;
+  }
+  return next;
+}
+
 const RUNTIME_WINDOW_OPTIONS = [
   { value: 60, label: "最近 60 分钟" },
   { value: 24 * 60, label: "最近 24 小时" },
@@ -75,20 +112,6 @@ function runtimeWindowText(minutes: number) {
     return `${minutes / 60} 小时`;
   }
   return `${minutes} 分钟`;
-}
-
-function statusTag(status?: string) {
-  const value = String(status || "").trim();
-  const color: Record<string, string> = {
-    healthy: "green",
-    success: "green",
-    running: "processing",
-    queued: "blue",
-    error: "red",
-    failed: "red",
-    unhealthy: "red",
-  };
-  return <Tag color={color[value] || "default"}>{value || "-"}</Tag>;
 }
 
 function sortedEntries(source?: Record<string, number>, limit = 5) {
@@ -296,6 +319,117 @@ function RuntimeTrendChart({ series, windowMinutes }: { series: RuntimeHealthDat
   );
 }
 
+function ServerLoadCard({ system }: { system: SystemLoad }) {
+  const cpuPercent = loadPercent(system.cpu.usage_percent);
+  const memoryPercent = loadPercent(system.memory.usage_percent);
+  const diskPercent = loadPercent(system.disk.usage_percent);
+
+  const sections = [
+    {
+      key: "cpu",
+      label: "CPU",
+      icon: Cpu,
+      iconClass: "bg-blue-50 text-blue-600",
+      value: `${rateText(cpuPercent)}%`,
+      detail: `${finiteNumber(system.cpu.cores)} 核 · Load 1m ${rateText(system.cpu.load_1)}`,
+      progress: cpuPercent,
+      progressColor: "#3b82f6",
+    },
+    {
+      key: "memory",
+      label: "内存",
+      icon: MemoryStick,
+      iconClass: "bg-emerald-50 text-emerald-600",
+      value: `${rateText(memoryPercent)}%`,
+      detail: `${formatBytes(system.memory.used_bytes)} / ${formatBytes(system.memory.total_bytes)}`,
+      progress: memoryPercent,
+      progressColor: "#10b981",
+    },
+    {
+      key: "network",
+      label: "网络",
+      icon: Network,
+      iconClass: "bg-cyan-50 text-cyan-600",
+      receiveRate: formatRate(system.network.receive_bytes_per_second),
+      sendRate: formatRate(system.network.send_bytes_per_second),
+      received: formatBytes(system.network.received_bytes),
+      sent: formatBytes(system.network.sent_bytes),
+    },
+    {
+      key: "disk",
+      label: "硬盘",
+      icon: HardDrive,
+      iconClass: "bg-amber-50 text-amber-600",
+      value: `${rateText(diskPercent)}%`,
+      detail: `${formatBytes(system.disk.used_bytes)} / ${formatBytes(system.disk.total_bytes)}`,
+      progress: diskPercent,
+      progressColor: "#f59e0b",
+    },
+  ] as const;
+
+  return (
+    <Card
+      title="服务器负载"
+      extra={<span className="font-mono text-xs text-slate-400">{formatShanghaiDateTime(system.sampled_at)}</span>}
+    >
+      <div className="grid min-w-0 grid-cols-1 gap-y-5 sm:grid-cols-2 xl:grid-cols-4 xl:gap-y-0">
+        {sections.map((section, index) => {
+          const Icon = section.icon;
+          const isNetwork = section.key === "network";
+          return (
+            <div
+              key={section.key}
+              className={cn(
+                "min-w-0 px-0 sm:px-5",
+                index % 2 === 1 && "sm:border-l sm:border-slate-100",
+                index === 0 && "sm:pl-0",
+                index === 2 && "sm:pl-0 xl:border-l xl:border-slate-100 xl:pl-5",
+                index === 3 && "xl:pr-0",
+              )}
+            >
+              <div className="flex min-w-0 items-center gap-3">
+                <span className={cn("flex size-9 shrink-0 items-center justify-center rounded-lg", section.iconClass)}>
+                  <Icon className="size-[18px]" />
+                </span>
+                <span className="truncate text-sm font-medium text-slate-500">{section.label}</span>
+              </div>
+
+              {isNetwork ? (
+                <div className="mt-4 min-w-0 space-y-2.5">
+                  <div className="flex min-w-0 items-baseline justify-between gap-3">
+                    <span className="shrink-0 text-xs text-slate-400">下载</span>
+                    <span className="min-w-0 truncate font-mono text-lg font-semibold text-slate-950 tabular-nums" title={section.receiveRate}>{section.receiveRate}</span>
+                  </div>
+                  <div className="flex min-w-0 items-baseline justify-between gap-3">
+                    <span className="shrink-0 text-xs text-slate-400">上传</span>
+                    <span className="min-w-0 truncate font-mono text-lg font-semibold text-slate-950 tabular-nums" title={section.sendRate}>{section.sendRate}</span>
+                  </div>
+                  <div className="truncate text-xs text-slate-400" title={`累计接收 ${section.received}，发送 ${section.sent}`}>
+                    累计 ↓ {section.received} · ↑ {section.sent}
+                  </div>
+                </div>
+              ) : (
+                <div className="mt-4 min-w-0">
+                  <div className="font-mono text-2xl font-semibold text-slate-950 tabular-nums">{section.value}</div>
+                  <div className="mt-2 truncate text-xs text-slate-400" title={section.detail}>{section.detail}</div>
+                  <Progress
+                    className="!mt-3 !mb-0"
+                    percent={section.progress}
+                    showInfo={false}
+                    strokeColor={section.progressColor}
+                    trailColor="#f1f5f9"
+                    size="small"
+                  />
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </Card>
+  );
+}
+
 function ErrorRateDonut({ runtime }: { runtime: RuntimeHealthData }) {
   const segments = (runtime.status_pie || []).filter((item) => Number(item.value || 0) > 0);
   const total = segments.reduce((sum, item) => sum + Number(item.value || 0), 0);
@@ -306,26 +440,27 @@ function ErrorRateDonut({ runtime }: { runtime: RuntimeHealthData }) {
   const successRateText = rateText(runtime.success_rate);
   const radius = 54;
   const circumference = 2 * Math.PI * radius;
-  let offset = 0;
 
   if (total <= 0) {
     return (
-      <div className="flex min-h-[260px] items-center justify-center rounded-xl bg-slate-50">
+      <div className="flex min-h-[290px] items-center justify-center rounded-xl bg-slate-50">
         <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无错误率数据" />
       </div>
     );
   }
 
   return (
-    <div className="min-h-[260px] rounded-xl border border-slate-100 bg-gradient-to-b from-white to-slate-50/60 p-4">
+    <div className="min-h-[290px] rounded-xl border border-slate-100 bg-gradient-to-b from-white to-slate-50/60 p-4">
       <div className="grid gap-4 md:grid-cols-[170px_1fr] xl:grid-cols-1 2xl:grid-cols-[170px_1fr]">
         <div className="relative mx-auto flex size-[170px] items-center justify-center rounded-full bg-white shadow-sm ring-1 ring-slate-100">
           <svg viewBox="0 0 160 160" className="size-[158px] -rotate-90">
             <circle cx="80" cy="80" r={radius} fill="none" stroke="#eef2f7" strokeWidth="16" />
-            {segments.map((segment) => {
+            {segments.map((segment, index) => {
               const length = (Number(segment.value || 0) / total) * circumference;
-              const currentOffset = offset;
-              offset += length;
+              const currentOffset = segments.slice(0, index).reduce(
+                (sum, item) => sum + (Number(item.value || 0) / total) * circumference,
+                0,
+              );
               return (
                 <circle
                   key={segment.status}
@@ -408,8 +543,9 @@ function RuntimeHealth({
   onWindowChange: (minutes: number) => void;
 }) {
   return (
-    <section className="grid items-start gap-4 xl:grid-cols-[1.45fr_0.9fr]">
+    <section className="grid items-stretch gap-4 xl:grid-cols-[1.45fr_0.9fr]">
       <Card
+        className="h-full"
         title={
           <div className="flex flex-wrap items-center gap-2">
             <span>运行状况</span>
@@ -430,6 +566,7 @@ function RuntimeHealth({
         <RuntimeTrendChart series={runtime.series} windowMinutes={runtime.window_minutes} />
       </Card>
       <Card
+        className="h-full"
         title={
           <div className="flex items-center gap-2">
             <span>错误率</span>
@@ -439,9 +576,9 @@ function RuntimeHealth({
       >
         <ErrorRateDonut runtime={runtime} />
         {runtime.error_reasons.length ? (
-          <div className="mt-4 border-t border-slate-100 pt-4">
+          <div className="mt-4 min-w-0 overflow-hidden border-t border-slate-100 pt-4">
             <div className="mb-2 text-xs font-medium text-slate-400">主要错误原因</div>
-            <div className="space-y-2">
+            <div className="max-h-32 space-y-2 overflow-y-auto pr-1">
               {runtime.error_reasons.map((item) => (
                 <div key={item.label} className="flex items-center justify-between gap-3 text-sm">
                   <span className="min-w-0 truncate text-slate-600" title={item.label}>{item.label}</span>
@@ -521,6 +658,7 @@ function RecentFailures({ items }: { items: DashboardSummary["calls"]["recent_fa
 
 function DashboardContent() {
   const [data, setData] = useState<DashboardSummary | null>(null);
+  const [systemLoad, setSystemLoad] = useState<SystemLoad | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [runtimeWindowMinutes, setRuntimeWindowMinutes] = useState(60);
@@ -532,7 +670,11 @@ function DashboardContent() {
       setIsLoading(true);
     }
     try {
-      setData(await fetchDashboard(windowMinutes));
+      const dashboard = await fetchDashboard(windowMinutes);
+      setData(dashboard);
+      if (dashboard.system) {
+        setSystemLoad((current) => newerSystemLoad(current, dashboard.system));
+      }
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "加载总览失败");
     } finally {
@@ -544,6 +686,37 @@ function DashboardContent() {
   useEffect(() => {
     void loadDashboard();
   }, []);
+
+  useEffect(() => {
+    if (!data) {
+      return;
+    }
+
+    let active = true;
+    let inFlight = false;
+    const refreshSystemLoad = async () => {
+      if (inFlight) {
+        return;
+      }
+      inFlight = true;
+      try {
+        const latest = await fetchSystemLoad();
+        if (active) {
+          setSystemLoad((current) => newerSystemLoad(current, latest));
+        }
+      } catch {
+        // Keep the last successful sample when the lightweight poll fails.
+      } finally {
+        inFlight = false;
+      }
+    };
+    const timer = window.setInterval(() => void refreshSystemLoad(), 5000);
+
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [data]);
 
   const handleRuntimeWindowChange = (windowMinutes: number) => {
     setRuntimeWindowMinutes(windowMinutes);
@@ -612,6 +785,8 @@ function DashboardContent() {
         <MetricCard title="队列任务" value={numberText(runningTasks)} helper={`历史任务 ${data.tasks.total} 条`} icon={TimerReset} tone={runningTasks ? "amber" : "slate"} />
       </section>
 
+      {systemLoad ? <ServerLoadCard system={systemLoad} /> : null}
+
       {data.calls.runtime ? (
         <RuntimeHealth
           runtime={data.calls.runtime}
@@ -620,63 +795,6 @@ function DashboardContent() {
           onWindowChange={handleRuntimeWindowChange}
         />
       ) : null}
-
-      <section className="grid gap-4 xl:grid-cols-[1.2fr_0.8fr]">
-        <Card title="账号池状态">
-          <div className="grid gap-6 lg:grid-cols-[220px_1fr]">
-            <div className="flex flex-col items-center justify-center">
-              <Progress
-                type="circle"
-                percent={percent(data.accounts.active, Math.max(1, totalAccounts))}
-                size={150}
-                strokeColor="#10b981"
-                format={() => `${data.accounts.active}`}
-              />
-              <div className="mt-3 text-sm text-slate-500">正常账号占比</div>
-            </div>
-            <div className="grid gap-3 sm:grid-cols-2">
-              <div className="rounded-lg bg-slate-50 p-4">
-                <div className="flex items-center gap-2 text-sm text-slate-500"><CheckCircle2 className="size-4 text-emerald-500" /> 正常</div>
-                <div className="mt-2 text-2xl font-semibold">{data.accounts.active}</div>
-              </div>
-              <div className="rounded-lg bg-slate-50 p-4">
-                <div className="flex items-center gap-2 text-sm text-slate-500"><AlertCircle className="size-4 text-amber-500" /> 限流</div>
-                <div className="mt-2 text-2xl font-semibold">{data.accounts.limited}</div>
-              </div>
-              <div className="rounded-lg bg-slate-50 p-4">
-                <div className="flex items-center gap-2 text-sm text-slate-500"><ShieldAlert className="size-4 text-rose-500" /> 异常</div>
-                <div className="mt-2 text-2xl font-semibold">{data.accounts.abnormal}</div>
-              </div>
-              <div className="rounded-lg bg-slate-50 p-4">
-                <div className="flex items-center gap-2 text-sm text-slate-500"><KeyRound className="size-4 text-blue-500" /> 用户密钥</div>
-                <div className="mt-2 text-2xl font-semibold">{data.auth_keys.enabled_users}/{data.auth_keys.users}</div>
-              </div>
-            </div>
-          </div>
-        </Card>
-
-        <Card title="存储与代理">
-          <div className="space-y-4">
-            <div className="flex items-start gap-3 rounded-lg bg-slate-50 p-4">
-              <Database className="mt-0.5 size-5 text-blue-500" />
-              <div className="min-w-0">
-                <div className="font-medium text-slate-800">{data.storage.backend.description || data.storage.backend.type || "存储后端"}</div>
-                <div className="mt-1 break-all text-xs text-slate-500">{data.storage.backend.database_url || data.storage.health.backend || "-"}</div>
-                <div className="mt-2">{statusTag(data.storage.health.status)}</div>
-              </div>
-            </div>
-            <div className="flex items-start gap-3 rounded-lg bg-slate-50 p-4">
-              <Server className="mt-0.5 size-5 text-emerald-500" />
-              <div>
-                <div className="font-medium text-slate-800">代理账号</div>
-                <div className="mt-1 text-sm text-slate-500">
-                  已配置 {data.accounts.proxy_stats.accounts} 个，冷却 {data.accounts.proxy_stats.cooling} 个
-                </div>
-              </div>
-            </div>
-          </div>
-        </Card>
-      </section>
 
       <section className="grid gap-4 xl:grid-cols-3">
         <Card title="今日接口分布">

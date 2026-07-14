@@ -1087,7 +1087,41 @@ func TestDashboardIncludesCallRuntime(t *testing.T) {
 	storagePayload, _ := payload["storage"].(map[string]any)
 	health, _ := storagePayload["health"].(map[string]any)
 	backend, _ := storagePayload["backend"].(map[string]any)
-	if response.StatusCode != http.StatusOK || len(series) != 60 || health["status"] != "healthy" || backend["type"] != "local" || backend["description"] != "本地文件存储" {
+	system, _ := payload["system"].(map[string]any)
+	cpu, _ := system["cpu"].(map[string]any)
+	if response.StatusCode != http.StatusOK || len(series) != 60 || health["status"] != "healthy" || backend["type"] != "local" || backend["description"] != "本地文件存储" || cpu["cores"] == nil {
+		t.Fatalf("status=%d payload=%#v", response.StatusCode, payload)
+	}
+}
+
+func TestSystemLoadEndpointIsAuthenticated(t *testing.T) {
+	srv := httptest.NewServer(testServer(t))
+	defer srv.Close()
+	response, err := http.Get(srv.URL + "/api/system/load")
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated status=%d", response.StatusCode)
+	}
+
+	request, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/system/load", nil)
+	request.Header.Set("Authorization", "Bearer k")
+	response, err = http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	var payload map[string]any
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	cpu, _ := payload["cpu"].(map[string]any)
+	memory, _ := payload["memory"].(map[string]any)
+	disk, _ := payload["disk"].(map[string]any)
+	network, _ := payload["network"].(map[string]any)
+	if response.StatusCode != http.StatusOK || response.Header.Get("Cache-Control") != "no-store" || payload["sampled_at"] == nil || cpu["usage_percent"] == nil || cpu["load_15"] == nil || memory["available_bytes"] == nil || disk["path"] == nil || network["receive_bytes_per_second"] == nil {
 		t.Fatalf("status=%d payload=%#v", response.StatusCode, payload)
 	}
 }

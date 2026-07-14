@@ -32,6 +32,7 @@ import (
 	"imagepool/internal/registration"
 	"imagepool/internal/searches"
 	"imagepool/internal/storage"
+	"imagepool/internal/systemstats"
 	"imagepool/internal/tasks"
 	"imagepool/internal/texts"
 	"imagepool/internal/updater"
@@ -46,6 +47,7 @@ type Server struct {
 	texts           *texts.Service
 	searches        *searches.Service
 	storage         *storage.Service
+	system          *systemstats.Sampler
 	tags            *imagetags.Store
 	static          *staticFiles
 	tasks           *tasks.Manager
@@ -92,7 +94,7 @@ func newServer(cfg config.Config, accountStore *accounts.Store, imageService *im
 		registerManager = registration.NewManagerWithPersistence(state, accountStore, registerWorker)
 	}
 	refreshManager := accounts.NewRefreshManager(accountStore, imageService, cfg.RefreshAccountConcurrency)
-	return &Server{cfg: cfg, auth: authService, accounts: accountStore, images: imageService, texts: textService, searches: searchService, storage: storageService, tags: tagStore, static: newStaticFiles(cfg.WebDistDir), tasks: taskManager, metrics: metricService, refresh: refreshManager, autoRefresh: accounts.NewAutoRefreshScheduler(accountStore, refreshManager, cfg.RefreshAccountIntervalMinutes), oauth: oauthlogin.New(), debugClient: openaiweb.NewReloadableClient(cfg), register: registerManager, updater: updater.NewFromEnvironment(), state: state, onConfigUpdated: onConfigUpdated}
+	return &Server{cfg: cfg, auth: authService, accounts: accountStore, images: imageService, texts: textService, searches: searchService, storage: storageService, system: systemstats.New(cfg.ImageOutputDir), tags: tagStore, static: newStaticFiles(cfg.WebDistDir), tasks: taskManager, metrics: metricService, refresh: refreshManager, autoRefresh: accounts.NewAutoRefreshScheduler(accountStore, refreshManager, cfg.RefreshAccountIntervalMinutes), oauth: oauthlogin.New(), debugClient: openaiweb.NewReloadableClient(cfg), register: registerManager, updater: updater.NewFromEnvironment(), state: state, onConfigUpdated: onConfigUpdated}
 }
 
 func (s *Server) StartBackground(ctx context.Context) {
@@ -200,6 +202,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleUserKeyItem(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/api/dashboard":
 		s.handleDashboard(w, r)
+	case r.Method == http.MethodGet && r.URL.Path == "/api/system/load":
+		w.Header().Set("Cache-Control", "no-store")
+		writeJSON(w, http.StatusOK, s.system.Sample())
 	case r.Method == http.MethodGet && r.URL.Path == "/api/logs":
 		s.handleLogs(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/api/logs/delete":
@@ -1321,6 +1326,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		"app":          cfg.AppName,
 		"version":      "go-image-pool",
 		"generated_at": time.Now(),
+		"system":       s.system.Sample(),
 		"storage":      map[string]any{"backend": storageStats, "health": mergeDashboardStorageHealth(storageHealth, accountSummary["total"], len(userKeys))},
 		"accounts":     accountSummary,
 		"auth_keys":    map[string]any{"users": len(userKeys), "enabled_users": enabledUsers},
