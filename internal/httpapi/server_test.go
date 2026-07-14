@@ -144,7 +144,7 @@ func TestStabilityHealthEndpointIsPublicAndNoStore(t *testing.T) {
 	if !ok {
 		t.Fatalf("handler=%T", handler)
 	}
-	server.metrics.Record(metrics.Call{Time: time.Now(), Endpoint: "/v1/images/generations", Status: "success"})
+	server.metrics.Record(metrics.Call{Time: time.Now(), Endpoint: "/v1/images/generations", Status: "success", DurationMS: 1200})
 	srv := httptest.NewServer(server)
 	defer srv.Close()
 
@@ -160,7 +160,7 @@ func TestStabilityHealthEndpointIsPublicAndNoStore(t *testing.T) {
 	if err := json.NewDecoder(response.Body).Decode(&stability); err != nil {
 		t.Fatal(err)
 	}
-	if response.StatusCode != http.StatusOK || response.Header.Get("Cache-Control") != "no-store" || stability.WindowSeconds != 60 || stability.Total != 1 || stability.Status != "stable" || stability.Runtime["window_minutes"] != float64(60) {
+	if response.StatusCode != http.StatusOK || response.Header.Get("Cache-Control") != "no-store" || stability.WindowSeconds != 60 || stability.Total != 1 || stability.Status != "stable" || stability.Runtime["window_minutes"] != float64(60) || stability.Recent60.SuccessRate != 100 || stability.Recent60.AverageDurationMS != 1200 {
 		t.Fatalf("status=%d cache=%q stability=%#v", response.StatusCode, response.Header.Get("Cache-Control"), stability)
 	}
 }
@@ -178,37 +178,57 @@ func TestErrorClassificationDoesNotTreatCanceledOrRejectedRequestsAsFailures(t *
 	if got := metricCallStatus(http.StatusBadRequest, "content policy violation"); got != "rejected" {
 		t.Fatalf("rejected metric status=%q", got)
 	}
-}
-
-func TestImageTimeoutSentinelsReturnGatewayTimeout(t *testing.T) {
-	for name, err := range map[string]error{
-		"generation":  fmt.Errorf("generation: %w", openaiweb.ErrPollTimeout),
-		"preparation": fmt.Errorf("preparation: %w", openaiweb.ErrImagePreparationTimeout),
-	} {
-		t.Run(name, func(t *testing.T) {
-			if status := statusFromError(err); status != http.StatusGatewayTimeout {
-				t.Fatalf("status=%d", status)
-			}
-			recorder := httptest.NewRecorder()
-			writeError(recorder, statusFromError(err), err)
-			var body struct {
-				Error struct {
-					Type string `json:"type"`
-					Code string `json:"code"`
-				} `json:"error"`
-			}
-			if decodeErr := json.NewDecoder(recorder.Body).Decode(&body); decodeErr != nil {
-				t.Fatal(decodeErr)
-			}
-			if recorder.Code != http.StatusGatewayTimeout || body.Error.Type != "timeout_error" || body.Error.Code != "upstream_timeout" {
-				t.Fatalf("status=%d body=%#v", recorder.Code, body)
-			}
-		})
+	if got := metricCallStatus(http.StatusBadGateway, "content policy violation: 非常抱歉，生成的图片可能违反了关于裸露、色情或情色内容的防护限制。"); got != "rejected" {
+		t.Fatalf("content policy metric status=%q", got)
 	}
 }
 
-func TestImageGenerationEndpointReturnsTimeoutError(t *testing.T) {
-	srv := httptest.NewServer(testServerWithGenerateError(t, openaiweb.ErrPollTimeout))
+func TestImagePollTimeoutReturnsPublicQuotaRetryError(t *testing.T) {
+	err := fmt.Errorf("generation: %w: ChatGPT 生图任务已等待 180 秒", openaiweb.ErrPollTimeout)
+	if status := statusFromError(err); status != http.StatusTooManyRequests {
+		t.Fatalf("status=%d", status)
+	}
+	recorder := httptest.NewRecorder()
+	writeError(recorder, statusFromError(err), err)
+	var body struct {
+		Error struct {
+			Message string `json:"message"`
+			Type    string `json:"type"`
+			Code    string `json:"code"`
+		} `json:"error"`
+	}
+	if decodeErr := json.NewDecoder(recorder.Body).Decode(&body); decodeErr != nil {
+		t.Fatal(decodeErr)
+	}
+	if recorder.Code != http.StatusTooManyRequests || body.Error.Message != openaiweb.PublicImagePollTimeoutMessage || body.Error.Type != "rate_limit_error" || body.Error.Code != "image_quota_reservation_failed" {
+		t.Fatalf("status=%d body=%#v", recorder.Code, body)
+	}
+}
+
+func TestImagePreparationTimeoutReturnsGatewayTimeout(t *testing.T) {
+	err := fmt.Errorf("preparation: %w", openaiweb.ErrImagePreparationTimeout)
+	if status := statusFromError(err); status != http.StatusGatewayTimeout {
+		t.Fatalf("status=%d", status)
+	}
+	recorder := httptest.NewRecorder()
+	writeError(recorder, statusFromError(err), err)
+	var body struct {
+		Error struct {
+			Type string `json:"type"`
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if decodeErr := json.NewDecoder(recorder.Body).Decode(&body); decodeErr != nil {
+		t.Fatal(decodeErr)
+	}
+	if recorder.Code != http.StatusGatewayTimeout || body.Error.Type != "timeout_error" || body.Error.Code != "upstream_timeout" {
+		t.Fatalf("status=%d body=%#v", recorder.Code, body)
+	}
+}
+
+func TestImageGenerationEndpointReturnsPublicPollTimeoutError(t *testing.T) {
+	err := fmt.Errorf("%w: ChatGPT 生图任务已等待 180 秒", openaiweb.ErrPollTimeout)
+	srv := httptest.NewServer(testServerWithGenerateError(t, err))
 	defer srv.Close()
 	req, err := http.NewRequest(http.MethodPost, srv.URL+"/v1/images/generations", strings.NewReader(`{"prompt":"draw"}`))
 	if err != nil {
@@ -222,15 +242,40 @@ func TestImageGenerationEndpointReturnsTimeoutError(t *testing.T) {
 	defer response.Body.Close()
 	var body struct {
 		Error struct {
-			Type string `json:"type"`
-			Code string `json:"code"`
+			Message string `json:"message"`
+			Type    string `json:"type"`
+			Code    string `json:"code"`
 		} `json:"error"`
 	}
 	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
 		t.Fatal(err)
 	}
-	if response.StatusCode != http.StatusGatewayTimeout || body.Error.Type != "timeout_error" || body.Error.Code != "upstream_timeout" {
+	if response.StatusCode != http.StatusTooManyRequests || body.Error.Message != openaiweb.PublicImagePollTimeoutMessage || body.Error.Type != "rate_limit_error" || body.Error.Code != "image_quota_reservation_failed" {
 		t.Fatalf("status=%d body=%#v", response.StatusCode, body)
+	}
+}
+
+func TestStreamingImageGenerationEndpointReturnsPublicPollTimeoutError(t *testing.T) {
+	err := fmt.Errorf("%w: ChatGPT 生图任务已等待 180 秒", openaiweb.ErrPollTimeout)
+	srv := httptest.NewServer(testServerWithGenerateError(t, err))
+	defer srv.Close()
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/v1/images/generations", strings.NewReader(`{"prompt":"draw","stream":true}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer k")
+	response, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	body, _ := io.ReadAll(response.Body)
+	if response.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("status=%d body=%s", response.StatusCode, body)
+	}
+	text := string(body)
+	if !strings.Contains(text, openaiweb.PublicImagePollTimeoutMessage) || strings.Contains(strings.ToLower(text), "image poll timeout") || strings.Contains(text, "生图任务已等待") {
+		t.Fatalf("body=%s", body)
 	}
 }
 
@@ -391,7 +436,7 @@ func TestCredentialFailureNeverLeaksUpstreamDiagnostics(t *testing.T) {
 		}
 		defer resp.Body.Close()
 		body, _ := io.ReadAll(resp.Body)
-		if resp.StatusCode != http.StatusOK {
+		if resp.StatusCode != http.StatusUnauthorized {
 			t.Fatalf("status=%d body=%s", resp.StatusCode, body)
 		}
 		assertRedacted(t, body)

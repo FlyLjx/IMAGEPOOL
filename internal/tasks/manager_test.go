@@ -3,6 +3,7 @@ package tasks
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -256,6 +257,27 @@ func TestFailedTaskRedactsUpstreamCredentialDetails(t *testing.T) {
 			if detail, _ := entry.Details["error"].(string); strings.Contains(strings.ToLower(detail), leaked) {
 				t.Fatalf("task log details leaked %q: %#v", leaked, entry)
 			}
+		}
+	}
+}
+
+func TestFailedTaskHidesImagePollTimeoutDetails(t *testing.T) {
+	raw := fmt.Errorf("%w: ChatGPT 生图任务已等待 180 秒", openaiweb.ErrPollTimeout)
+	m := NewManager(sensitiveFailureTaskSvc{err: raw})
+	task, result, err := m.RunGenerationForOwner(context.Background(), "user-a", images.Request{Prompt: "draw"})
+	if !errors.Is(err, openaiweb.ErrPollTimeout) {
+		t.Fatalf("raw error must be preserved for internal handling: %v", err)
+	}
+	if task.Error != openaiweb.PublicImagePollTimeoutMessage || task.RealtimeStatus != openaiweb.PublicImagePollTimeoutMessage {
+		t.Fatalf("task=%#v", task)
+	}
+	if len(result.Attempts) != 1 || result.Attempts[0].Error != openaiweb.PublicImagePollTimeoutMessage {
+		t.Fatalf("result attempts=%#v", result.Attempts)
+	}
+	for _, entry := range task.StatusLogs {
+		text := strings.ToLower(entry.Message)
+		if strings.Contains(text, "image poll timeout") || strings.Contains(entry.Message, "生图任务已等待") {
+			t.Fatalf("task log leaked poll timeout: %#v", entry)
 		}
 	}
 }

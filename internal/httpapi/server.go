@@ -801,17 +801,17 @@ func (s *Server) streamAnthropicMessages(w http.ResponseWriter, r *http.Request,
 }
 
 func (s *Server) streamImage(w http.ResponseWriter, r *http.Request, req images.Request) {
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("X-Accel-Buffering", "no")
-	flusher, _ := w.(http.Flusher)
 	req.Stream = false
 	identity, _ := auth.IdentityFromContext(r.Context())
 	_, resp, err := s.tasks.RunGenerationForOwner(r.Context(), identity.ID, req)
 	if err != nil {
-		fmt.Fprintf(w, "data: %s\n\n", mustJSON(map[string]any{"error": openaiweb.PublicErrorMessage(err)}))
-	} else {
-		fmt.Fprintf(w, "data: %s\n\n", mustJSON(resp.MarshalForOpenAI()))
+		writeError(w, statusFromError(err), err)
+		return
 	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("X-Accel-Buffering", "no")
+	flusher, _ := w.(http.Flusher)
+	fmt.Fprintf(w, "data: %s\n\n", mustJSON(resp.MarshalForOpenAI()))
 	fmt.Fprint(w, "data: [DONE]\n\n")
 	if flusher != nil {
 		flusher.Flush()
@@ -2115,6 +2115,8 @@ func writeError(w http.ResponseWriter, status int, err error) {
 		errType, code = "request_canceled", "request_canceled"
 	case errors.Is(err, openaiweb.ErrContentPolicy):
 		errType, code = "invalid_request_error", "content_policy_violation"
+	case isImagePollTimeoutError(err):
+		errType, code = "rate_limit_error", "image_quota_reservation_failed"
 	case isImageTimeoutError(err):
 		errType, code = "timeout_error", "upstream_timeout"
 	case openaiweb.IsAuthenticationError(err):
@@ -2125,6 +2127,9 @@ func writeError(w http.ResponseWriter, status int, err error) {
 func statusFromError(err error) int {
 	if errors.Is(err, context.Canceled) {
 		return statusClientClosedRequest
+	}
+	if isImagePollTimeoutError(err) {
+		return http.StatusTooManyRequests
 	}
 	if isImageTimeoutError(err) {
 		return http.StatusGatewayTimeout
@@ -2149,17 +2154,24 @@ func statusFromError(err error) int {
 }
 
 // Image generation converts lower-level context deadlines into stable
-// user-facing sentinels so the account dispatcher can classify them. Preserve
-// their HTTP timeout semantics instead of incorrectly returning a 502.
+// user-facing sentinels so the account dispatcher can classify them. Poll
+// timeouts are handled separately because they are exposed as a retryable
+// quota-reservation failure to API consumers.
 func isImageTimeoutError(err error) bool {
 	return errors.Is(err, context.DeadlineExceeded) ||
-		errors.Is(err, openaiweb.ErrPollTimeout) ||
 		errors.Is(err, openaiweb.ErrImagePreparationTimeout)
+}
+
+func isImagePollTimeoutError(err error) bool {
+	return errors.Is(err, openaiweb.ErrPollTimeout)
 }
 
 func metricCallStatus(statusCode int, errorMessage string) string {
 	if statusCode == statusClientClosedRequest || strings.Contains(strings.ToLower(errorMessage), "context canceled") {
 		return "canceled"
+	}
+	if isContentPolicyErrorMessage(errorMessage) {
+		return "rejected"
 	}
 	if statusCode >= http.StatusBadRequest && statusCode < http.StatusInternalServerError {
 		return "rejected"
@@ -2168,5 +2180,16 @@ func metricCallStatus(statusCode int, errorMessage string) string {
 		return "failed"
 	}
 	return "success"
+}
+
+func isContentPolicyErrorMessage(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return false
+	}
+	lower := strings.ToLower(value)
+	return strings.Contains(lower, "content policy violation") ||
+		strings.Contains(value, "防护限制") ||
+		strings.Contains(value, "可能违反")
 }
 func mustJSON(v any) string { data, _ := json.Marshal(v); return string(data) }

@@ -83,6 +83,7 @@ const (
 	// upstream response. Upstream OAuth bodies can contain endpoint and token
 	// details which must never reach API consumers or persisted task history.
 	PublicCredentialInvalidMessage = "账号凭证已失效，已自动删除并切换账号重试"
+	PublicImagePollTimeoutMessage  = "任务占用额度失败，请再次提交。"
 	PublicUpstreamFailureMessage   = "上游服务请求失败，请稍后重试"
 )
 
@@ -107,6 +108,9 @@ func PublicErrorMessage(err error) string {
 	if IsAuthenticationError(err) {
 		return PublicCredentialInvalidMessage
 	}
+	if errors.Is(err, ErrPollTimeout) {
+		return PublicImagePollTimeoutMessage
+	}
 	return PublicErrorText(err.Error())
 }
 
@@ -121,6 +125,11 @@ func PublicErrorText(message string) string {
 		return PublicCredentialInvalidMessage
 	}
 	lower := strings.ToLower(message)
+	if strings.Contains(lower, "image poll timeout") ||
+		strings.Contains(message, "ChatGPT 生图任务已等待") ||
+		strings.Contains(message, "ChatGPT 生图超时") {
+		return PublicImagePollTimeoutMessage
+	}
 	if strings.Contains(lower, "upstream ") ||
 		strings.Contains(lower, "/backend-api/") ||
 		strings.Contains(lower, "access_token") ||

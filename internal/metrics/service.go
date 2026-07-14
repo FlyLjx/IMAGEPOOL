@@ -50,6 +50,31 @@ type Stability struct {
 	StabilityPercent float64          `json:"stability_percent"`
 	Status           string           `json:"status"`
 	Series           []StabilityPoint `json:"series"`
+	Recent60         RecentCallStats  `json:"recent_60"`
+}
+
+type RecentCallStats struct {
+	Limit                      int       `json:"limit"`
+	Total                      int       `json:"total"`
+	AvailabilityTotal          int       `json:"availability_total"`
+	Success                    int       `json:"success"`
+	Failed                     int       `json:"failed"`
+	Rejected                   int       `json:"rejected"`
+	Canceled                   int       `json:"canceled"`
+	Running                    int       `json:"running"`
+	Other                      int       `json:"other"`
+	SuccessRate                float64   `json:"success_rate"`
+	FailureRate                float64   `json:"failure_rate"`
+	AverageDurationMS          float64   `json:"average_duration_ms"`
+	AverageDurationSecs        float64   `json:"average_duration_secs"`
+	AverageSuccessDurationMS   float64   `json:"average_success_duration_ms"`
+	AverageSuccessDurationSecs float64   `json:"average_success_duration_secs"`
+	AverageFailureDurationMS   float64   `json:"average_failure_duration_ms"`
+	AverageFailureDurationSecs float64   `json:"average_failure_duration_secs"`
+	DurationSamples            int       `json:"duration_samples"`
+	SuccessDurationSamples     int       `json:"success_duration_samples"`
+	FailureDurationSamples     int       `json:"failure_duration_samples"`
+	GeneratedAt                time.Time `json:"generated_at"`
 }
 
 type Service struct {
@@ -212,7 +237,7 @@ func (s *Service) Summary(window time.Duration) map[string]any {
 		if call.Time.Before(start) {
 			continue
 		}
-		category := normalizeStatus(call.Status)
+		category := callCategory(call)
 		totals[category]++
 		bucketTime := runtimeBucketTime(call.Time, bucket)
 		bucketKey := bucketTime.Format(time.RFC3339)
@@ -296,6 +321,7 @@ func (s *Service) Stability(window time.Duration) Stability {
 		GeneratedAt:   now,
 		Status:        "idle",
 		Series:        points,
+		Recent60:      s.RecentStats(60),
 	}
 	for _, call := range s.List("", "", "") {
 		if call.Time.Before(start) || call.Time.After(now) {
@@ -303,7 +329,7 @@ func (s *Service) Stability(window time.Duration) Stability {
 		}
 		bucket := call.Time.Truncate(time.Second)
 		index, inSeries := bySecond[bucket]
-		switch normalizeStatus(call.Status) {
+		switch callCategory(call) {
 		case "success":
 			result.Success++
 			if inSeries {
@@ -333,6 +359,70 @@ func (s *Service) Stability(window time.Duration) Stability {
 		result.Status = "degraded"
 	}
 	return result
+}
+
+func (s *Service) RecentStats(limit int) RecentCallStats {
+	if limit <= 0 {
+		limit = 60
+	}
+	stats := RecentCallStats{Limit: limit}
+	if s == nil {
+		return stats
+	}
+	stats.GeneratedAt = s.now()
+	var durationSum, successDurationSum, failureDurationSum int64
+	for _, call := range s.List("", "", "") {
+		if stats.Total >= limit {
+			break
+		}
+		stats.Total++
+		category := callCategory(call)
+		switch category {
+		case "success":
+			stats.Success++
+			stats.AvailabilityTotal++
+			if call.DurationMS > 0 {
+				stats.DurationSamples++
+				stats.SuccessDurationSamples++
+				durationSum += call.DurationMS
+				successDurationSum += call.DurationMS
+			}
+		case "failed":
+			stats.Failed++
+			stats.AvailabilityTotal++
+			if call.DurationMS > 0 {
+				stats.DurationSamples++
+				stats.FailureDurationSamples++
+				durationSum += call.DurationMS
+				failureDurationSum += call.DurationMS
+			}
+		case "rejected":
+			stats.Rejected++
+		case "canceled":
+			stats.Canceled++
+		case "running":
+			stats.Running++
+		default:
+			stats.Other++
+		}
+	}
+	if stats.AvailabilityTotal > 0 {
+		stats.SuccessRate = float64(stats.Success) * 100 / float64(stats.AvailabilityTotal)
+		stats.FailureRate = float64(stats.Failed) * 100 / float64(stats.AvailabilityTotal)
+	}
+	if stats.DurationSamples > 0 {
+		stats.AverageDurationMS = float64(durationSum) / float64(stats.DurationSamples)
+		stats.AverageDurationSecs = stats.AverageDurationMS / 1000
+	}
+	if stats.SuccessDurationSamples > 0 {
+		stats.AverageSuccessDurationMS = float64(successDurationSum) / float64(stats.SuccessDurationSamples)
+		stats.AverageSuccessDurationSecs = stats.AverageSuccessDurationMS / 1000
+	}
+	if stats.FailureDurationSamples > 0 {
+		stats.AverageFailureDurationMS = float64(failureDurationSum) / float64(stats.FailureDurationSamples)
+		stats.AverageFailureDurationSecs = stats.AverageFailureDurationMS / 1000
+	}
+	return stats
 }
 
 func runtimeBucket(window time.Duration) time.Duration {
@@ -522,6 +612,24 @@ func normalizeStatus(value string) string {
 	default:
 		return "other"
 	}
+}
+
+func callCategory(call Call) string {
+	if isContentPolicyError(call.Error) {
+		return "rejected"
+	}
+	return normalizeStatus(call.Status)
+}
+
+func isContentPolicyError(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return false
+	}
+	lower := strings.ToLower(value)
+	return strings.Contains(lower, "content policy violation") ||
+		strings.Contains(value, "防护限制") ||
+		strings.Contains(value, "可能违反")
 }
 
 func failureReason(value string) string {
