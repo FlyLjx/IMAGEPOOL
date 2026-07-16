@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.1.22 - 2026-07-16
+
++ [修复] 图生图结果解析同步过滤上传参考图的 `sediment://file_xxx` 引用，避免把输入参考图误判为生成结果导致几秒假成功。
+
 ## 0.1.21 - 2026-07-16
 
 + [新增] 新增 `/api/image-tasks/history` 任务历史分页接口，支持 `page`、`page_size` 与 `include_logs=1`。

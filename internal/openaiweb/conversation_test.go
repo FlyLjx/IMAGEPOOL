@@ -141,6 +141,41 @@ func TestPollImageResultsFiltersUploadedReferenceWithoutGeneratedRole(t *testing
 	}
 }
 
+func TestPollImageResultsFiltersUploadedSedimentReference(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/backend-api/conversation/conv-1" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"mapping": map[string]any{
+				"message": map[string]any{
+					"message": map[string]any{
+						"content": map[string]any{"parts": []any{
+							"sediment://file_uploaded",
+							map[string]any{"asset_pointer": "file-service://file_uploaded"},
+							map[string]any{"asset_pointer": "file-service://file_00000000aaaaaaaaaaaaaaaaaaaaaaaa"},
+						}},
+					},
+				},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	cfg := config.Default()
+	cfg.ChatGPTBaseURL = srv.URL
+	cfg.ImageSettleEnabled = false
+	client := NewClient(cfg, WithHTTPClient(srv.Client()))
+	files, sediments, err := client.pollImageResults(context.Background(), accounts.Account{AccessToken: "token"}, "conv-1", nil, nil, map[string]bool{"file_uploaded": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 1 || files[0] != "file_00000000aaaaaaaaaaaaaaaaaaaaaaaa" || len(sediments) != 0 {
+		t.Fatalf("files=%#v sediments=%#v", files, sediments)
+	}
+}
+
 func TestStartImageGenerationReadsImageReferenceAfterConversationID(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/backend-api/f/conversation" {
@@ -389,6 +424,20 @@ func TestConsumeImageStreamFiltersUploadedReferenceWithoutRole(t *testing.T) {
 	}
 	if state.conversationID != "conv-1" || len(state.fileIDs) != 1 || state.fileIDs[0] != "file_00000000aaaaaaaaaaaaaaaaaaaaaaaa" {
 		t.Fatalf("conversation=%q files=%#v", state.conversationID, state.fileIDs)
+	}
+}
+
+func TestConsumeImageStreamFiltersUploadedSedimentReference(t *testing.T) {
+	payload := `data: {"conversation_id":"conv-1","message":{"content":{"parts":["sediment://file_uploaded",{"asset_pointer":"file-service://file_uploaded"}]}}}` + "\n\n" +
+		"data: [DONE]\n\n"
+	client := NewClient(config.Default())
+	state := &imageStreamState{}
+	found, streamDone, err := client.consumeImageStream(context.Background(), io.NopCloser(strings.NewReader(payload)), []uploadMeta{{FileID: "file_uploaded"}}, state)
+	if err != nil || found || !streamDone {
+		t.Fatalf("found=%t done=%t err=%v", found, streamDone, err)
+	}
+	if state.conversationID != "conv-1" || len(state.fileIDs) != 0 || len(state.sedimentIDs) != 0 {
+		t.Fatalf("conversation=%q files=%#v sediments=%#v", state.conversationID, state.fileIDs, state.sedimentIDs)
 	}
 }
 

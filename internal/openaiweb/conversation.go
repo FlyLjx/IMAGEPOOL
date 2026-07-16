@@ -408,6 +408,7 @@ func (c *Client) consumeImageStream(ctx context.Context, body io.ReadCloser, ref
 			}
 			fileIDs, sedimentIDs := ExtractImageReferenceIDs(value)
 			fileIDs = filterExcludedIDs(fileIDs, uploadedFileIDs)
+			sedimentIDs = filterExcludedIDs(sedimentIDs, uploadedFileIDs)
 			state.fileIDs = appendUnique(state.fileIDs, fileIDs...)
 			state.sedimentIDs = appendUnique(state.sedimentIDs, sedimentIDs...)
 			state.offset++
@@ -609,6 +610,7 @@ func (c *Client) ResolveConversationImageURLs(ctx context.Context, account accou
 func (c *Client) resolveConversationImageURLs(ctx context.Context, account accounts.Account, conversationID string, fileIDs, sedimentIDs []string, poll bool, progress func(ProgressEvent), excludeFileIDs ...string) ([]string, error) {
 	excluded := idSet(excludeFileIDs)
 	fileIDs = filterExcludedIDs(fileIDs, excluded)
+	sedimentIDs = filterExcludedIDs(sedimentIDs, excluded)
 	var initialResolveErr error
 	if len(fileIDs) > 0 || len(sedimentIDs) > 0 {
 		if urls, err := c.resolveImageURLs(ctx, account, conversationID, fileIDs, sedimentIDs); len(urls) > 0 {
@@ -651,7 +653,7 @@ func (c *Client) pollImageResultsWithProgress(ctx context.Context, account accou
 		excludedFileIDs = excludedFileIDsArg[0]
 	}
 	fileIDs := filterExcludedIDs(initialFileIDs, excludedFileIDs)
-	sedimentIDs := append([]string(nil), initialSedimentIDs...)
+	sedimentIDs := filterExcludedIDs(initialSedimentIDs, excludedFileIDs)
 	startedAt := time.Now()
 	deadline := startedAt.Add(c.pollTimeout)
 	if len(fileIDs) == 0 && len(sedimentIDs) == 0 && c.pollInitialWait > 0 {
@@ -710,6 +712,7 @@ func (c *Client) pollImageResultsWithProgress(ctx context.Context, account accou
 		}
 		f, s := ExtractImageReferenceIDs(conversation)
 		f = filterExcludedIDs(f, excludedFileIDs)
+		s = filterExcludedIDs(s, excludedFileIDs)
 		fileIDs = appendUnique(fileIDs, f...)
 		sedimentIDs = appendUnique(sedimentIDs, s...)
 		if len(fileIDs) > 0 || len(sedimentIDs) > 0 {
