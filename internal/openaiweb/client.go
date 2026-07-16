@@ -51,36 +51,37 @@ type bootstrapResourcesFlight struct {
 }
 
 type Client struct {
-	baseURL                   string
-	imageModelSlug            string
-	pollTimeout               time.Duration
-	pollInterval              time.Duration
-	pollInitialWait           time.Duration
-	pollHeartbeatInterval     time.Duration
-	pollRequestTimeout        time.Duration
-	imagePreparationTimeout   time.Duration
-	imageStreamOpenTimeout    time.Duration
-	imageStreamIdleTimeout    time.Duration
-	settle                    time.Duration
-	checkBeforeHit            bool
-	settleEnabled             bool
-	httpClient                *http.Client
-	resourceClient            *http.Client
-	proxyRuntime              config.ProxyRuntime
-	transport                 string
-	timeout                   time.Duration
-	customHTTP                bool
-	tlsMu                     sync.Mutex
-	tlsClients                map[string]*http.Client
-	tlsResources              map[string]*http.Client
-	tlsStreamClients          map[string]*http.Client
-	bootstrapMu               sync.Mutex
-	bootstrapResources        map[bootstrapResourcesCacheKey]bootstrapResourcesCacheEntry
-	bootstrapFlights          map[bootstrapResourcesCacheKey]*bootstrapResourcesFlight
-	now                       func() time.Time
-	newID                     func() string
-	sleep                     func(context.Context, time.Duration) error
-	bootstrapClearanceRefresh func(context.Context) (*Client, error)
+	baseURL                     string
+	imageModelSlug              string
+	pollTimeout                 time.Duration
+	pollInterval                time.Duration
+	pollInitialWait             time.Duration
+	pollHeartbeatInterval       time.Duration
+	pollRequestTimeout          time.Duration
+	imagePreparationTimeout     time.Duration
+	imageStreamOpenTimeout      time.Duration
+	imageStreamIdleTimeout      time.Duration
+	imageStreamReferenceTimeout time.Duration
+	settle                      time.Duration
+	checkBeforeHit              bool
+	settleEnabled               bool
+	httpClient                  *http.Client
+	resourceClient              *http.Client
+	proxyRuntime                config.ProxyRuntime
+	transport                   string
+	timeout                     time.Duration
+	customHTTP                  bool
+	tlsMu                       sync.Mutex
+	tlsClients                  map[string]*http.Client
+	tlsResources                map[string]*http.Client
+	tlsStreamClients            map[string]*http.Client
+	bootstrapMu                 sync.Mutex
+	bootstrapResources          map[bootstrapResourcesCacheKey]bootstrapResourcesCacheEntry
+	bootstrapFlights            map[bootstrapResourcesCacheKey]*bootstrapResourcesFlight
+	now                         func() time.Time
+	newID                       func() string
+	sleep                       func(context.Context, time.Duration) error
+	bootstrapClearanceRefresh   func(context.Context) (*Client, error)
 }
 
 type ClientOption func(*Client)
@@ -113,7 +114,7 @@ func NewClient(cfg config.Config, opts ...ClientOption) *Client {
 	}
 	c := &Client{
 		baseURL: strings.TrimRight(cfg.ChatGPTBaseURL, "/"), imageModelSlug: cfg.ImageWebModelSlug,
-		pollTimeout: seconds(cfg.ImagePollTimeoutSecs), pollInterval: seconds(cfg.ImagePollIntervalSecs), pollInitialWait: seconds(cfg.ImagePollInitialWaitSecs), pollHeartbeatInterval: 15 * time.Second, pollRequestTimeout: 20 * time.Second, imagePreparationTimeout: defaultImagePreparationTimeout, imageStreamOpenTimeout: defaultImageStreamOpenTimeout, imageStreamIdleTimeout: defaultImageStreamIdleWindow, settle: seconds(cfg.ImageSettleSecs),
+		pollTimeout: seconds(cfg.ImagePollTimeoutSecs), pollInterval: seconds(cfg.ImagePollIntervalSecs), pollInitialWait: seconds(cfg.ImagePollInitialWaitSecs), pollHeartbeatInterval: 15 * time.Second, pollRequestTimeout: 20 * time.Second, imagePreparationTimeout: defaultImagePreparationTimeout, imageStreamOpenTimeout: defaultImageStreamOpenTimeout, imageStreamIdleTimeout: defaultImageStreamIdleWindow, imageStreamReferenceTimeout: defaultImageStreamReferenceWindow, settle: seconds(cfg.ImageSettleSecs),
 		checkBeforeHit: cfg.ImageCheckBeforeHitEnabled, settleEnabled: cfg.ImageSettleEnabled,
 		httpClient: httpClient, resourceClient: resourceClient, proxyRuntime: cfg.ProxyRuntime, transport: cfg.UpstreamTransport, timeout: seconds(cfg.RequestTimeoutSecs), tlsClients: map[string]*http.Client{}, tlsResources: map[string]*http.Client{}, tlsStreamClients: map[string]*http.Client{}, bootstrapResources: map[bootstrapResourcesCacheKey]bootstrapResourcesCacheEntry{}, bootstrapFlights: map[bootstrapResourcesCacheKey]*bootstrapResourcesFlight{}, now: time.Now, newID: newUUID,
 		sleep: func(ctx context.Context, d time.Duration) error {

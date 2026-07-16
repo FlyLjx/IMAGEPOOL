@@ -30,6 +30,7 @@ type Store interface {
 type CollectionStore interface {
 	LoadCollection(context.Context, string, any) error
 	SaveCollectionItems(context.Context, string, map[string]any) error
+	DeleteCollectionItems(context.Context, string, []string) error
 	DeleteCollection(context.Context, string) error
 }
 
@@ -171,6 +172,28 @@ INSERT INTO image_pool_collection_items(collection,id,value,updated_at)
 SELECT $1,input.id,input.value::jsonb,NOW()
 FROM unnest($2::text[],$3::text[]) AS input(id,value)
 ON CONFLICT(collection,id) DO UPDATE SET value=EXCLUDED.value,updated_at=NOW()`, collection, ids, values)
+	return err
+}
+
+func (p *Postgres) DeleteCollectionItems(ctx context.Context, collection string, ids []string) error {
+	collection = strings.TrimSpace(collection)
+	if collection == "" || len(ids) == 0 {
+		return nil
+	}
+	clean := make([]string, 0, len(ids))
+	seen := map[string]bool{}
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		clean = append(clean, id)
+	}
+	if len(clean) == 0 {
+		return nil
+	}
+	_, err := p.pool.Exec(ctx, `DELETE FROM image_pool_collection_items WHERE collection=$1 AND id=ANY($2::text[])`, collection, clean)
 	return err
 }
 

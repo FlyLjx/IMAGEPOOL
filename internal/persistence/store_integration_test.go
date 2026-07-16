@@ -72,6 +72,16 @@ func TestPostgresDocumentRoundTrip(t *testing.T) {
 	if values["a"] != 1 || values["b"] != 3 {
 		t.Fatalf("collection values=%#v", values)
 	}
+	if err := store.DeleteCollectionItems(context.Background(), collection, []string{"a"}); err != nil {
+		t.Fatal(err)
+	}
+	collectionOutput = nil
+	if err := store.LoadCollection(context.Background(), collection, &collectionOutput); err != nil {
+		t.Fatal(err)
+	}
+	if len(collectionOutput) != 1 || collectionOutput[0]["id"] != "b" {
+		t.Fatalf("collection after item delete=%#v", collectionOutput)
+	}
 	if err := store.DeleteCollection(context.Background(), collection); err != nil {
 		t.Fatal(err)
 	}

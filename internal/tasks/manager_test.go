@@ -20,6 +20,8 @@ type failedAttemptTaskSvc struct{}
 
 type sensitiveFailureTaskSvc struct{ err error }
 
+type verboseTaskSvc struct{}
+
 func (failedAttemptTaskSvc) Generate(context.Context, images.Request) (images.Response, error) {
 	return images.Response{Attempts: []openaiweb.AttemptLog{
 		{Attempt: 1, AccountEmail: "first@example.test", Status: "failed"},
@@ -39,6 +41,25 @@ func (s sensitiveFailureTaskSvc) Generate(_ context.Context, req images.Request)
 }
 
 func (s sensitiveFailureTaskSvc) GenerateWithAccount(ctx context.Context, _ string, req images.Request) (images.Response, error) {
+	return s.Generate(ctx, req)
+}
+
+func (verboseTaskSvc) Generate(_ context.Context, req images.Request) (images.Response, error) {
+	if req.Progress != nil {
+		for index := 0; index < maxTaskStatusLogs+25; index++ {
+			req.Progress(openaiweb.ProgressEvent{Progress: "polling_image", Message: fmt.Sprintf("polling %d", index)})
+		}
+	}
+	return images.Response{
+		Data: []images.Data{{URL: "https://example.test/image.png"}},
+		Attempts: []openaiweb.AttemptLog{
+			{Attempt: 1, AccountEmail: "a@example.test", Status: "failed"},
+			{Attempt: 2, AccountEmail: "b@example.test", Status: "success"},
+		},
+	}, nil
+}
+
+func (s verboseTaskSvc) GenerateWithAccount(ctx context.Context, _ string, req images.Request) (images.Response, error) {
 	return s.Generate(ctx, req)
 }
 
@@ -83,6 +104,9 @@ func (s *blockingCollectionStore) SaveCollectionItems(_ context.Context, _ strin
 	for id, item := range items {
 		s.items[id] = item
 	}
+	return nil
+}
+func (s *blockingCollectionStore) DeleteCollectionItems(context.Context, string, []string) error {
 	return nil
 }
 func (s *blockingCollectionStore) DeleteCollection(context.Context, string) error { return nil }
@@ -282,6 +306,41 @@ func TestFailedTaskHidesImagePollTimeoutDetails(t *testing.T) {
 	}
 }
 
+func TestCompletedTasksAreCompacted(t *testing.T) {
+	m := NewManager(verboseTaskSvc{})
+	defer m.Close()
+	prompt := strings.Repeat("提示词", maxCompletedPromptRunes)
+	task, result, err := m.RunGenerationForOwner(context.Background(), "user-a", images.Request{Prompt: prompt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Attempts) != 2 {
+		t.Fatalf("sync result attempts should remain available: %#v", result.Attempts)
+	}
+	stored, ok := m.Status(task.ID)
+	if !ok || stored.Status != StatusSucceeded {
+		t.Fatalf("stored=%#v ok=%v", stored, ok)
+	}
+	if len(stored.Data) != 1 {
+		t.Fatalf("completed task lost image data: %#v", stored)
+	}
+	if len(stored.StatusLogs) != maxCompletedStatusLogs {
+		t.Fatalf("status logs=%d want %d", len(stored.StatusLogs), maxCompletedStatusLogs)
+	}
+	if stored.StatusLogCount <= len(stored.StatusLogs) {
+		t.Fatalf("status log count should keep total history count: %#v", stored)
+	}
+	if got := len([]rune(stored.Prompt)); got != maxCompletedPromptRunes {
+		t.Fatalf("prompt runes=%d want %d", got, maxCompletedPromptRunes)
+	}
+	m.mu.RLock()
+	raw := m.tasks[task.ID]
+	m.mu.RUnlock()
+	if raw == nil || raw.Result != nil {
+		t.Fatalf("raw completed task should drop response payload: %#v", raw)
+	}
+}
+
 func TestTaskVisibilityIsScopedToOwner(t *testing.T) {
 	m := NewManager(taskSvc{})
 	a := m.SubmitGenerationForOwner("user-a", "a", images.Request{Prompt: "a"})
@@ -402,6 +461,58 @@ func TestAsyncDispatcherRejectsFullQueueWithoutBlocking(t *testing.T) {
 	}
 	if last.Status != StatusFailed || last.Error != "任务队列已满，请稍后重试" {
 		t.Fatalf("last task should be rejected when full: %#v", last)
+	}
+}
+
+func TestPrunesCompletedTasksByLimit(t *testing.T) {
+	m := NewManager(taskSvc{})
+	defer m.Close()
+	now := time.Now()
+	m.mu.Lock()
+	m.tasks = map[string]*Task{}
+	for index := 0; index < maxCompletedInMemoryTasks+25; index++ {
+		finished := now.Add(-time.Duration(maxCompletedInMemoryTasks+25-index) * time.Second)
+		id := fmt.Sprintf("done-%03d", index)
+		m.tasks[id] = &Task{ID: id, Status: StatusSucceeded, Progress: "succeeded", CreatedAt: finished, UpdatedAt: finished, FinishedAt: &finished}
+	}
+	m.tasks["running"] = &Task{ID: "running", Status: StatusRunning, Progress: "running", CreatedAt: now, UpdatedAt: now}
+	deleted := m.pruneCompletedLocked(now)
+	total := len(m.tasks)
+	_, running := m.tasks["running"]
+	m.mu.Unlock()
+	if len(deleted) != 25 {
+		t.Fatalf("deleted=%d want 25", len(deleted))
+	}
+	if total != maxCompletedInMemoryTasks+1 {
+		t.Fatalf("tasks=%d want %d", total, maxCompletedInMemoryTasks+1)
+	}
+	if !running {
+		t.Fatal("running task was pruned")
+	}
+}
+
+func TestPrunesCompletedTasksByTTL(t *testing.T) {
+	m := NewManager(taskSvc{})
+	defer m.Close()
+	now := time.Now()
+	old := now.Add(-completedTaskMemoryTTL - time.Second)
+	recent := now.Add(-completedTaskMemoryTTL + time.Second)
+	m.mu.Lock()
+	m.tasks = map[string]*Task{
+		"old":     &Task{ID: "old", Status: StatusFailed, Progress: "failed", CreatedAt: old, UpdatedAt: old, FinishedAt: &old},
+		"recent":  &Task{ID: "recent", Status: StatusSucceeded, Progress: "succeeded", CreatedAt: recent, UpdatedAt: recent, FinishedAt: &recent},
+		"running": &Task{ID: "running", Status: StatusRunning, Progress: "running", CreatedAt: old, UpdatedAt: old},
+	}
+	deleted := m.pruneCompletedLocked(now)
+	_, oldFound := m.tasks["old"]
+	_, recentFound := m.tasks["recent"]
+	_, runningFound := m.tasks["running"]
+	m.mu.Unlock()
+	if len(deleted) != 1 || deleted[0] != "old" {
+		t.Fatalf("deleted=%#v", deleted)
+	}
+	if oldFound || !recentFound || !runningFound {
+		t.Fatalf("old=%v recent=%v running=%v", oldFound, recentFound, runningFound)
 	}
 }
 

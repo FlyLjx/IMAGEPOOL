@@ -29,6 +29,11 @@ const (
 	asyncTaskWorkerLimit = 128
 	asyncTaskQueueLimit  = 4096
 	maxTaskStatusLogs    = 200
+
+	completedTaskMemoryTTL    = 30 * time.Minute
+	maxCompletedInMemoryTasks = 500
+	maxCompletedStatusLogs    = 50
+	maxCompletedPromptRunes   = 800
 )
 
 type ImageService interface {
@@ -92,6 +97,7 @@ type Manager struct {
 	tasks           map[string]*Task
 	cancels         map[string]context.CancelFunc
 	dirty           map[string]struct{}
+	deleted         map[string]struct{}
 	wake            chan struct{}
 	stop            chan struct{}
 	done            chan struct{}
@@ -120,6 +126,7 @@ func newManager(service ImageService, state persistence.Store) *Manager {
 		tasks:        map[string]*Task{},
 		cancels:      map[string]context.CancelFunc{},
 		dirty:        map[string]struct{}{},
+		deleted:      map[string]struct{}{},
 		jobs:         make(chan queuedTask, asyncTaskQueueLimit),
 		dispatchStop: make(chan struct{}),
 		dispatchDone: make(chan struct{}),
@@ -137,7 +144,7 @@ func newManager(service ImageService, state persistence.Store) *Manager {
 	go m.dispatchLoop()
 	if state != nil {
 		go m.persistenceLoop()
-		if len(m.dirty) > 0 {
+		if len(m.dirty) > 0 || len(m.deleted) > 0 {
 			m.signalPersistence()
 		}
 	}
@@ -254,7 +261,9 @@ func (m *Manager) rejectQueuedTask(id, message string) {
 		task.FinishedAt = &now
 		task.UpdatedAt = now
 		appendLog(task, LogEntry{Time: now, Level: "error", Event: "rejected", Progress: "failed", Message: message})
+		compactCompletedTask(task)
 		m.markDirtyLocked(id)
+		m.pruneCompletedLocked(now)
 	}
 	cancel = m.cancels[id]
 	delete(m.cancels, id)
@@ -332,11 +341,15 @@ func (m *Manager) runWith(ctx context.Context, id string, req images.Request, ge
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	defer m.markDirtyLocked(id)
 	task := m.tasks[id]
 	if task == nil {
 		return result, err
 	}
+	defer func() {
+		compactCompletedTask(task)
+		m.markDirtyLocked(id)
+		m.pruneCompletedLocked(time.Now())
+	}()
 	now := time.Now()
 	task.FinishedAt = &now
 	task.UpdatedAt = now
@@ -527,10 +540,10 @@ func (m *Manager) load() {
 }
 
 func (m *Manager) loadTasks(stored []Task) {
+	now := time.Now()
 	for i := range stored {
 		task := stored[i]
 		if task.Status == StatusQueued || task.Status == StatusRunning {
-			now := time.Now()
 			task.Status = StatusFailed
 			task.Progress = "failed"
 			task.ProgressPercent = 100
@@ -541,8 +554,12 @@ func (m *Manager) loadTasks(stored []Task) {
 			appendLog(&task, LogEntry{Time: now, Level: "error", Event: "interrupted", Progress: "failed", Message: task.RealtimeStatus})
 			m.dirty[task.ID] = struct{}{}
 		}
+		if compactCompletedTask(&task) {
+			m.dirty[task.ID] = struct{}{}
+		}
 		m.tasks[task.ID] = &task
 	}
+	m.pruneCompletedLocked(now)
 }
 
 func (m *Manager) markDirtyLocked(id string) {
@@ -550,6 +567,21 @@ func (m *Manager) markDirtyLocked(id string) {
 		return
 	}
 	m.dirty[id] = struct{}{}
+	m.signalPersistence()
+}
+
+func (m *Manager) markDeletedLocked(ids []string) {
+	if m.state == nil || len(ids) == 0 {
+		return
+	}
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		delete(m.dirty, id)
+		m.deleted[id] = struct{}{}
+	}
 	m.signalPersistence()
 }
 
@@ -591,7 +623,7 @@ func (m *Manager) persistenceLoop() {
 
 func (m *Manager) persistPending() {
 	m.mu.Lock()
-	if len(m.dirty) == 0 {
+	if len(m.dirty) == 0 && len(m.deleted) == 0 {
 		m.mu.Unlock()
 		return
 	}
@@ -599,6 +631,11 @@ func (m *Manager) persistPending() {
 	for id := range m.dirty {
 		ids = append(ids, id)
 		delete(m.dirty, id)
+	}
+	deletedIDs := make([]string, 0, len(m.deleted))
+	for id := range m.deleted {
+		deletedIDs = append(deletedIDs, id)
+		delete(m.deleted, id)
 	}
 	collectionItems := make(map[string]any, len(ids))
 	for _, id := range ids {
@@ -615,18 +652,33 @@ func (m *Manager) persistPending() {
 	}
 	m.mu.Unlock()
 
-	var err error
+	var saveErr error
+	var deleteErr error
 	if m.items != nil {
-		err = m.items.SaveCollectionItems(context.Background(), taskCollection, collectionItems)
+		saveErr = m.items.SaveCollectionItems(context.Background(), taskCollection, collectionItems)
+		deleteErr = m.items.DeleteCollectionItems(context.Background(), taskCollection, deletedIDs)
 	} else {
-		err = m.state.Save(context.Background(), taskCollection, document)
+		saveErr = m.state.Save(context.Background(), taskCollection, document)
 	}
-	if err == nil {
+	if saveErr == nil && deleteErr == nil {
 		return
 	}
 	m.mu.Lock()
-	for _, id := range ids {
-		m.dirty[id] = struct{}{}
+	if m.items == nil {
+		for _, id := range append(ids, deletedIDs...) {
+			m.dirty[id] = struct{}{}
+		}
+	} else {
+		if saveErr != nil {
+			for _, id := range ids {
+				m.dirty[id] = struct{}{}
+			}
+		}
+		if deleteErr != nil {
+			for _, id := range deletedIDs {
+				m.deleted[id] = struct{}{}
+			}
+		}
 	}
 	m.mu.Unlock()
 	m.signalPersistence()
@@ -708,6 +760,131 @@ func appendLog(task *Task, entry LogEntry) {
 	}
 	task.StatusLogs = append(task.StatusLogs, entry)
 	task.StatusLogCount++
+}
+
+func compactCompletedTask(task *Task) bool {
+	if !isCompletedTask(task) {
+		return false
+	}
+	changed := false
+	if task.Result != nil {
+		task.Result = nil
+		changed = true
+	}
+	if task.StatusLogCount < len(task.StatusLogs) {
+		task.StatusLogCount = len(task.StatusLogs)
+		changed = true
+	}
+	if len(task.StatusLogs) > maxCompletedStatusLogs {
+		task.StatusLogs = append([]LogEntry(nil), task.StatusLogs[len(task.StatusLogs)-maxCompletedStatusLogs:]...)
+		changed = true
+	}
+	if trimmed := truncateRunes(task.Prompt, maxCompletedPromptRunes); trimmed != task.Prompt {
+		task.Prompt = trimmed
+		changed = true
+	}
+	return changed
+}
+
+func truncateRunes(value string, maxRunes int) string {
+	if maxRunes <= 0 {
+		return ""
+	}
+	runes := []rune(value)
+	if len(runes) <= maxRunes {
+		return value
+	}
+	if maxRunes == 1 {
+		return "…"
+	}
+	return string(runes[:maxRunes-1]) + "…"
+}
+
+func isCompletedTask(task *Task) bool {
+	if task == nil {
+		return false
+	}
+	if task.Status == StatusQueued || task.Status == StatusRunning {
+		return false
+	}
+	return task.FinishedAt != nil || task.Status == StatusSucceeded || task.Status == StatusFailed
+}
+
+func taskCompletionTime(task *Task) time.Time {
+	if task == nil {
+		return time.Time{}
+	}
+	if task.FinishedAt != nil && !task.FinishedAt.IsZero() {
+		return *task.FinishedAt
+	}
+	if !task.UpdatedAt.IsZero() {
+		return task.UpdatedAt
+	}
+	return task.CreatedAt
+}
+
+func (m *Manager) pruneCompletedLocked(now time.Time) []string {
+	if now.IsZero() {
+		now = time.Now()
+	}
+	type candidate struct {
+		id string
+		at time.Time
+	}
+	candidates := make([]candidate, 0)
+	prune := map[string]bool{}
+	for id, task := range m.tasks {
+		if !isCompletedTask(task) {
+			continue
+		}
+		at := taskCompletionTime(task)
+		candidates = append(candidates, candidate{id: id, at: at})
+		if !at.IsZero() && now.Sub(at) > completedTaskMemoryTTL {
+			prune[id] = true
+		}
+	}
+	if len(candidates) == 0 {
+		return nil
+	}
+	remainingCompleted := len(candidates) - len(prune)
+	if remainingCompleted > maxCompletedInMemoryTasks {
+		sort.Slice(candidates, func(i, j int) bool {
+			a := candidates[i]
+			b := candidates[j]
+			if a.at.Equal(b.at) {
+				return a.id < b.id
+			}
+			if a.at.IsZero() {
+				return true
+			}
+			if b.at.IsZero() {
+				return false
+			}
+			return a.at.Before(b.at)
+		})
+		for _, item := range candidates {
+			if remainingCompleted <= maxCompletedInMemoryTasks {
+				break
+			}
+			if prune[item.id] {
+				continue
+			}
+			prune[item.id] = true
+			remainingCompleted--
+		}
+	}
+	if len(prune) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(prune))
+	for id := range prune {
+		delete(m.tasks, id)
+		delete(m.cancels, id)
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	m.markDeletedLocked(ids)
+	return ids
 }
 
 func progressPercent(progress string) int {

@@ -18,13 +18,14 @@ import (
 )
 
 const (
-	maxSSEDataLineSize            = 16 * 1024 * 1024
-	maxImageStartAttempts         = 3
-	maxImageResumeAttempts        = 10
-	maxAdaptiveImagePollInterval  = 10 * time.Second
-	defaultImageStreamOpenTimeout = 60 * time.Second
-	legacyImageStreamIdleWindow   = 8 * time.Second
-	defaultImageStreamIdleWindow  = 60 * time.Second
+	maxSSEDataLineSize                = 16 * 1024 * 1024
+	maxImageStartAttempts             = 3
+	maxImageResumeAttempts            = 10
+	maxAdaptiveImagePollInterval      = 10 * time.Second
+	defaultImageStreamOpenTimeout     = 60 * time.Second
+	legacyImageStreamIdleWindow       = 8 * time.Second
+	defaultImageStreamIdleWindow      = 60 * time.Second
+	defaultImageStreamReferenceWindow = 75 * time.Second
 )
 
 var errImageStreamOpenTimeout = errors.New("image stream open timeout")
@@ -314,6 +315,7 @@ func (c *Client) consumeImageStream(ctx context.Context, body io.ReadCloser, ref
 	defer body.Close()
 	readCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	uploadedFileIDs := uploadedReferenceFileSet(refs)
 	payloads := make(chan string, 1)
 	activity := make(chan struct{}, 1)
 	readErrors := make(chan error, 1)
@@ -354,6 +356,15 @@ func (c *Client) consumeImageStream(ctx context.Context, body io.ReadCloser, ref
 	}
 	streamTimer := time.NewTimer(streamTimeout)
 	defer streamTimer.Stop()
+	referenceTimeout := c.imageStreamReferenceTimeout
+	if referenceTimeout <= 0 {
+		referenceTimeout = defaultImageStreamReferenceWindow
+	}
+	if streamTimeout > 0 && streamTimeout < referenceTimeout {
+		referenceTimeout = streamTimeout
+	}
+	referenceTimer := time.NewTimer(referenceTimeout)
+	defer referenceTimer.Stop()
 	resetIdleTimer := func() {
 		if !idleTimer.Stop() {
 			select {
@@ -395,12 +406,8 @@ func (c *Client) consumeImageStream(ctx context.Context, body io.ReadCloser, ref
 			if state.conversationID == "" {
 				state.conversationID = ExtractConversationID(payload)
 			}
-			var fileIDs, sedimentIDs []string
-			if len(refs) > 0 {
-				fileIDs, sedimentIDs = ExtractGeneratedImageReferenceIDs(value)
-			} else {
-				fileIDs, sedimentIDs = ExtractImageReferenceIDs(value)
-			}
+			fileIDs, sedimentIDs := ExtractImageReferenceIDs(value)
+			fileIDs = filterExcludedIDs(fileIDs, uploadedFileIDs)
 			state.fileIDs = appendUnique(state.fileIDs, fileIDs...)
 			state.sedimentIDs = appendUnique(state.sedimentIDs, sedimentIDs...)
 			state.offset++
@@ -417,6 +424,13 @@ func (c *Client) consumeImageStream(ctx context.Context, body io.ReadCloser, ref
 			cancel()
 			_ = body.Close()
 			return false, false, fmt.Errorf("%w: ChatGPT 生图流超时（已等待 %.0f 秒）", ErrPollTimeout, streamTimeout.Seconds())
+		case <-referenceTimer.C:
+			cancel()
+			_ = body.Close()
+			if state.conversationID != "" {
+				return false, true, nil
+			}
+			return false, false, fmt.Errorf("%w: ChatGPT 生图提交后 %.0f 秒未返回任务信息", ErrPollTimeout, referenceTimeout.Seconds())
 		case <-ctx.Done():
 			cancel()
 			_ = body.Close()
@@ -565,6 +579,16 @@ func idSet(values []string) map[string]bool {
 	return set
 }
 
+func uploadedReferenceFileSet(refs []uploadMeta) map[string]bool {
+	set := map[string]bool{}
+	for _, ref := range refs {
+		if ref.FileID != "" {
+			set[ref.FileID] = true
+		}
+	}
+	return set
+}
+
 func filterExcludedIDs(values []string, excluded map[string]bool) []string {
 	if len(values) == 0 || len(excluded) == 0 {
 		return append([]string(nil), values...)
@@ -684,12 +708,7 @@ func (c *Client) pollImageResultsWithProgress(ctx context.Context, account accou
 		if terminalErr := findImageGenerationTerminalError(conversation); terminalErr != nil {
 			return nil, nil, terminalErr
 		}
-		var f, s []string
-		if len(excludedFileIDs) > 0 {
-			f, s = ExtractGeneratedImageReferenceIDs(conversation)
-		} else {
-			f, s = ExtractImageReferenceIDs(conversation)
-		}
+		f, s := ExtractImageReferenceIDs(conversation)
 		f = filterExcludedIDs(f, excludedFileIDs)
 		fileIDs = appendUnique(fileIDs, f...)
 		sedimentIDs = appendUnique(sedimentIDs, s...)
