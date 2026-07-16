@@ -357,6 +357,44 @@ func TestTaskVisibilityIsScopedToOwner(t *testing.T) {
 	}
 }
 
+func TestTaskHistoryPaginationIsScopedToOwner(t *testing.T) {
+	m := NewManager(taskSvc{})
+	defer m.Close()
+	first, _, err := m.RunGenerationForOwner(context.Background(), "user-a", images.Request{Prompt: "first"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, _, err := m.RunGenerationForOwner(context.Background(), "user-a", images.Request{Prompt: "second"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, _, err := m.RunGenerationForOwner(context.Background(), "user-b", images.Request{Prompt: "other"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, err := m.HistoryForOwner(1, 1, "user-a", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page.Page != 1 || page.PageSize != 1 || page.Total != 2 || !page.HasMore || len(page.Items) != 1 || page.Items[0].ID != second.ID {
+		t.Fatalf("page=%#v first=%s second=%s other=%s", page, first.ID, second.ID, other.ID)
+	}
+	page, err = m.HistoryForOwner(2, 1, "user-a", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page.Total != 2 || page.HasMore || len(page.Items) != 1 || page.Items[0].ID != first.ID {
+		t.Fatalf("page=%#v", page)
+	}
+	admin, err := m.HistoryForOwner(1, 10, "", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if admin.Total != 3 {
+		t.Fatalf("admin page=%#v", admin)
+	}
+}
+
 func TestProgressPercentIncludesPrecheckQueueAndImagePolling(t *testing.T) {
 	if got := progressPercent("waiting_account_precheck"); got != 10 {
 		t.Fatalf("precheck queue progress=%d", got)

@@ -1264,3 +1264,54 @@ func TestImageTagsAndThumbnailEndpoints(t *testing.T) {
 		t.Fatalf("thumbnail status=%d", thumb.StatusCode)
 	}
 }
+
+func TestImageTaskHistoryEndpointPaginates(t *testing.T) {
+	srv := httptest.NewServer(testServer(t))
+	defer srv.Close()
+	for _, prompt := range []string{"first", "second"} {
+		body := strings.NewReader(fmt.Sprintf(`{"prompt":%q}`, prompt))
+		req, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/image-tasks/generations", body)
+		req.Header.Set("Authorization", "Bearer k")
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusAccepted {
+			t.Fatalf("create status=%d", resp.StatusCode)
+		}
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		req, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/image-tasks/history?page=1&page_size=1", nil)
+		req.Header.Set("Authorization", "Bearer k")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var body struct {
+			Items    []tasks.Task `json:"items"`
+			Page     int          `json:"page"`
+			PageSize int          `json:"page_size"`
+			Total    int          `json:"total"`
+			HasMore  bool         `json:"has_more"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+			resp.Body.Close()
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("history status=%d", resp.StatusCode)
+		}
+		if body.Total == 2 {
+			if body.Page != 1 || body.PageSize != 1 || !body.HasMore || len(body.Items) != 1 || len(body.Items[0].StatusLogs) != 0 {
+				t.Fatalf("history=%#v", body)
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("history did not include created tasks")
+}

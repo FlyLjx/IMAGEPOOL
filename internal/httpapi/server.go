@@ -255,6 +255,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleRegisterOutlookReset(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/api/image-tasks":
 		s.handleTaskList(w, r)
+	case r.Method == http.MethodGet && r.URL.Path == "/api/image-tasks/history":
+		s.handleTaskHistory(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/api/image-tasks/generations":
 		s.handleTaskGeneration(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/api/image-tasks/edits":
@@ -874,6 +876,21 @@ func (s *Server) handleTaskList(w http.ResponseWriter, r *http.Request) {
 		response["tasks"] = items
 	}
 	writeJSON(w, http.StatusOK, response)
+}
+
+func (s *Server) handleTaskHistory(w http.ResponseWriter, r *http.Request) {
+	page, _ := strconv.Atoi(strings.TrimSpace(r.URL.Query().Get("page")))
+	pageSize, _ := strconv.Atoi(strings.TrimSpace(r.URL.Query().Get("page_size")))
+	identity, _ := auth.IdentityFromContext(r.Context())
+	history, err := s.tasks.HistoryForOwner(page, pageSize, identity.ID, identity.IsAdmin())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if strings.TrimSpace(r.URL.Query().Get("include_logs")) != "1" {
+		history.Items = compactTaskList(history.Items)
+	}
+	writeJSON(w, http.StatusOK, history)
 }
 
 func (s *Server) handleTaskItem(w http.ResponseWriter, r *http.Request) {

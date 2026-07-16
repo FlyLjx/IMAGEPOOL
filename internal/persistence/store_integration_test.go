@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"testing"
+	"time"
 )
 
 func TestPostgresDocumentRoundTrip(t *testing.T) {
@@ -71,6 +72,21 @@ func TestPostgresDocumentRoundTrip(t *testing.T) {
 	}
 	if values["a"] != 1 || values["b"] != 3 {
 		t.Fatalf("collection values=%#v", values)
+	}
+	var windowOutput []map[string]any
+	if err := store.LoadCollectionWindow(context.Background(), collection, CollectionWindow{UpdatedSince: time.Now().Add(-time.Hour), CompletedLimit: 10, ActiveStatuses: []string{"running"}}, &windowOutput); err != nil {
+		t.Fatal(err)
+	}
+	if len(windowOutput) != 2 {
+		t.Fatalf("collection window=%#v", windowOutput)
+	}
+	var pageOutput []map[string]any
+	total, err := store.LoadCollectionPage(context.Background(), collection, CollectionPage{Limit: 1, Offset: 1, AllowAll: true}, &pageOutput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 2 || len(pageOutput) != 1 {
+		t.Fatalf("total=%d page=%#v", total, pageOutput)
 	}
 	if err := store.DeleteCollectionItems(context.Background(), collection, []string{"a"}); err != nil {
 		t.Fatal(err)

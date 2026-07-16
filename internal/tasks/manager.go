@@ -88,6 +88,14 @@ type Task struct {
 	StatusLogs             []LogEntry       `json:"status_logs,omitempty"`
 }
 
+type HistoryPage struct {
+	Items    []Task `json:"items"`
+	Page     int    `json:"page"`
+	PageSize int    `json:"page_size"`
+	Total    int    `json:"total"`
+	HasMore  bool   `json:"has_more"`
+}
+
 type Manager struct {
 	mu              sync.RWMutex
 	seq             uint64
@@ -97,7 +105,6 @@ type Manager struct {
 	tasks           map[string]*Task
 	cancels         map[string]context.CancelFunc
 	dirty           map[string]struct{}
-	deleted         map[string]struct{}
 	wake            chan struct{}
 	stop            chan struct{}
 	done            chan struct{}
@@ -126,7 +133,6 @@ func newManager(service ImageService, state persistence.Store) *Manager {
 		tasks:        map[string]*Task{},
 		cancels:      map[string]context.CancelFunc{},
 		dirty:        map[string]struct{}{},
-		deleted:      map[string]struct{}{},
 		jobs:         make(chan queuedTask, asyncTaskQueueLimit),
 		dispatchStop: make(chan struct{}),
 		dispatchDone: make(chan struct{}),
@@ -144,7 +150,7 @@ func newManager(service ImageService, state persistence.Store) *Manager {
 	go m.dispatchLoop()
 	if state != nil {
 		go m.persistenceLoop()
-		if len(m.dirty) > 0 || len(m.deleted) > 0 {
+		if len(m.dirty) > 0 {
 			m.signalPersistence()
 		}
 	}
@@ -440,8 +446,64 @@ func (m *Manager) ListForOwner(ids []string, ownerID string, allowAll bool) []Ta
 		}
 		out = append(out, m.copyTask(task))
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].CreatedAt.Equal(out[j].CreatedAt) {
+			return out[i].ID > out[j].ID
+		}
+		return out[i].CreatedAt.After(out[j].CreatedAt)
+	})
 	return out
+}
+
+func (m *Manager) HistoryForOwner(page, pageSize int, ownerID string, allowAll bool) (HistoryPage, error) {
+	page, pageSize = normalizeHistoryPage(page, pageSize)
+	result := HistoryPage{Page: page, PageSize: pageSize}
+	offset := (page - 1) * pageSize
+	if pager, ok := m.items.(persistence.CollectionPageStore); ok {
+		var stored []Task
+		total, err := pager.LoadCollectionPage(context.Background(), taskCollection, persistence.CollectionPage{Limit: pageSize, Offset: offset, OwnerID: ownerID, AllowAll: allowAll}, &stored)
+		if err != nil && !errors.Is(err, persistence.ErrNotFound) {
+			return result, err
+		}
+		result.Total = total
+		result.Items = make([]Task, 0, len(stored))
+		for i := range stored {
+			task := stored[i]
+			if !allowAll && task.OwnerID != ownerID {
+				continue
+			}
+			compactCompletedTask(&task)
+			result.Items = append(result.Items, m.copyTask(&task))
+		}
+		result.HasMore = offset+len(result.Items) < result.Total
+		return result, nil
+	}
+	items := m.ListForOwner(nil, ownerID, allowAll)
+	result.Total = len(items)
+	if offset >= len(items) {
+		result.Items = []Task{}
+		return result, nil
+	}
+	end := offset + pageSize
+	if end > len(items) {
+		end = len(items)
+	}
+	result.Items = append([]Task(nil), items[offset:end]...)
+	result.HasMore = end < len(items)
+	return result, nil
+}
+
+func normalizeHistoryPage(page, pageSize int) (int, int) {
+	if page <= 0 {
+		page = 1
+	}
+	if pageSize <= 0 {
+		pageSize = 50
+	}
+	if pageSize > 200 {
+		pageSize = 200
+	}
+	return page, pageSize
 }
 
 func (m *Manager) Status(id string) (Task, bool) {
@@ -510,7 +572,16 @@ func (m *Manager) load() {
 	var stored []Task
 	loadedLegacy := false
 	if m.items != nil {
-		err := m.items.LoadCollection(context.Background(), taskCollection, &stored)
+		var err error
+		if window, ok := m.items.(persistence.CollectionWindowStore); ok {
+			err = window.LoadCollectionWindow(context.Background(), taskCollection, persistence.CollectionWindow{
+				UpdatedSince:   time.Now().Add(-completedTaskMemoryTTL),
+				CompletedLimit: maxCompletedInMemoryTasks,
+				ActiveStatuses: []string{StatusQueued, StatusRunning},
+			}, &stored)
+		} else {
+			err = m.items.LoadCollection(context.Background(), taskCollection, &stored)
+		}
 		if err != nil && !errors.Is(err, persistence.ErrNotFound) {
 			return
 		}
@@ -570,21 +641,6 @@ func (m *Manager) markDirtyLocked(id string) {
 	m.signalPersistence()
 }
 
-func (m *Manager) markDeletedLocked(ids []string) {
-	if m.state == nil || len(ids) == 0 {
-		return
-	}
-	for _, id := range ids {
-		id = strings.TrimSpace(id)
-		if id == "" {
-			continue
-		}
-		delete(m.dirty, id)
-		m.deleted[id] = struct{}{}
-	}
-	m.signalPersistence()
-}
-
 func (m *Manager) signalPersistence() {
 	if m.wake == nil {
 		return
@@ -623,7 +679,7 @@ func (m *Manager) persistenceLoop() {
 
 func (m *Manager) persistPending() {
 	m.mu.Lock()
-	if len(m.dirty) == 0 && len(m.deleted) == 0 {
+	if len(m.dirty) == 0 {
 		m.mu.Unlock()
 		return
 	}
@@ -631,11 +687,6 @@ func (m *Manager) persistPending() {
 	for id := range m.dirty {
 		ids = append(ids, id)
 		delete(m.dirty, id)
-	}
-	deletedIDs := make([]string, 0, len(m.deleted))
-	for id := range m.deleted {
-		deletedIDs = append(deletedIDs, id)
-		delete(m.deleted, id)
 	}
 	collectionItems := make(map[string]any, len(ids))
 	for _, id := range ids {
@@ -652,33 +703,18 @@ func (m *Manager) persistPending() {
 	}
 	m.mu.Unlock()
 
-	var saveErr error
-	var deleteErr error
+	var err error
 	if m.items != nil {
-		saveErr = m.items.SaveCollectionItems(context.Background(), taskCollection, collectionItems)
-		deleteErr = m.items.DeleteCollectionItems(context.Background(), taskCollection, deletedIDs)
+		err = m.items.SaveCollectionItems(context.Background(), taskCollection, collectionItems)
 	} else {
-		saveErr = m.state.Save(context.Background(), taskCollection, document)
+		err = m.state.Save(context.Background(), taskCollection, document)
 	}
-	if saveErr == nil && deleteErr == nil {
+	if err == nil {
 		return
 	}
 	m.mu.Lock()
-	if m.items == nil {
-		for _, id := range append(ids, deletedIDs...) {
-			m.dirty[id] = struct{}{}
-		}
-	} else {
-		if saveErr != nil {
-			for _, id := range ids {
-				m.dirty[id] = struct{}{}
-			}
-		}
-		if deleteErr != nil {
-			for _, id := range deletedIDs {
-				m.deleted[id] = struct{}{}
-			}
-		}
+	for _, id := range ids {
+		m.dirty[id] = struct{}{}
 	}
 	m.mu.Unlock()
 	m.signalPersistence()
@@ -824,6 +860,14 @@ func taskCompletionTime(task *Task) time.Time {
 }
 
 func (m *Manager) pruneCompletedLocked(now time.Time) []string {
+	// Collection stores such as PostgreSQL persist each task independently, so
+	// completed tasks can be evicted from memory without deleting history. The
+	// legacy JSON document store rewrites the whole in-memory task list on each
+	// save; pruning there would erase persisted history, so keep JSON tasks in
+	// memory unless/until that backend gets an append-only history store.
+	if m.state != nil && m.items == nil {
+		return nil
+	}
 	if now.IsZero() {
 		now = time.Now()
 	}
@@ -883,7 +927,6 @@ func (m *Manager) pruneCompletedLocked(now time.Time) []string {
 		ids = append(ids, id)
 	}
 	sort.Strings(ids)
-	m.markDeletedLocked(ids)
 	return ids
 }
 

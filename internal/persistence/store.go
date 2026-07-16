@@ -34,6 +34,27 @@ type CollectionStore interface {
 	DeleteCollection(context.Context, string) error
 }
 
+type CollectionWindow struct {
+	UpdatedSince   time.Time
+	CompletedLimit int
+	ActiveStatuses []string
+}
+
+type CollectionWindowStore interface {
+	LoadCollectionWindow(context.Context, string, CollectionWindow, any) error
+}
+
+type CollectionPage struct {
+	Limit    int
+	Offset   int
+	OwnerID  string
+	AllowAll bool
+}
+
+type CollectionPageStore interface {
+	LoadCollectionPage(context.Context, string, CollectionPage, any) (int, error)
+}
+
 type Health struct {
 	Backend     string `json:"backend"`
 	Description string `json:"description"`
@@ -143,6 +164,126 @@ func (p *Postgres) LoadCollection(ctx context.Context, collection string, dst an
 		return fmt.Errorf("decode PostgreSQL collection %q: %w", collection, err)
 	}
 	return nil
+}
+
+func (p *Postgres) LoadCollectionWindow(ctx context.Context, collection string, window CollectionWindow, dst any) error {
+	collection = strings.TrimSpace(collection)
+	limit := window.CompletedLimit
+	if limit <= 0 {
+		limit = 500
+	}
+	statuses := make([]string, 0, len(window.ActiveStatuses))
+	for _, status := range window.ActiveStatuses {
+		if status = strings.TrimSpace(status); status != "" {
+			statuses = append(statuses, status)
+		}
+	}
+	since := window.UpdatedSince
+	if since.IsZero() {
+		since = time.Unix(0, 0).UTC()
+	}
+	rows, err := p.pool.Query(ctx, `
+WITH active AS (
+  SELECT value, updated_at, id, 0 AS priority
+  FROM image_pool_collection_items
+  WHERE collection=$1 AND value->>'status' = ANY($2::text[])
+),
+recent_completed AS (
+  SELECT value, updated_at, id, 1 AS priority
+  FROM image_pool_collection_items
+  WHERE collection=$1
+    AND NOT (value->>'status' = ANY($2::text[]))
+    AND updated_at >= $3
+  ORDER BY updated_at DESC, id DESC
+  LIMIT $4
+)
+SELECT value
+FROM (
+  SELECT * FROM active
+  UNION ALL
+  SELECT * FROM recent_completed
+) items
+ORDER BY priority ASC, updated_at DESC, id DESC`, collection, statuses, since, limit)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	items := make([]json.RawMessage, 0)
+	for rows.Next() {
+		var raw []byte
+		if err := rows.Scan(&raw); err != nil {
+			return err
+		}
+		items = append(items, append(json.RawMessage(nil), raw...))
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if len(items) == 0 {
+		return ErrNotFound
+	}
+	raw, err := json.Marshal(items)
+	if err != nil {
+		return err
+	}
+	if err := json.Unmarshal(raw, dst); err != nil {
+		return fmt.Errorf("decode PostgreSQL collection %q window: %w", collection, err)
+	}
+	return nil
+}
+
+func (p *Postgres) LoadCollectionPage(ctx context.Context, collection string, page CollectionPage, dst any) (int, error) {
+	collection = strings.TrimSpace(collection)
+	limit := page.Limit
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	offset := page.Offset
+	if offset < 0 {
+		offset = 0
+	}
+	ownerID := strings.TrimSpace(page.OwnerID)
+	var total int
+	if err := p.pool.QueryRow(ctx, `
+SELECT COUNT(*)
+FROM image_pool_collection_items
+WHERE collection=$1
+  AND ($2::bool OR COALESCE(value->>'owner_id','')=$3)`, collection, page.AllowAll, ownerID).Scan(&total); err != nil {
+		return 0, err
+	}
+	rows, err := p.pool.Query(ctx, `
+SELECT value
+FROM image_pool_collection_items
+WHERE collection=$1
+  AND ($2::bool OR COALESCE(value->>'owner_id','')=$3)
+ORDER BY COALESCE(NULLIF(value->>'created_at','')::timestamptz, updated_at) DESC, id DESC
+LIMIT $4 OFFSET $5`, collection, page.AllowAll, ownerID, limit, offset)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	items := make([]json.RawMessage, 0, limit)
+	for rows.Next() {
+		var raw []byte
+		if err := rows.Scan(&raw); err != nil {
+			return 0, err
+		}
+		items = append(items, append(json.RawMessage(nil), raw...))
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	raw, err := json.Marshal(items)
+	if err != nil {
+		return 0, err
+	}
+	if err := json.Unmarshal(raw, dst); err != nil {
+		return 0, fmt.Errorf("decode PostgreSQL collection %q page: %w", collection, err)
+	}
+	return total, nil
 }
 
 func (p *Postgres) SaveCollectionItems(ctx context.Context, collection string, items map[string]any) error {
