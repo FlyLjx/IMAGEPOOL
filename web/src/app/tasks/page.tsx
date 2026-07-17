@@ -6,7 +6,7 @@ import type { ColumnsType } from "antd/es/table";
 import { Activity, Ban, LoaderCircle, RefreshCw, TimerReset } from "lucide-react";
 import { toast } from "sonner";
 
-import { cancelImageTask, fetchImageTasks, fetchImageTaskStatus, type ImageTask, type ImageTaskStatusLog } from "@/lib/api";
+import { cancelImageTask, fetchImageTaskHistory, fetchImageTaskStatus, type ImageTask, type ImageTaskStatusLog } from "@/lib/api";
 import { formatShanghaiDateTime } from "@/lib/datetime";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 
@@ -102,6 +102,9 @@ function statusLogList(logs: ImageTaskStatusLog[] | undefined) {
 function TasksContent() {
   const [items, setItems] = useState<ImageTask[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(50);
+  const [total, setTotal] = useState(0);
   const [pendingId, setPendingId] = useState("");
   const [statusModalOpen, setStatusModalOpen] = useState(false);
   const [statusTaskId, setStatusTaskId] = useState("");
@@ -113,14 +116,15 @@ function TasksContent() {
       setIsLoading(true);
     }
     try {
-      const data = await fetchImageTasks([]);
+      const data = await fetchImageTaskHistory({ page, pageSize });
       setItems(data.items);
+      setTotal(typeof data.total === "number" ? data.total : data.items.length);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "加载任务失败");
     } finally {
       setIsLoading(false);
     }
-  }, []);
+  }, [page, pageSize]);
 
   useEffect(() => {
     void load();
@@ -170,12 +174,12 @@ function TasksContent() {
 
   const summary = useMemo(() => {
     return {
-      total: items.length,
+      total,
       running: items.filter((item) => item.status === "running").length,
       queued: items.filter((item) => item.status === "queued").length,
       error: items.filter((item) => item.status === "error").length,
     };
-  }, [items]);
+  }, [items, total]);
 
   const handleCancel = useCallback((item: ImageTask) => {
     Modal.confirm({
@@ -269,7 +273,7 @@ function TasksContent() {
       <section className="flex flex-col gap-4 rounded-lg border border-slate-200 bg-white px-5 py-5 shadow-sm lg:flex-row lg:items-center lg:justify-between">
         <div>
           <Typography.Title level={2} className="!mb-1 !text-2xl">任务队列</Typography.Title>
-          <Typography.Text type="secondary">统一查看任务状态，并取消排队或运行中的任务。</Typography.Text>
+          <Typography.Text type="secondary">读取数据库持久化任务历史；完成任务从内存释放后仍可分页查看。</Typography.Text>
         </div>
         <Button icon={<RefreshCw className="size-4" />} onClick={() => void load(true)}>
           刷新
@@ -277,10 +281,10 @@ function TasksContent() {
       </section>
 
       <section className="grid gap-4 md:grid-cols-4">
-        <Card><Space><TimerReset className="size-5 text-blue-500" /><span>总任务</span><strong>{summary.total}</strong></Space></Card>
-        <Card><Space><LoaderCircle className="size-5 text-blue-500" /><span>运行中</span><strong>{summary.running}</strong></Space></Card>
-        <Card><Space><TimerReset className="size-5 text-amber-500" /><span>排队</span><strong>{summary.queued}</strong></Space></Card>
-        <Card><Space><Ban className="size-5 text-rose-500" /><span>失败</span><strong>{summary.error}</strong></Space></Card>
+        <Card><Space><TimerReset className="size-5 text-blue-500" /><span>总记录</span><strong>{summary.total}</strong></Space></Card>
+        <Card><Space><LoaderCircle className="size-5 text-blue-500" /><span>本页运行中</span><strong>{summary.running}</strong></Space></Card>
+        <Card><Space><TimerReset className="size-5 text-amber-500" /><span>本页排队</span><strong>{summary.queued}</strong></Space></Card>
+        <Card><Space><Ban className="size-5 text-rose-500" /><span>本页失败</span><strong>{summary.error}</strong></Space></Card>
       </section>
 
       <Card styles={{ body: { padding: 0 } }}>
@@ -290,7 +294,22 @@ function TasksContent() {
           dataSource={items}
           loading={isLoading}
           size="small"
-          pagination={{ pageSize: 20, showSizeChanger: true }}
+          pagination={{
+            current: page,
+            pageSize,
+            total,
+            showSizeChanger: true,
+            pageSizeOptions: [20, 50, 100, 200],
+            showTotal: (count, range) => `第 ${range[0]}-${range[1]} 条 / 共 ${count} 条`,
+            onChange: (nextPage, nextPageSize) => {
+              if (nextPageSize !== pageSize) {
+                setPage(1);
+                setPageSize(nextPageSize);
+                return;
+              }
+              setPage(nextPage);
+            },
+          }}
           scroll={{ x: 1480 }}
           locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无任务" /> }}
         />

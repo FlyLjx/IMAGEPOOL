@@ -342,6 +342,10 @@ export type ImageTask = {
 type ImageTaskListResponse = {
   items: ImageTask[];
   missing_ids: string[];
+  page?: number;
+  page_size?: number;
+  total?: number;
+  has_more?: boolean;
 };
 
 export type LoginResponse = {
@@ -768,6 +772,17 @@ export async function fetchImageTasks(ids: string[]) {
   params.set("compact", "1");
   params.set("_t", String(Date.now()));
   return httpRequest<ImageTaskListResponse>(`/api/image-tasks?${params.toString()}`);
+}
+
+export async function fetchImageTaskHistory(options: { page?: number; pageSize?: number; includeLogs?: boolean } = {}) {
+  const params = new URLSearchParams();
+  params.set("page", String(options.page || 1));
+  params.set("page_size", String(options.pageSize || 50));
+  if (options.includeLogs) {
+    params.set("include_logs", "1");
+  }
+  params.set("_t", String(Date.now()));
+  return httpRequest<ImageTaskListResponse>(`/api/image-tasks/history?${params.toString()}`);
 }
 
 export async function fetchImageTaskStatus(taskId: string) {

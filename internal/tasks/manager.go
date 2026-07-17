@@ -512,12 +512,30 @@ func (m *Manager) Status(id string) (Task, bool) {
 
 func (m *Manager) StatusForOwner(id, ownerID string, allowAll bool) (Task, bool) {
 	m.mu.RLock()
-	defer m.mu.RUnlock()
 	task := m.tasks[id]
-	if task == nil || (!allowAll && task.OwnerID != ownerID) {
+	if task != nil && (allowAll || task.OwnerID == ownerID) {
+		snapshot := m.copyTask(task)
+		m.mu.RUnlock()
+		return snapshot, true
+	}
+	m.mu.RUnlock()
+
+	if id == "" {
 		return Task{}, false
 	}
-	return m.copyTask(task), true
+	itemStore, ok := m.items.(persistence.CollectionItemStore)
+	if !ok {
+		return Task{}, false
+	}
+	var stored Task
+	if err := itemStore.LoadCollectionItem(context.Background(), taskCollection, id, &stored); err != nil {
+		return Task{}, false
+	}
+	if !allowAll && stored.OwnerID != ownerID {
+		return Task{}, false
+	}
+	compactCompletedTask(&stored)
+	return m.copyTask(&stored), true
 }
 
 func (m *Manager) Cancel(id string) (Task, bool) {

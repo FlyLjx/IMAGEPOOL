@@ -2,6 +2,7 @@ package tasks
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -95,12 +96,25 @@ func (s *blockingCollectionStore) Close() {}
 func (s *blockingCollectionStore) LoadCollection(context.Context, string, any) error {
 	return persistence.ErrNotFound
 }
+func (s *blockingCollectionStore) LoadCollectionItem(_ context.Context, _ string, id string, dst any) error {
+	item, ok := s.items[id]
+	if !ok {
+		return persistence.ErrNotFound
+	}
+	raw, err := json.Marshal(item)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(raw, dst)
+}
 func (s *blockingCollectionStore) SaveCollectionItems(_ context.Context, _ string, items map[string]any) error {
 	select {
 	case s.saveStarted <- struct{}{}:
 	default:
 	}
-	<-s.release
+	if s.release != nil {
+		<-s.release
+	}
 	for id, item := range items {
 		s.items[id] = item
 	}
@@ -354,6 +368,33 @@ func TestTaskVisibilityIsScopedToOwner(t *testing.T) {
 	}
 	if _, ok := m.CancelForOwner(b.ID, "user-a", false); ok {
 		t.Fatal("user-a can cancel user-b task")
+	}
+}
+
+func TestTaskStatusFallsBackToPersistedHistory(t *testing.T) {
+	finished := time.Now()
+	state := &blockingCollectionStore{items: map[string]any{
+		"persisted": Task{
+			ID:         "persisted",
+			OwnerID:    "user-a",
+			Mode:       "generate",
+			Status:     StatusSucceeded,
+			Progress:   "succeeded",
+			CreatedAt:  finished.Add(-time.Minute),
+			UpdatedAt:  finished,
+			FinishedAt: &finished,
+			StatusLogs: []LogEntry{{Time: finished, Level: "success", Message: "任务处理完成"}},
+		},
+	}}
+	m := NewManagerWithPersistence(taskSvc{}, state)
+	defer m.Close()
+
+	got, ok := m.StatusForOwner("persisted", "user-a", false)
+	if !ok || got.ID != "persisted" || got.Status != StatusSucceeded || len(got.StatusLogs) != 1 {
+		t.Fatalf("persisted status=%#v ok=%v", got, ok)
+	}
+	if _, ok := m.StatusForOwner("persisted", "user-b", false); ok {
+		t.Fatal("user-b can read user-a persisted task")
 	}
 }
 

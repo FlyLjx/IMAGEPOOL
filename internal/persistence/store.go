@@ -34,6 +34,10 @@ type CollectionStore interface {
 	DeleteCollection(context.Context, string) error
 }
 
+type CollectionItemStore interface {
+	LoadCollectionItem(context.Context, string, string, any) error
+}
+
 type CollectionWindow struct {
 	UpdatedSince   time.Time
 	CompletedLimit int
@@ -162,6 +166,21 @@ func (p *Postgres) LoadCollection(ctx context.Context, collection string, dst an
 	}
 	if err := json.Unmarshal(raw, dst); err != nil {
 		return fmt.Errorf("decode PostgreSQL collection %q: %w", collection, err)
+	}
+	return nil
+}
+
+func (p *Postgres) LoadCollectionItem(ctx context.Context, collection, id string, dst any) error {
+	var raw []byte
+	err := p.pool.QueryRow(ctx, `SELECT value FROM image_pool_collection_items WHERE collection=$1 AND id=$2`, strings.TrimSpace(collection), strings.TrimSpace(id)).Scan(&raw)
+	if err != nil {
+		if strings.Contains(err.Error(), "no rows") {
+			return ErrNotFound
+		}
+		return err
+	}
+	if err := json.Unmarshal(raw, dst); err != nil {
+		return fmt.Errorf("decode PostgreSQL collection %q item %q: %w", collection, id, err)
 	}
 	return nil
 }
