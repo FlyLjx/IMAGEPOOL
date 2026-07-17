@@ -39,9 +39,37 @@ function newClientTaskID() {
   return `web-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
-function imageSource(image: { url?: string; b64_json?: string }) {
+function imageSource(image: { url?: string; b64_json?: string; mime_type?: string; format?: string }) {
   if (image.url) return image.url;
-  if (image.b64_json) return `data:image/png;base64,${image.b64_json}`;
+  if (image.b64_json) return `data:${imageMimeType(image)};base64,${image.b64_json}`;
+  return "";
+}
+
+function imageMimeType(image: { b64_json?: string; mime_type?: string; format?: string }) {
+  const explicit = image.mime_type?.trim().toLowerCase();
+  if (explicit?.startsWith("image/")) return explicit;
+  switch (image.format?.trim().toLowerCase()) {
+    case "jpg":
+    case "jpeg":
+      return "image/jpeg";
+    case "webp":
+      return "image/webp";
+    case "gif":
+      return "image/gif";
+    case "png":
+      return "image/png";
+    default:
+      return detectImageMimeTypeFromBase64(image.b64_json) || "image/png";
+  }
+}
+
+function detectImageMimeTypeFromBase64(value?: string) {
+  if (!value) return "";
+  const head = value.slice(0, 32);
+  if (head.startsWith("iVBORw0KGgo")) return "image/png";
+  if (head.startsWith("/9j/")) return "image/jpeg";
+  if (head.startsWith("UklGR")) return "image/webp";
+  if (head.startsWith("R0lGOD")) return "image/gif";
   return "";
 }
 

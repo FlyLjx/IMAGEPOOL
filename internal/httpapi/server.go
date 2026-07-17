@@ -428,6 +428,21 @@ func normalizedImageCount(n int) int {
 	return n
 }
 
+func validateImageOutputOptions(req images.Request) error {
+	responseFormat := strings.ToLower(strings.TrimSpace(req.ResponseFormat))
+	if responseFormat != "" && responseFormat != "url" && responseFormat != "b64_json" {
+		return fmt.Errorf("invalid response_format %q; supported values are url, b64_json", req.ResponseFormat)
+	}
+	outputFormat := strings.ToLower(strings.TrimSpace(req.OutputFormat))
+	outputFormat = strings.TrimPrefix(outputFormat, ".")
+	switch outputFormat {
+	case "", "auto", "png", "jpeg", "jpg", "webp":
+		return nil
+	default:
+		return fmt.Errorf("invalid output_format %q; supported values are png, jpeg, webp", req.OutputFormat)
+	}
+}
+
 func (s *Server) consumeQuota(r *http.Request, endpoint, model string, requestUnits, imageUnits int) error {
 	identity, ok := auth.IdentityFromContext(r.Context())
 	if !ok {
@@ -527,6 +542,10 @@ func (s *Server) handleImageGeneration(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	if err := validateImageOutputOptions(req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
 	req.OutputBaseURL = baseURL(r)
 	metrics.SetModel(r.Context(), req.Model)
 	if err := s.consumeQuota(r, "/v1/images/generations", req.Model, 1, normalizedImageCount(req.N)); err != nil {
@@ -549,6 +568,10 @@ func (s *Server) handleImageGeneration(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleImageEdit(w http.ResponseWriter, r *http.Request, asTask bool) {
 	req, clientTaskID, err := s.parseEditRequest(r)
 	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := validateImageOutputOptions(req); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
@@ -822,14 +845,21 @@ func (s *Server) streamImage(w http.ResponseWriter, r *http.Request, req images.
 
 func (s *Server) handleTaskGeneration(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		ClientTaskID string `json:"client_task_id"`
-		Prompt       string `json:"prompt"`
-		Model        string `json:"model"`
-		Size         string `json:"size"`
-		Quality      string `json:"quality"`
-		N            int    `json:"n"`
+		ClientTaskID   string `json:"client_task_id"`
+		Prompt         string `json:"prompt"`
+		Model          string `json:"model"`
+		Size           string `json:"size"`
+		Quality        string `json:"quality"`
+		ResponseFormat string `json:"response_format"`
+		OutputFormat   string `json:"output_format"`
+		N              int    `json:"n"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	req := images.Request{Prompt: body.Prompt, Model: body.Model, Size: body.Size, Quality: body.Quality, ResponseFormat: body.ResponseFormat, OutputFormat: body.OutputFormat, N: normalizedImageCount(body.N), OutputBaseURL: baseURL(r)}
+	if err := validateImageOutputOptions(req); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
@@ -839,7 +869,7 @@ func (s *Server) handleTaskGeneration(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	identity, _ := auth.IdentityFromContext(r.Context())
-	task := s.tasks.SubmitGenerationForOwner(identity.ID, body.ClientTaskID, images.Request{Prompt: body.Prompt, Model: body.Model, Size: body.Size, Quality: body.Quality, N: normalizedImageCount(body.N), OutputBaseURL: baseURL(r)})
+	task := s.tasks.SubmitGenerationForOwner(identity.ID, body.ClientTaskID, req)
 	writeJSON(w, http.StatusAccepted, task)
 }
 func (s *Server) handleTaskEdit(w http.ResponseWriter, r *http.Request) {
@@ -1874,7 +1904,7 @@ func (s *Server) parseEditRequest(r *http.Request) (images.Request, string, erro
 			return images.Request{}, "", err
 		}
 		form := r.MultipartForm
-		req := images.Request{Prompt: formValue(form, "prompt"), Model: formValue(form, "model"), Size: formValue(form, "size"), Quality: formValue(form, "quality"), ResponseFormat: formValue(form, "response_format")}
+		req := images.Request{Prompt: formValue(form, "prompt"), Model: formValue(form, "model"), Size: formValue(form, "size"), Quality: formValue(form, "quality"), ResponseFormat: formValue(form, "response_format"), OutputFormat: formValue(form, "output_format")}
 		if n, _ := strconv.Atoi(formValue(form, "n")); n > 0 {
 			req.N = n
 		}
@@ -1906,6 +1936,7 @@ func (s *Server) parseEditRequest(r *http.Request) (images.Request, string, erro
 		Size           string   `json:"size"`
 		Quality        string   `json:"quality"`
 		ResponseFormat string   `json:"response_format"`
+		OutputFormat   string   `json:"output_format"`
 		Images         []string `json:"images"`
 		Image          any      `json:"image"`
 	}
@@ -1927,7 +1958,7 @@ func (s *Server) parseEditRequest(r *http.Request) (images.Request, string, erro
 	if err != nil {
 		return images.Request{}, "", err
 	}
-	return images.Request{Prompt: body.Prompt, Model: body.Model, N: body.N, Size: body.Size, Quality: body.Quality, ResponseFormat: body.ResponseFormat, References: refs}, body.ClientTaskID, nil
+	return images.Request{Prompt: body.Prompt, Model: body.Model, N: body.N, Size: body.Size, Quality: body.Quality, ResponseFormat: body.ResponseFormat, OutputFormat: body.OutputFormat, References: refs}, body.ClientTaskID, nil
 }
 
 func formValue(form *multipart.Form, key string) string {

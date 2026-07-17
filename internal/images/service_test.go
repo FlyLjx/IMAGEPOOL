@@ -1,10 +1,16 @@
 package images
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
+	"image"
+	"image/color"
+	"image/png"
 	"net/url"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -39,6 +45,7 @@ type cacheBackend struct {
 	*fakeBackend
 	downloadedAccount accounts.Account
 	downloadErr       error
+	data              []byte
 }
 
 type blockingCacheBackend struct {
@@ -100,6 +107,9 @@ func (c *cacheBackend) DownloadImageFor(ctx context.Context, account accounts.Ac
 	c.downloadedAccount = account
 	if c.downloadErr != nil {
 		return nil, c.downloadErr
+	}
+	if len(c.data) > 0 {
+		return c.data, nil
 	}
 	return []byte{0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a, 0x00}, nil
 }
@@ -502,6 +512,79 @@ func TestGenerateCachesRemoteImageLocally(t *testing.T) {
 	}
 }
 
+func TestGenerateConvertsCachedURLWhenOutputFormatIsSet(t *testing.T) {
+	cfg := config.Default()
+	cfg.ImageOutputDir = t.TempDir()
+	store := accounts.NewStore([]accounts.Account{{AccessToken: "token", CreatedAt: 1}}, "")
+	backend := &cacheBackend{fakeBackend: &fakeBackend{}, data: testPNGBytes(t)}
+	service := NewService(cfg, store, backend, storage.NewService(cfg))
+	response, err := service.Generate(context.Background(), Request{Prompt: "draw", OutputBaseURL: "https://pool.example", OutputFormat: "jpeg"})
+	if err != nil || len(response.Data) != 1 {
+		t.Fatalf("response=%#v err=%v", response, err)
+	}
+	items, err := storage.NewService(cfg).List("https://pool.example", "", "")
+	if err != nil || len(items) != 1 {
+		t.Fatalf("items=%#v err=%v", items, err)
+	}
+	if !strings.HasSuffix(items[0].Rel, ".jpg") {
+		t.Fatalf("output_format must server-transcode cached URL bytes: item=%#v", items[0])
+	}
+	if response.Data[0].MimeType != "image/jpeg" || response.Data[0].Format != "jpeg" {
+		t.Fatalf("response must report converted format, got %#v", response.Data[0])
+	}
+}
+
+func TestGenerateConvertsB64JSONWhenOutputFormatIsSet(t *testing.T) {
+	cfg := config.Default()
+	store := accounts.NewStore([]accounts.Account{{AccessToken: "token", CreatedAt: 1}}, "")
+	backend := &cacheBackend{fakeBackend: &fakeBackend{}, data: testPNGBytes(t)}
+	response, err := NewService(cfg, store, backend).Generate(context.Background(), Request{Prompt: "draw", ResponseFormat: "b64_json", OutputFormat: "jpeg"})
+	if err != nil || len(response.Data) != 1 || response.Data[0].B64JSON == "" || response.Data[0].URL != "" {
+		t.Fatalf("response=%#v err=%v", response, err)
+	}
+	data, err := base64.StdEncoding.DecodeString(response.Data[0].B64JSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(data) < 3 || !bytes.Equal(data[:3], []byte{0xff, 0xd8, 0xff}) {
+		t.Fatalf("b64_json must contain converted jpeg bytes: %x", data[:min(len(data), 8)])
+	}
+	if response.Data[0].MimeType != "image/jpeg" || response.Data[0].Format != "jpeg" {
+		t.Fatalf("b64_json response must report converted format, got %#v", response.Data[0])
+	}
+}
+
+func TestGenerateConvertsB64JSONToWebP(t *testing.T) {
+	cfg := config.Default()
+	store := accounts.NewStore([]accounts.Account{{AccessToken: "token", CreatedAt: 1}}, "")
+	backend := &cacheBackend{fakeBackend: &fakeBackend{}, data: testPNGBytes(t)}
+	response, err := NewService(cfg, store, backend).Generate(context.Background(), Request{Prompt: "draw", ResponseFormat: "b64_json", OutputFormat: "webp"})
+	if err != nil || len(response.Data) != 1 || response.Data[0].B64JSON == "" {
+		t.Fatalf("response=%#v err=%v", response, err)
+	}
+	data, err := base64.StdEncoding.DecodeString(response.Data[0].B64JSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(data) < 12 || string(data[:4]) != "RIFF" || string(data[8:12]) != "WEBP" {
+		t.Fatalf("b64_json must contain converted webp bytes: %x", data[:min(len(data), 12)])
+	}
+	if response.Data[0].MimeType != "image/webp" || response.Data[0].Format != "webp" {
+		t.Fatalf("b64_json response must report converted webp format, got %#v", response.Data[0])
+	}
+}
+
+func TestGenerateRejectsInvalidImageOutputOptions(t *testing.T) {
+	store := accounts.NewStore([]accounts.Account{{AccessToken: "token", CreatedAt: 1}}, "")
+	backend := &cacheBackend{fakeBackend: &fakeBackend{}}
+	if _, err := NewService(config.Default(), store, backend).Generate(context.Background(), Request{Prompt: "draw", ResponseFormat: "base64"}); err == nil {
+		t.Fatal("expected invalid response_format error")
+	}
+	if _, err := NewService(config.Default(), store, backend).Generate(context.Background(), Request{Prompt: "draw", OutputFormat: "bmp"}); err == nil {
+		t.Fatal("expected invalid output_format error")
+	}
+}
+
 func TestGenerateReleasesImageLeaseBeforeCaching(t *testing.T) {
 	cfg := config.Default()
 	cfg.ImageOutputDir = t.TempDir()
@@ -553,6 +636,20 @@ func TestGenerateReleasesImageLeaseBeforeCaching(t *testing.T) {
 			t.Fatal("generation did not finish")
 		}
 	}
+}
+
+func testPNGBytes(t *testing.T) []byte {
+	t.Helper()
+	canvas := image.NewRGBA(image.Rect(0, 0, 2, 2))
+	canvas.SetRGBA(0, 0, color.RGBA{R: 0xff, A: 0xff})
+	canvas.SetRGBA(1, 0, color.RGBA{G: 0xff, A: 0xff})
+	canvas.SetRGBA(0, 1, color.RGBA{B: 0xff, A: 0xff})
+	canvas.SetRGBA(1, 1, color.RGBA{R: 0xff, G: 0xff, B: 0xff, A: 0xff})
+	buffer := new(bytes.Buffer)
+	if err := png.Encode(buffer, canvas); err != nil {
+		t.Fatal(err)
+	}
+	return buffer.Bytes()
 }
 
 func TestGenerateRemovesAccountAfterAuthenticatedCacheDownloadFailure(t *testing.T) {

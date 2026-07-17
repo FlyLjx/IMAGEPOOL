@@ -282,7 +282,7 @@ export type SystemLog = {
 
 export type ImageResponse = {
   created: number;
-  data: Array<{ b64_json?: string; url?: string; revised_prompt?: string }>;
+  data: Array<{ b64_json?: string; url?: string; mime_type?: string; format?: string; revised_prompt?: string }>;
 };
 
 export type SystemUpdateStatus = {
@@ -320,10 +320,12 @@ export type ImageTask = {
   model?: ImageModel;
   size?: string;
   quality?: string;
+  response_format?: string;
+  output_format?: string;
   created_at: string;
   updated_at: string;
   conversation_id?: string;
-  data?: Array<{ b64_json?: string; url?: string; revised_prompt?: string }>;
+  data?: Array<{ b64_json?: string; url?: string; mime_type?: string; format?: string; revised_prompt?: string }>;
   error?: string;
   progress?: string;
   progress_percent?: number;
@@ -678,7 +680,7 @@ export async function testAccountImage(accessToken: string) {
   });
 }
 
-export async function generateImage(prompt: string, model?: ImageModel, size?: string, quality = "auto") {
+export async function generateImage(prompt: string, model?: ImageModel, size?: string, quality = "auto", outputFormat?: string, responseFormat = "b64_json") {
   return httpRequest<ImageResponse>(
     "/v1/images/generations",
     {
@@ -689,13 +691,14 @@ export async function generateImage(prompt: string, model?: ImageModel, size?: s
         ...(size ? { size } : {}),
         quality,
         n: 1,
-        response_format: "b64_json",
+        response_format: responseFormat,
+        ...(outputFormat ? { output_format: outputFormat } : {}),
       },
     },
   );
 }
 
-export async function editImage(files: File | File[], prompt: string, model?: ImageModel, size?: string, quality = "auto") {
+export async function editImage(files: File | File[], prompt: string, model?: ImageModel, size?: string, quality = "auto", outputFormat?: string, responseFormat?: string) {
   const formData = new FormData();
   const uploadFiles = Array.isArray(files) ? files : [files];
 
@@ -711,6 +714,12 @@ export async function editImage(files: File | File[], prompt: string, model?: Im
   }
   formData.append("quality", quality);
   formData.append("n", "1");
+  if (responseFormat) {
+    formData.append("response_format", responseFormat);
+  }
+  if (outputFormat) {
+    formData.append("output_format", outputFormat);
+  }
 
   return httpRequest<ImageResponse>(
     "/v1/images/edits",
@@ -721,7 +730,7 @@ export async function editImage(files: File | File[], prompt: string, model?: Im
   );
 }
 
-export async function createImageGenerationTask(clientTaskId: string, prompt: string, model?: ImageModel, size?: string, quality = "auto") {
+export async function createImageGenerationTask(clientTaskId: string, prompt: string, model?: ImageModel, size?: string, quality = "auto", outputFormat?: string, responseFormat?: string) {
   return httpRequest<ImageTask>("/api/image-tasks/generations", {
     method: "POST",
     body: {
@@ -730,6 +739,8 @@ export async function createImageGenerationTask(clientTaskId: string, prompt: st
       ...(model ? { model } : {}),
       ...(size ? { size } : {}),
       quality,
+      ...(responseFormat ? { response_format: responseFormat } : {}),
+      ...(outputFormat ? { output_format: outputFormat } : {}),
     },
   });
 }
@@ -741,6 +752,8 @@ export async function createImageEditTask(
   model?: ImageModel,
   size?: string,
   quality = "auto",
+  outputFormat?: string,
+  responseFormat?: string,
 ) {
   const formData = new FormData();
   const uploadFiles = Array.isArray(files) ? files : [files];
@@ -757,6 +770,12 @@ export async function createImageEditTask(
     formData.append("size", size);
   }
   formData.append("quality", quality);
+  if (responseFormat) {
+    formData.append("response_format", responseFormat);
+  }
+  if (outputFormat) {
+    formData.append("output_format", outputFormat);
+  }
 
   return httpRequest<ImageTask>("/api/image-tasks/edits", {
     method: "POST",

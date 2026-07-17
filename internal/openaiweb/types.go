@@ -24,6 +24,7 @@ type ImageRequest struct {
 	Size           string              `json:"size"`
 	Quality        string              `json:"quality"`
 	ResponseFormat string              `json:"response_format"`
+	OutputFormat   string              `json:"output_format"`
 	Stream         bool                `json:"stream"`
 	References     []ImageInput        `json:"-"`
 	OutputBaseURL  string              `json:"-"`

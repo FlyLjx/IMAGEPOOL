@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -842,13 +843,12 @@ func (c *Client) resolveImageURLs(ctx context.Context, account accounts.Account,
 		if id == "file_upload" {
 			continue
 		}
-		path := "/backend-api/files/" + id + "/download"
-		var out map[string]any
-		if err := c.doJSON(ctx, account, http.MethodGet, path, path, nil, map[string]string{"Accept": "application/json"}, &out); err != nil {
+		resolved, err := c.resolveFileDownloadURL(ctx, account, conversationID, id)
+		if err != nil {
 			failures = append(failures, fmt.Errorf("resolve file %s: %w", id, err))
 			continue
 		}
-		urls = appendUnique(urls, str(out["download_url"]), str(out["url"]))
+		urls = appendUnique(urls, resolved...)
 	}
 	for _, id := range sedimentIDs {
 		if conversationID == "" {
@@ -866,6 +866,51 @@ func (c *Client) resolveImageURLs(ctx context.Context, account accounts.Account,
 		return nil, errors.Join(failures...)
 	}
 	return urls, nil
+}
+
+func (c *Client) resolveFileDownloadURL(ctx context.Context, account accounts.Account, conversationID, fileID string) ([]string, error) {
+	paths := officialFileDownloadPaths(conversationID, fileID)
+	var failures []error
+	for _, item := range paths {
+		var out map[string]any
+		if err := c.doJSON(ctx, account, http.MethodGet, item.path, item.route, nil, map[string]string{"Accept": "application/json"}, &out); err != nil {
+			failures = append(failures, err)
+			continue
+		}
+		urls := appendUnique(nil, str(out["download_url"]), str(out["url"]))
+		if len(urls) > 0 {
+			return urls, nil
+		}
+		failures = append(failures, fmt.Errorf("download link missing"))
+	}
+	return nil, errors.Join(failures...)
+}
+
+type fileDownloadPath struct {
+	path  string
+	route string
+}
+
+func officialFileDownloadPaths(conversationID, fileID string) []fileDownloadPath {
+	cleanID := strings.TrimSpace(fileID)
+	escapedID := url.PathEscape(cleanID)
+	query := url.Values{}
+	if strings.TrimSpace(conversationID) != "" {
+		query.Set("conversation_id", strings.TrimSpace(conversationID))
+	}
+	query.Set("inline", "false")
+	query.Set("download_intent", "false")
+
+	route := "/backend-api/files/download/" + escapedID
+	path := route
+	if encoded := query.Encode(); encoded != "" {
+		path += "?" + encoded
+	}
+	legacyRoute := "/backend-api/files/" + escapedID + "/download"
+	return []fileDownloadPath{
+		{path: path, route: route},
+		{path: legacyRoute, route: legacyRoute},
+	}
 }
 
 func (c *Client) uploadImage(ctx context.Context, account accounts.Account, image ImageInput, index, total int) (uploadMeta, error) {

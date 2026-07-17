@@ -177,7 +177,10 @@ func TestGenerateImageReverseProtocol(t *testing.T) {
 			w.Write([]byte("data: {\"conversation_id\":\"conv-1\"}\n\n"))
 		case r.Method == http.MethodGet && r.URL.Path == "/backend-api/conversation/conv-1":
 			json.NewEncoder(w).Encode(map[string]any{"mapping": map[string]any{"m": map[string]any{"message": map[string]any{"author": map[string]any{"role": "tool"}, "content": map[string]any{"parts": []any{map[string]any{"asset_pointer": "file-service://file_00000000aaaaaaaaaaaaaaaaaaaaaaaa"}}}}}}})
-		case r.Method == http.MethodGet && r.URL.Path == "/backend-api/files/file_00000000aaaaaaaaaaaaaaaaaaaaaaaa/download":
+		case r.Method == http.MethodGet && r.URL.Path == "/backend-api/files/download/file_00000000aaaaaaaaaaaaaaaaaaaaaaaa":
+			if got := r.URL.Query().Get("conversation_id"); got != "conv-1" {
+				t.Errorf("download conversation_id=%q", got)
+			}
 			json.NewEncoder(w).Encode(map[string]any{"download_url": srv.URL + "/image.png"})
 		case r.Method == http.MethodGet && r.URL.Path == "/image.png":
 			w.Write([]byte("PNG"))

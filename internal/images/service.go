@@ -1,16 +1,26 @@
 package images
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image"
+	"image/color"
+	"image/draw"
+	_ "image/gif"
+	"image/jpeg"
+	"image/png"
 	"log"
 	"net/http"
 	"net/url"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/deepteams/webp"
 
 	"imagepool/internal/accounts"
 	"imagepool/internal/config"
@@ -53,6 +63,8 @@ type Request = openaiweb.ImageRequest
 type Data struct {
 	URL           string `json:"url,omitempty"`
 	B64JSON       string `json:"b64_json,omitempty"`
+	MimeType      string `json:"mime_type,omitempty"`
+	Format        string `json:"format,omitempty"`
 	RevisedPrompt string `json:"revised_prompt,omitempty"`
 }
 
@@ -106,9 +118,15 @@ func (s *Service) Generate(ctx context.Context, req Request) (Response, error) {
 	if req.Quality == "" {
 		req.Quality = "auto"
 	}
-	if req.ResponseFormat == "" {
-		req.ResponseFormat = "url"
+	responseFormat, err := normalizeResponseFormat(req.ResponseFormat)
+	if err != nil {
+		return Response{}, err
 	}
+	if _, err := normalizeOutputFormat(req.OutputFormat); err != nil {
+		return Response{}, err
+	}
+	req.ResponseFormat = responseFormat
+	req.OutputFormat, _ = normalizeOutputFormat(req.OutputFormat)
 	if req.N == 1 {
 		result, err := s.generateOne(ctx, req)
 		if err != nil {
@@ -275,6 +293,21 @@ func (s *Service) GenerateWithAccount(ctx context.Context, token string, req Req
 	if req.N <= 0 {
 		req.N = 1
 	}
+	if req.Model == "" {
+		req.Model = "gpt-image-2"
+	}
+	if req.Quality == "" {
+		req.Quality = "auto"
+	}
+	responseFormat, err := normalizeResponseFormat(req.ResponseFormat)
+	if err != nil {
+		return Response{}, err
+	}
+	if _, err := normalizeOutputFormat(req.OutputFormat); err != nil {
+		return Response{}, err
+	}
+	req.ResponseFormat = responseFormat
+	req.OutputFormat, _ = normalizeOutputFormat(req.OutputFormat)
 	account, err = s.prepareAccountForDispatch(account, req)
 	if err != nil {
 		return Response{}, err
@@ -294,7 +327,10 @@ func (s *Service) GenerateWithAccount(ctx context.Context, token string, req Req
 	// lease here lets the next queued generation start while the local cache is
 	// populated.
 	release()
-	result = s.cacheResult(taskCtx, account, result, req.OutputBaseURL)
+	result, err = s.finalizeResult(taskCtx, account, result, req)
+	if err != nil {
+		return responseFromResult(result), err
+	}
 	return responseFromResult(result), nil
 }
 
@@ -370,7 +406,14 @@ func (s *Service) generateOne(ctx context.Context, req Request) (openaiweb.Image
 		if err == nil {
 			_ = s.store.MarkImageSuccess(account.AccessToken)
 			s.store.ReleaseImage(account.AccessToken)
-			result = s.cacheResult(taskCtx, account, result, req.OutputBaseURL)
+			result, err = s.finalizeResult(taskCtx, account, result, req)
+			if err != nil {
+				log.Status = "failed"
+				log.Error = err.Error()
+				attempts = append(attempts, log)
+				result.Attempts = append(result.Attempts, attempts...)
+				return result, err
+			}
 			log.Status = "success"
 			log.BackendModel = result.BackendModel
 			log.ConversationID = result.ConversationID
@@ -499,17 +542,137 @@ type imageDownloader interface {
 	DownloadImageFor(ctx context.Context, account accounts.Account, imageURL string) ([]byte, error)
 }
 
-func (s *Service) cacheResult(ctx context.Context, account accounts.Account, result openaiweb.ImageResult, baseURL string) openaiweb.ImageResult {
-	if s.storage == nil || len(result.URLs) == 0 {
-		return result
+func normalizeResponseFormat(value string) (string, error) {
+	format := strings.ToLower(strings.TrimSpace(value))
+	switch format {
+	case "", "url":
+		return "url", nil
+	case "b64_json":
+		return "b64_json", nil
+	default:
+		return "", fmt.Errorf("invalid response_format %q; supported values are url, b64_json", value)
+	}
+}
+
+func normalizeOutputFormat(value string) (string, error) {
+	format := strings.ToLower(strings.TrimSpace(value))
+	format = strings.TrimPrefix(format, ".")
+	switch format {
+	case "", "auto":
+		return "", nil
+	case "jpg":
+		return "jpeg", nil
+	case "png", "jpeg", "webp":
+		return format, nil
+	default:
+		return "", fmt.Errorf("invalid output_format %q; supported values are png, jpeg, webp", value)
+	}
+}
+
+func (s *Service) finalizeResult(ctx context.Context, account accounts.Account, result openaiweb.ImageResult, req Request) (openaiweb.ImageResult, error) {
+	responseFormat, err := normalizeResponseFormat(req.ResponseFormat)
+	if err != nil {
+		return result, err
+	}
+	outputFormat, err := normalizeOutputFormat(req.OutputFormat)
+	if err != nil {
+		return result, err
+	}
+	if responseFormat == "b64_json" {
+		return s.resultAsBase64(ctx, account, result, outputFormat)
+	}
+	return s.cacheResult(ctx, account, result, req.OutputBaseURL, outputFormat)
+}
+
+func (s *Service) resultAsBase64(ctx context.Context, account accounts.Account, result openaiweb.ImageResult, outputFormat string) (openaiweb.ImageResult, error) {
+	dataItems, err := s.resultImageBytes(ctx, account, result)
+	if err != nil {
+		return result, err
+	}
+	out := result
+	out.URLs = nil
+	out.B64JSON = make([]string, 0, len(dataItems))
+	for _, data := range dataItems {
+		if outputFormat != "" {
+			var err error
+			data, err = convertImageDataFormat(data, outputFormat)
+			if err != nil {
+				return result, err
+			}
+		}
+		out.B64JSON = append(out.B64JSON, base64.StdEncoding.EncodeToString(data))
+	}
+	return out, nil
+}
+
+func (s *Service) resultImageBytes(ctx context.Context, account accounts.Account, result openaiweb.ImageResult) ([][]byte, error) {
+	items := make([][]byte, 0, len(result.B64JSON)+len(result.URLs))
+	for _, encoded := range result.B64JSON {
+		data, err := base64.StdEncoding.DecodeString(encoded)
+		if err != nil {
+			return nil, fmt.Errorf("decode b64_json image: %w", err)
+		}
+		items = append(items, data)
+	}
+	if len(result.URLs) == 0 {
+		if len(items) == 0 {
+			return nil, fmt.Errorf("upstream completed without generating images")
+		}
+		return items, nil
 	}
 	downloader, ok := s.backend.(imageDownloader)
 	if !ok {
-		return result
+		return nil, fmt.Errorf("image downloader is required for response_format=b64_json")
+	}
+	for _, remoteURL := range result.URLs {
+		data, err := downloader.DownloadImageFor(ctx, account, remoteURL)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, data)
+	}
+	return items, nil
+}
+
+func (s *Service) cacheResult(ctx context.Context, account accounts.Account, result openaiweb.ImageResult, baseURL string, outputFormat string) (openaiweb.ImageResult, error) {
+	if s.storage == nil {
+		return result, nil
+	}
+	if len(result.URLs) == 0 && len(result.B64JSON) == 0 {
+		return result, nil
 	}
 	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
-	urls := make([]string, 0, len(result.URLs))
+	urls := make([]string, 0, len(result.URLs)+len(result.B64JSON))
 	credentialInvalid := false
+	for _, encoded := range result.B64JSON {
+		data, err := base64.StdEncoding.DecodeString(encoded)
+		if err != nil {
+			log.Printf("image cache decode b64_json failed: %v", err)
+			continue
+		}
+		if outputFormat != "" {
+			data, err = convertImageDataFormat(data, outputFormat)
+			if err != nil {
+				log.Printf("image cache convert b64_json to %s failed: %v", outputFormat, err)
+				continue
+			}
+		}
+		item, err := s.storage.Save(data)
+		if err != nil {
+			log.Printf("image cache save failed: %v", err)
+			continue
+		}
+		urls = append(urls, imageURL(baseURL, item.Rel))
+	}
+	if len(result.URLs) == 0 {
+		result.URLs = urls
+		result.B64JSON = nil
+		return result, nil
+	}
+	downloader, ok := s.backend.(imageDownloader)
+	if !ok {
+		return result, nil
+	}
 	for _, remoteURL := range result.URLs {
 		if credentialInvalid {
 			urls = append(urls, remoteURL)
@@ -530,21 +693,81 @@ func (s *Service) cacheResult(ctx context.Context, account accounts.Account, res
 			urls = append(urls, remoteURL)
 			continue
 		}
+		if outputFormat != "" {
+			data, err = convertImageDataFormat(data, outputFormat)
+			if err != nil {
+				log.Printf("image cache convert download to %s failed: %v", outputFormat, err)
+				urls = append(urls, remoteURL)
+				continue
+			}
+		}
 		item, err := s.storage.Save(data)
 		if err != nil {
 			log.Printf("image cache save failed: %v", err)
 			urls = append(urls, remoteURL)
 			continue
 		}
-		encoded := url.PathEscape(item.Rel)
-		if baseURL == "" {
-			urls = append(urls, "/images/"+encoded)
-		} else {
-			urls = append(urls, baseURL+"/images/"+encoded)
-		}
+		urls = append(urls, imageURL(baseURL, item.Rel))
 	}
 	result.URLs = urls
-	return result
+	result.B64JSON = nil
+	return result, nil
+}
+
+func imageURL(baseURL, rel string) string {
+	encoded := url.PathEscape(rel)
+	if baseURL == "" {
+		return "/images/" + encoded
+	}
+	return strings.TrimRight(baseURL, "/") + "/images/" + encoded
+}
+
+func convertImageDataFormat(data []byte, outputFormat string) ([]byte, error) {
+	outputFormat, err := normalizeOutputFormat(outputFormat)
+	if err != nil {
+		return nil, err
+	}
+	if outputFormat == "" {
+		return data, nil
+	}
+	current := imageFormatFromMIMEType(imageMIMETypeFromBytes(data))
+	if current == outputFormat {
+		return data, nil
+	}
+	img, _, err := image.Decode(bytes.NewReader(data))
+	if err != nil {
+		return nil, fmt.Errorf("decode image for %s conversion: %w", outputFormat, err)
+	}
+	buffer := new(bytes.Buffer)
+	switch outputFormat {
+	case "png":
+		if err := png.Encode(buffer, img); err != nil {
+			return nil, fmt.Errorf("encode png: %w", err)
+		}
+	case "jpeg":
+		if err := jpeg.Encode(buffer, flattenForJPEG(img), &jpeg.Options{Quality: 95}); err != nil {
+			return nil, fmt.Errorf("encode jpeg: %w", err)
+		}
+	case "webp":
+		options := webp.DefaultOptions()
+		options.Quality = 95
+		options.Method = 4
+		options.AlphaQuality = 100
+		if err := webp.Encode(buffer, img, options); err != nil {
+			return nil, fmt.Errorf("encode webp: %w", err)
+		}
+	default:
+		return nil, fmt.Errorf("invalid output_format %q; supported values are png, jpeg, webp", outputFormat)
+	}
+	return buffer.Bytes(), nil
+}
+
+func flattenForJPEG(src image.Image) image.Image {
+	bounds := src.Bounds()
+	dst := image.NewRGBA(image.Rect(0, 0, bounds.Dx(), bounds.Dy()))
+	draw.Draw(dst, dst.Bounds(), &image.Uniform{C: color.White}, image.Point{}, draw.Src)
+	draw.Draw(dst, dst.Bounds(), src, bounds.Min, draw.Over)
+	return dst
 }
 
 // Cache downloads normally use short-lived external URLs. Only a token
@@ -594,13 +817,72 @@ func (s *Service) ListModels(ctx context.Context) ([]string, error) {
 func responseFromResult(result openaiweb.ImageResult) Response {
 	resp := Response{Created: time.Now().Unix(), AccountEmail: result.AccountEmail, ConversationID: result.ConversationID, BackendModel: result.BackendModel, Attempts: result.Attempts}
 	for _, url := range result.URLs {
-		resp.Data = append(resp.Data, Data{URL: url})
+		mimeType := imageMIMETypeFromURL(url)
+		resp.Data = append(resp.Data, Data{URL: url, MimeType: mimeType, Format: imageFormatFromMIMEType(mimeType)})
 	}
 	for _, b64 := range result.B64JSON {
-		resp.Data = append(resp.Data, Data{B64JSON: b64})
+		mimeType := imageMIMETypeFromBase64(b64)
+		resp.Data = append(resp.Data, Data{B64JSON: b64, MimeType: mimeType, Format: imageFormatFromMIMEType(mimeType)})
 	}
 	resp.ImageRoute = map[string]any{"backend_model": result.BackendModel, "image_route": "free_image2_fallback"}
 	return resp
+}
+
+func imageMIMETypeFromBase64(encoded string) string {
+	data, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		return ""
+	}
+	return imageMIMETypeFromBytes(data)
+}
+
+func imageMIMETypeFromBytes(data []byte) string {
+	switch {
+	case len(data) >= 12 && string(data[:4]) == "RIFF" && string(data[8:12]) == "WEBP":
+		return "image/webp"
+	case len(data) >= 8 && data[0] == 0x89 && string(data[1:4]) == "PNG" && data[4] == 0x0d && data[5] == 0x0a && data[6] == 0x1a && data[7] == 0x0a:
+		return "image/png"
+	case len(data) >= 3 && data[0] == 0xff && data[1] == 0xd8 && data[2] == 0xff:
+		return "image/jpeg"
+	case len(data) >= 6 && (string(data[:6]) == "GIF87a" || string(data[:6]) == "GIF89a"):
+		return "image/gif"
+	default:
+		return ""
+	}
+}
+
+func imageMIMETypeFromURL(raw string) string {
+	path := strings.ToLower(strings.TrimSpace(raw))
+	if parsed, err := url.Parse(raw); err == nil {
+		path = strings.ToLower(parsed.Path)
+	}
+	switch {
+	case strings.HasSuffix(path, ".png"):
+		return "image/png"
+	case strings.HasSuffix(path, ".jpg"), strings.HasSuffix(path, ".jpeg"):
+		return "image/jpeg"
+	case strings.HasSuffix(path, ".webp"):
+		return "image/webp"
+	case strings.HasSuffix(path, ".gif"):
+		return "image/gif"
+	default:
+		return ""
+	}
+}
+
+func imageFormatFromMIMEType(mimeType string) string {
+	switch strings.ToLower(strings.TrimSpace(mimeType)) {
+	case "image/png":
+		return "png"
+	case "image/jpeg":
+		return "jpeg"
+	case "image/webp":
+		return "webp"
+	case "image/gif":
+		return "gif"
+	default:
+		return ""
+	}
 }
 
 func (r Response) MarshalForOpenAI() map[string]any {

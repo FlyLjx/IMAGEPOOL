@@ -221,6 +221,42 @@ func TestStartImageGenerationParsesMultilineSSEEvent(t *testing.T) {
 	}
 }
 
+func TestStartImageGenerationDoesNotSendUnsupportedOutputFormatMetadata(t *testing.T) {
+	seenOutputFormat := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/backend-api/f/conversation" {
+			http.NotFound(w, r)
+			return
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Error(err)
+		}
+		if messages, _ := body["messages"].([]any); len(messages) > 0 {
+			if message, _ := messages[0].(map[string]any); message != nil {
+				if metadata, _ := message["metadata"].(map[string]any); metadata != nil {
+					_, seenOutputFormat = metadata["output_format"]
+				}
+			}
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"conversation_id\":\"conv-1\"}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer srv.Close()
+
+	cfg := config.Default()
+	cfg.ChatGPTBaseURL = srv.URL
+	client := NewClient(cfg, WithHTTPClient(srv.Client()))
+	_, _, _, err := client.startImageGenerationWithinBudget(context.Background(), accounts.Account{AccessToken: "token"}, "draw", "gpt-image-2", chatRequirements{}, "conduit", "trace", "parent", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if seenOutputFormat {
+		t.Fatal("ChatGPT Web conversation payload must not send output_format metadata")
+	}
+}
+
 func TestStartImageGenerationResumesIdleToolStream(t *testing.T) {
 	var resumeSeen atomic.Bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -699,7 +735,10 @@ func TestResolveConversationImageURLsUsesInitialReferenceBeforePolling(t *testin
 	var srv *httptest.Server
 	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/backend-api/files/file_00000000aaaaaaaaaaaaaaaaaaaaaaaa/download":
+		case "/backend-api/files/download/file_00000000aaaaaaaaaaaaaaaaaaaaaaaa":
+			if got := r.URL.Query().Get("conversation_id"); got != "conv-1" {
+				t.Errorf("conversation_id query=%q", got)
+			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"download_url": srv.URL + "/image.png"})
 		case "/image.png":
 			_, _ = w.Write([]byte("PNG"))
@@ -718,6 +757,30 @@ func TestResolveConversationImageURLsUsesInitialReferenceBeforePolling(t *testin
 	urls, err := client.resolveConversationImageURLs(context.Background(), accounts.Account{AccessToken: "token"}, "conv-1", []string{"file_00000000aaaaaaaaaaaaaaaaaaaaaaaa"}, nil, true, nil)
 	if err != nil || len(urls) != 1 || urls[0] != srv.URL+"/image.png" || conversationHits.Load() != 0 {
 		t.Fatalf("urls=%#v err=%v polls=%d", urls, err, conversationHits.Load())
+	}
+}
+
+func TestResolveImageURLsFallsBackToLegacyDownloadPath(t *testing.T) {
+	var officialHits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/backend-api/files/download/file_00000000aaaaaaaaaaaaaaaaaaaaaaaa":
+			officialHits.Add(1)
+			http.NotFound(w, r)
+		case "/backend-api/files/file_00000000aaaaaaaaaaaaaaaaaaaaaaaa/download":
+			_ = json.NewEncoder(w).Encode(map[string]any{"download_url": "https://example.com/image.png"})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	cfg := config.Default()
+	cfg.ChatGPTBaseURL = srv.URL
+	client := NewClient(cfg, WithHTTPClient(srv.Client()))
+	urls, err := client.resolveImageURLs(context.Background(), accounts.Account{AccessToken: "token"}, "conv-1", []string{"file_00000000aaaaaaaaaaaaaaaaaaaaaaaa"}, nil)
+	if err != nil || len(urls) != 1 || urls[0] != "https://example.com/image.png" || officialHits.Load() != 1 {
+		t.Fatalf("urls=%#v err=%v official_hits=%d", urls, err, officialHits.Load())
 	}
 }
 

@@ -1,10 +1,11 @@
 module imagepool
 
-go 1.24.1
+go 1.24.2
 
 require (
 	github.com/bogdanfinn/fhttp v0.6.8
 	github.com/bogdanfinn/tls-client v1.15.1
+	github.com/deepteams/webp v1.2.7
 	github.com/jackc/pgx/v5 v5.7.6
 	golang.org/x/net v0.48.0
 	golang.org/x/sys v0.39.0

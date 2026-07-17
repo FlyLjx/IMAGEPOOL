@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.1.25 - 2026-07-18
+
++ [新增] 图片接口支持 `output_format=png/jpeg/webp` 后端真实转码，`url` 与 `b64_json` 返回都会按请求格式输出。
++ [修复] ChatGPT Web 生图协议不再透传不支持的 `output_format` 元数据，避免格式参数影响上游生图语义。
++ [优化] 图片响应新增真实 `mime_type` 与 `format` 字段，前端展示 `b64_json` 时按实际 MIME 拼接 data URL。
++ [修复] 生成图下载优先使用 ChatGPT Web 当前 `/backend-api/files/download/{file_id}` 路径，并保留旧路径兜底。
+
 ## 0.1.24 - 2026-07-17
 
 + [修复] 任务队列页面改为读取 `/api/image-tasks/history` 持久化历史接口，完成任务从内存释放后仍可分页查看。
