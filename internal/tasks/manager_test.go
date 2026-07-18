@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -83,6 +84,12 @@ type blockingCollectionStore struct {
 	items       map[string]any
 }
 
+type pagedTaskStore struct {
+	items        map[string]Task
+	windowLimit  int
+	savedBatches []map[string]any
+}
+
 func (s *blockingCollectionStore) Load(context.Context, string, any) error {
 	return persistence.ErrNotFound
 }
@@ -124,6 +131,125 @@ func (s *blockingCollectionStore) DeleteCollectionItems(context.Context, string,
 	return nil
 }
 func (s *blockingCollectionStore) DeleteCollection(context.Context, string) error { return nil }
+
+func (s *pagedTaskStore) Load(context.Context, string, any) error {
+	return persistence.ErrNotFound
+}
+
+func (s *pagedTaskStore) Save(context.Context, string, any) error { return nil }
+func (s *pagedTaskStore) Delete(context.Context, string) error    { return nil }
+func (s *pagedTaskStore) Health(context.Context) (persistence.Health, error) {
+	return persistence.Health{}, nil
+}
+func (s *pagedTaskStore) Close() {}
+func (s *pagedTaskStore) LoadCollection(_ context.Context, _ string, dst any) error {
+	items := s.sorted()
+	if len(items) == 0 {
+		return persistence.ErrNotFound
+	}
+	raw, err := json.Marshal(items)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(raw, dst)
+}
+func (s *pagedTaskStore) LoadCollectionItem(_ context.Context, _ string, id string, dst any) error {
+	item, ok := s.items[id]
+	if !ok {
+		return persistence.ErrNotFound
+	}
+	raw, err := json.Marshal(item)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(raw, dst)
+}
+func (s *pagedTaskStore) LoadCollectionWindow(_ context.Context, _ string, _ persistence.CollectionWindow, dst any) error {
+	items := s.sorted()
+	if len(items) == 0 {
+		return persistence.ErrNotFound
+	}
+	limit := s.windowLimit
+	if limit <= 0 || limit > len(items) {
+		limit = len(items)
+	}
+	raw, err := json.Marshal(items[:limit])
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(raw, dst)
+}
+func (s *pagedTaskStore) LoadCollectionPage(_ context.Context, _ string, page persistence.CollectionPage, dst any) (int, error) {
+	items := s.sorted()
+	filtered := make([]Task, 0, len(items))
+	for _, task := range items {
+		if !page.AllowAll && task.OwnerID != page.OwnerID {
+			continue
+		}
+		filtered = append(filtered, task)
+	}
+	limit := page.Limit
+	if limit <= 0 {
+		limit = 50
+	}
+	offset := page.Offset
+	if offset < 0 {
+		offset = 0
+	}
+	end := offset + limit
+	if end > len(filtered) {
+		end = len(filtered)
+	}
+	pageItems := []Task{}
+	if offset < len(filtered) {
+		pageItems = filtered[offset:end]
+	}
+	raw, err := json.Marshal(pageItems)
+	if err != nil {
+		return 0, err
+	}
+	if err := json.Unmarshal(raw, dst); err != nil {
+		return 0, err
+	}
+	return len(filtered), nil
+}
+func (s *pagedTaskStore) SaveCollectionItems(_ context.Context, _ string, items map[string]any) error {
+	if s.items == nil {
+		s.items = map[string]Task{}
+	}
+	batch := make(map[string]any, len(items))
+	for id, item := range items {
+		batch[id] = item
+		raw, err := json.Marshal(item)
+		if err != nil {
+			return err
+		}
+		var task Task
+		if err := json.Unmarshal(raw, &task); err != nil {
+			return err
+		}
+		s.items[id] = task
+	}
+	s.savedBatches = append(s.savedBatches, batch)
+	return nil
+}
+func (s *pagedTaskStore) DeleteCollectionItems(context.Context, string, []string) error {
+	return nil
+}
+func (s *pagedTaskStore) DeleteCollection(context.Context, string) error { return nil }
+func (s *pagedTaskStore) sorted() []Task {
+	items := make([]Task, 0, len(s.items))
+	for _, task := range s.items {
+		items = append(items, task)
+	}
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].CreatedAt.Equal(items[j].CreatedAt) {
+			return items[i].ID > items[j].ID
+		}
+		return items[i].CreatedAt.After(items[j].CreatedAt)
+	})
+	return items
+}
 
 func (s queuedTaskSvc) Generate(ctx context.Context, req images.Request) (images.Response, error) {
 	if req.Progress != nil {
@@ -433,6 +559,47 @@ func TestTaskHistoryPaginationIsScopedToOwner(t *testing.T) {
 	}
 	if admin.Total != 3 {
 		t.Fatalf("admin page=%#v", admin)
+	}
+}
+
+func TestHistoryTotalUsesPersistedHistoryPlusUnflushedMemory(t *testing.T) {
+	now := time.Now()
+	store := &pagedTaskStore{windowLimit: 1, items: map[string]Task{
+		"old-a":    {ID: "old-a", OwnerID: "user-a", Mode: "generate", Status: StatusSucceeded, CreatedAt: now.Add(-3 * time.Hour), UpdatedAt: now.Add(-3 * time.Hour)},
+		"recent-a": {ID: "recent-a", OwnerID: "user-a", Mode: "generate", Status: StatusSucceeded, CreatedAt: now.Add(-time.Hour), UpdatedAt: now.Add(-time.Hour)},
+		"old-b":    {ID: "old-b", OwnerID: "user-b", Mode: "generate", Status: StatusSucceeded, CreatedAt: now.Add(-2 * time.Hour), UpdatedAt: now.Add(-2 * time.Hour)},
+	}}
+	m := NewManagerWithPersistence(taskSvc{}, store)
+	defer m.Close()
+
+	if got, err := m.HistoryTotalForOwner("", true); err != nil || got != 3 {
+		t.Fatalf("admin total=%d err=%v", got, err)
+	}
+	if got, err := m.HistoryTotalForOwner("user-a", false); err != nil || got != 2 {
+		t.Fatalf("user total=%d err=%v", got, err)
+	}
+
+	createdID := "memory-only"
+	m.mu.Lock()
+	m.tasks[createdID] = &Task{ID: createdID, OwnerID: "user-a", Mode: "generate", Status: StatusQueued, CreatedAt: now, UpdatedAt: now}
+	m.dirty[createdID] = struct{}{}
+	m.mu.Unlock()
+	if got, err := m.HistoryTotalForOwner("", true); err != nil || got != 4 {
+		t.Fatalf("admin total with unflushed memory=%d err=%v created=%s", got, err, createdID)
+	}
+	if got, err := m.HistoryTotalForOwner("user-a", false); err != nil || got != 3 {
+		t.Fatalf("user total with unflushed memory=%d err=%v", got, err)
+	}
+
+	m.persistPending()
+	if got, err := m.HistoryTotalForOwner("", true); err != nil || got != 4 {
+		t.Fatalf("admin total after flush=%d err=%v", got, err)
+	}
+	m.mu.RLock()
+	persisted := m.persisted[createdID]
+	m.mu.RUnlock()
+	if !persisted {
+		t.Fatalf("created task was not marked persisted: %s", createdID)
 	}
 }
 

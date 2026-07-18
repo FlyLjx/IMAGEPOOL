@@ -1360,6 +1360,10 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	for _, task := range taskList {
 		counts[task.Status]++
 	}
+	taskHistoryTotal := len(taskList)
+	if total, err := s.tasks.HistoryTotalForOwner("", true); err == nil {
+		taskHistoryTotal = total
+	}
 	accountSummary := s.accounts.Summary()
 	userKeys := s.auth.ListUserKeys()
 	enabledUsers := 0
@@ -1369,6 +1373,8 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	runtimeWindow := dashboardRuntimeWindow(r)
+	callSummary := s.metrics.Summary(runtimeWindow)
+	callSummary["today"] = s.metrics.TodaySummary()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"app":          cfg.AppName,
 		"version":      "go-image-pool",
@@ -1377,11 +1383,12 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		"storage":      map[string]any{"backend": storageStats, "health": mergeDashboardStorageHealth(storageHealth, accountSummary["total"], len(userKeys))},
 		"accounts":     accountSummary,
 		"auth_keys":    map[string]any{"users": len(userKeys), "enabled_users": enabledUsers},
-		"calls":        s.metrics.Summary(runtimeWindow),
+		"calls":        callSummary,
 		"tasks": map[string]any{
-			"total":     len(taskList),
-			"by_status": counts,
-			"recent":    firstTasks(taskList, 10),
+			"total":        taskHistoryTotal,
+			"memory_total": len(taskList),
+			"by_status":    counts,
+			"recent":       firstTasks(taskList, 10),
 		},
 		"models": cfg.Models,
 	})
@@ -1525,9 +1532,15 @@ func (s *Server) handleImageFile(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleImageThumbnail(w http.ResponseWriter, r *http.Request) {
-	r2 := r.Clone(r.Context())
-	r2.URL.Path = "/images/" + strings.TrimPrefix(r.URL.Path, "/image-thumbnails/")
-	s.handleImageFile(w, r2)
+	rel, _ := url.PathUnescape(strings.TrimPrefix(r.URL.Path, "/image-thumbnails/"))
+	reader, name, modTime, err := s.storage.Thumbnail(rel, 420)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "image/jpeg")
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	http.ServeContent(w, r, name, modTime, reader)
 }
 
 func (s *Server) handleImageDownload(w http.ResponseWriter, r *http.Request) {

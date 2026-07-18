@@ -6,6 +6,8 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"image"
+	"image/color"
+	"image/draw"
 	_ "image/gif"
 	"image/jpeg"
 	"image/png"
@@ -18,7 +20,11 @@ import (
 	"time"
 
 	"imagepool/internal/config"
+
+	_ "github.com/deepteams/webp"
 )
+
+const defaultThumbnailMaxDimension = 420
 
 type Service struct{ root string }
 
@@ -77,6 +83,9 @@ func (s *Service) List(baseURL, startDate, endDate string) ([]ImageItem, error) 
 	}
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil || d == nil || d.IsDir() {
+			if d != nil && d.IsDir() && d.Name() == ".thumbnails" {
+				return filepath.SkipDir
+			}
 			return err
 		}
 		if !isImageName(d.Name()) {
@@ -132,11 +141,66 @@ func (s *Service) Delete(paths []string) (int, error) {
 			name := f.Name()
 			f.Close()
 			if os.Remove(name) == nil {
+				_ = os.Remove(s.thumbnailPath(rel))
 				removed++
 			}
 		}
 	}
 	return removed, nil
+}
+
+func (s *Service) Thumbnail(rel string, maxDimension int) (*bytes.Reader, string, time.Time, error) {
+	if maxDimension <= 0 {
+		maxDimension = defaultThumbnailMaxDimension
+	}
+	if maxDimension > 960 {
+		maxDimension = 960
+	}
+	source, name, err := s.Open(rel)
+	if err != nil {
+		return nil, "", time.Time{}, err
+	}
+	sourceInfo, err := source.Stat()
+	if err != nil {
+		source.Close()
+		return nil, "", time.Time{}, err
+	}
+	sourceModTime := sourceInfo.ModTime()
+	cachePath := s.thumbnailPath(rel)
+	if cached, err := os.ReadFile(cachePath); err == nil {
+		if cacheInfo, statErr := os.Stat(cachePath); statErr == nil && !cacheInfo.ModTime().Before(sourceModTime) {
+			source.Close()
+			return bytes.NewReader(cached), filepath.Base(cachePath), cacheInfo.ModTime(), nil
+		}
+	}
+	img, _, err := image.Decode(source)
+	source.Close()
+	if err != nil {
+		return nil, "", time.Time{}, err
+	}
+	thumb := resizeForThumbnail(img, maxDimension)
+	buffer := new(bytes.Buffer)
+	if err := jpeg.Encode(buffer, thumb, &jpeg.Options{Quality: 78}); err != nil {
+		return nil, "", time.Time{}, err
+	}
+	if err := os.MkdirAll(filepath.Dir(cachePath), 0o755); err == nil {
+		tmp := cachePath + ".tmp"
+		if writeErr := os.WriteFile(tmp, buffer.Bytes(), 0o600); writeErr == nil {
+			_ = os.Rename(tmp, cachePath)
+			_ = os.Chtimes(cachePath, sourceModTime, sourceModTime)
+		} else {
+			_ = os.Remove(tmp)
+		}
+	}
+	return bytes.NewReader(buffer.Bytes()), filepath.Base(name) + ".thumbnail.jpg", sourceModTime, nil
+}
+
+func (s *Service) thumbnailPath(rel string) string {
+	safe, err := safeRel(rel)
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(filepath.Clean(s.root), ".thumbnails", filepath.FromSlash(safe)+".jpg")
 }
 
 func (s *Service) Zip(paths []string) (*bytes.Reader, error) {
@@ -226,6 +290,7 @@ func (s *Service) CleanupToFreeMB(targetMB int64) (removed int, freedBytes int64
 		if removeErr := os.Remove(path); removeErr != nil {
 			continue
 		}
+		_ = os.Remove(s.thumbnailPath(item.Rel))
 		removed++
 		freedBytes += item.Size
 		removedPaths = append(removedPaths, item.Rel)
@@ -317,6 +382,50 @@ func compressedImage(data []byte, extension string) ([]byte, bool) {
 		return nil, false
 	}
 	return buffer.Bytes(), true
+}
+
+func resizeForThumbnail(src image.Image, maxDimension int) image.Image {
+	bounds := src.Bounds()
+	width, height := bounds.Dx(), bounds.Dy()
+	if width <= 0 || height <= 0 {
+		return image.NewRGBA(image.Rect(0, 0, 1, 1))
+	}
+	if maxDimension <= 0 {
+		maxDimension = defaultThumbnailMaxDimension
+	}
+	dstWidth, dstHeight := width, height
+	if width > maxDimension || height > maxDimension {
+		if width >= height {
+			dstWidth = maxDimension
+			dstHeight = maxInt(1, height*maxDimension/width)
+		} else {
+			dstHeight = maxDimension
+			dstWidth = maxInt(1, width*maxDimension/height)
+		}
+	}
+	dst := image.NewRGBA(image.Rect(0, 0, dstWidth, dstHeight))
+	draw.Draw(dst, dst.Bounds(), image.NewUniform(color.White), image.Point{}, draw.Src)
+	for y := 0; y < dstHeight; y++ {
+		srcY := bounds.Min.Y + y*height/dstHeight
+		for x := 0; x < dstWidth; x++ {
+			srcX := bounds.Min.X + x*width/dstWidth
+			r, g, b, a := src.At(srcX, srcY).RGBA()
+			dst.SetRGBA(x, y, color.RGBA{
+				R: uint8((r + 0xffff - a) >> 8),
+				G: uint8((g + 0xffff - a) >> 8),
+				B: uint8((b + 0xffff - a) >> 8),
+				A: 0xff,
+			})
+		}
+	}
+	return dst
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func bytesToMB(value int64) float64 { return float64(max64(0, value)) / (1024 * 1024) }

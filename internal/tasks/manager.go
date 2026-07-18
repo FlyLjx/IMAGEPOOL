@@ -107,6 +107,7 @@ type Manager struct {
 	tasks           map[string]*Task
 	cancels         map[string]context.CancelFunc
 	dirty           map[string]struct{}
+	persisted       map[string]bool
 	wake            chan struct{}
 	stop            chan struct{}
 	done            chan struct{}
@@ -135,6 +136,7 @@ func newManager(service ImageService, state persistence.Store) *Manager {
 		tasks:        map[string]*Task{},
 		cancels:      map[string]context.CancelFunc{},
 		dirty:        map[string]struct{}{},
+		persisted:    map[string]bool{},
 		jobs:         make(chan queuedTask, asyncTaskQueueLimit),
 		dispatchStop: make(chan struct{}),
 		dispatchDone: make(chan struct{}),
@@ -495,6 +497,37 @@ func (m *Manager) HistoryForOwner(page, pageSize int, ownerID string, allowAll b
 	return result, nil
 }
 
+func (m *Manager) HistoryTotalForOwner(ownerID string, allowAll bool) (int, error) {
+	if m == nil {
+		return 0, nil
+	}
+	if pager, ok := m.items.(persistence.CollectionPageStore); ok {
+		var stored []Task
+		total, err := pager.LoadCollectionPage(context.Background(), taskCollection, persistence.CollectionPage{Limit: 1, OwnerID: ownerID, AllowAll: allowAll}, &stored)
+		if err != nil {
+			if !errors.Is(err, persistence.ErrNotFound) {
+				return len(m.ListForOwner(nil, ownerID, allowAll)), err
+			}
+			total = 0
+		}
+		m.mu.RLock()
+		for id, task := range m.tasks {
+			if task == nil {
+				continue
+			}
+			if !allowAll && task.OwnerID != ownerID {
+				continue
+			}
+			if !m.persisted[id] {
+				total++
+			}
+		}
+		m.mu.RUnlock()
+		return total, nil
+	}
+	return len(m.ListForOwner(nil, ownerID, allowAll)), nil
+}
+
 func normalizeHistoryPage(page, pageSize int) (int, int) {
 	if page <= 0 {
 		page = 1
@@ -625,6 +658,9 @@ func (m *Manager) load() {
 		}
 		if err := m.items.SaveCollectionItems(context.Background(), taskCollection, items); err == nil {
 			_ = m.state.Delete(context.Background(), taskCollection)
+			for id := range items {
+				m.persisted[id] = true
+			}
 			m.dirty = map[string]struct{}{}
 		}
 	}
@@ -649,6 +685,7 @@ func (m *Manager) loadTasks(stored []Task) {
 			m.dirty[task.ID] = struct{}{}
 		}
 		m.tasks[task.ID] = &task
+		m.persisted[task.ID] = true
 	}
 	m.pruneCompletedLocked(now)
 }
@@ -730,6 +767,20 @@ func (m *Manager) persistPending() {
 		err = m.state.Save(context.Background(), taskCollection, document)
 	}
 	if err == nil {
+		m.mu.Lock()
+		if m.persisted == nil {
+			m.persisted = map[string]bool{}
+		}
+		if m.items != nil {
+			for id := range collectionItems {
+				m.persisted[id] = true
+			}
+		} else {
+			for _, task := range document {
+				m.persisted[task.ID] = true
+			}
+		}
+		m.mu.Unlock()
 		return
 	}
 	m.mu.Lock()
@@ -944,6 +995,7 @@ func (m *Manager) pruneCompletedLocked(now time.Time) []string {
 	for id := range prune {
 		delete(m.tasks, id)
 		delete(m.cancels, id)
+		delete(m.persisted, id)
 		ids = append(ids, id)
 	}
 	sort.Strings(ids)

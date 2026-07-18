@@ -2,10 +2,14 @@ package httpapi
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image"
+	"image/color"
+	"image/png"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -1222,7 +1226,17 @@ func TestImageTagsAndThumbnailEndpoints(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(imagePath), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(imagePath, []byte("png"), 0o600); err != nil {
+	canvas := image.NewRGBA(image.Rect(0, 0, 120, 80))
+	for y := 0; y < 80; y++ {
+		for x := 0; x < 120; x++ {
+			canvas.SetRGBA(x, y, color.RGBA{R: uint8(x), G: uint8(y), B: 160, A: 255})
+		}
+	}
+	encoded := new(bytes.Buffer)
+	if err := png.Encode(encoded, canvas); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(imagePath, encoded.Bytes(), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	srv := httptest.NewServer(newTestServer(cfg))

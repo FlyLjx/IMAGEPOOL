@@ -87,6 +87,41 @@ func TestSummaryAggregatesLongRuntimeWindow(t *testing.T) {
 	}
 }
 
+func TestTodaySummaryUsesLocalDayAndExcludesRejectedFromFailureRate(t *testing.T) {
+	svc := NewService("")
+	now := time.Date(2026, 7, 14, 12, 0, 0, 0, time.Local)
+	svc.now = func() time.Time { return now }
+	svc.Record(Call{Time: now.Add(-13 * time.Hour), Endpoint: "/v1/images/generations", Model: "gpt-image-2", Status: "success"})
+	svc.Record(Call{Time: now.Add(-2 * time.Hour), Endpoint: "/v1/images/generations", Model: "gpt-image-2", Status: "success"})
+	svc.Record(Call{Time: now.Add(-time.Hour), Endpoint: "/v1/images/generations", Model: "gpt-image-2", Status: "failed", Error: "upstream failed"})
+	svc.Record(Call{Time: now.Add(-30 * time.Minute), Endpoint: "/v1/images/edits", Model: "gpt-image-2", Status: "failed", Error: "content policy violation: 非常抱歉，生成的图片可能违反了关于裸露、色情或情色内容的防护限制。"})
+	svc.Record(Call{Time: now.Add(-10 * time.Minute), Endpoint: "/v1/images/edits", Model: "gpt-image-2", Status: "canceled"})
+	svc.Record(Call{Time: now.Add(time.Minute), Endpoint: "/v1/images/generations", Model: "gpt-image-2", Status: "success"})
+
+	today := svc.TodaySummary()
+	if today["date"] != now.In(time.Local).Format("2006-01-02") || today["total"] != 4 || today["availability_total"] != 2 {
+		t.Fatalf("today=%#v", today)
+	}
+	if today["success_rate"] != float64(50) || today["error_rate"] != float64(50) {
+		t.Fatalf("today=%#v", today)
+	}
+	totals := today["totals"].(map[string]int)
+	if totals["success"] != 1 || totals["failed"] != 1 || totals["rejected"] != 1 || totals["canceled"] != 1 {
+		t.Fatalf("totals=%#v", totals)
+	}
+	byStatus := today["by_status"].(map[string]int)
+	if byStatus["failed"] != 1 || byStatus["rejected"] != 1 {
+		t.Fatalf("byStatus=%#v", byStatus)
+	}
+	byEndpoint := today["by_endpoint"].(map[string]int)
+	if byEndpoint["/v1/images/generations"] != 2 || byEndpoint["/v1/images/edits"] != 2 {
+		t.Fatalf("byEndpoint=%#v", byEndpoint)
+	}
+	if failed := today["recent_failed"].([]map[string]any); len(failed) != 1 || failed[0]["error"] != "upstream failed" {
+		t.Fatalf("recent_failed=%#v", failed)
+	}
+}
+
 func TestDelete(t *testing.T) {
 	svc := NewService("")
 	svc.Record(Call{ID: "a", Endpoint: "/v1/search", Status: "success"})

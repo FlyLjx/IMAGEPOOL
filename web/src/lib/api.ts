@@ -452,6 +452,40 @@ export type SystemLoad = {
   };
 };
 
+export type DashboardCallTotals = {
+  success: number;
+  failed: number;
+  canceled: number;
+  rejected: number;
+  running: number;
+  other: number;
+};
+
+export type DashboardRecentFailedCall = {
+  id?: string;
+  time?: string;
+  summary?: string;
+  endpoint?: string;
+  model?: string;
+  error?: string;
+  account_email?: string;
+};
+
+export type DashboardTodayCalls = {
+  date: string;
+  start_time: string;
+  end_time: string;
+  total: number;
+  availability_total?: number;
+  success_rate?: number;
+  error_rate?: number;
+  totals?: DashboardCallTotals;
+  by_status: Record<string, number>;
+  by_endpoint: Record<string, number>;
+  by_model: Record<string, number>;
+  recent_failed?: DashboardRecentFailedCall[];
+};
+
 export type DashboardSummary = {
   version: string;
   generated_at: string;
@@ -517,6 +551,8 @@ export type DashboardSummary = {
       totals: {
         success: number;
         failed: number;
+        canceled?: number;
+        rejected?: number;
         running: number;
         other: number;
       };
@@ -536,18 +572,12 @@ export type DashboardSummary = {
         value: number;
       }>;
     };
-    recent_failed: Array<{
-      id?: string;
-      time?: string;
-      summary?: string;
-      endpoint?: string;
-      model?: string;
-      error?: string;
-      account_email?: string;
-    }>;
+    today?: DashboardTodayCalls;
+    recent_failed: DashboardRecentFailedCall[];
   };
   tasks: {
     total: number;
+    memory_total?: number;
     by_status: Record<string, number>;
     by_mode: Record<string, number>;
     recent: ImageTask[];

@@ -291,6 +291,53 @@ func (s *Service) Summary(window time.Duration) map[string]any {
 	}
 }
 
+func (s *Service) TodaySummary() map[string]any {
+	now := s.now()
+	localNow := now.In(time.Local)
+	start := time.Date(localNow.Year(), localNow.Month(), localNow.Day(), 0, 0, 0, 0, localNow.Location())
+	byStatus := map[string]int{}
+	byEndpoint := map[string]int{}
+	byModel := map[string]int{}
+	totals := map[string]int{"success": 0, "failed": 0, "canceled": 0, "rejected": 0, "running": 0, "other": 0}
+	recentFailed := []map[string]any{}
+	for _, call := range s.List("", "", "") {
+		if call.Time.Before(start) || call.Time.After(now) {
+			continue
+		}
+		category := callCategory(call)
+		totals[category]++
+		byStatus[category]++
+		byEndpoint[call.Endpoint]++
+		if call.Model != "" {
+			byModel[call.Model]++
+		}
+		if category == "failed" && len(recentFailed) < 20 {
+			recentFailed = append(recentFailed, map[string]any{"id": call.ID, "time": call.Time, "summary": call.Summary, "endpoint": call.Endpoint, "model": call.Model, "error": call.Error})
+		}
+	}
+	total := totals["success"] + totals["failed"] + totals["canceled"] + totals["rejected"] + totals["running"] + totals["other"]
+	availabilityTotal := totals["success"] + totals["failed"]
+	successRate, errorRate := 0.0, 0.0
+	if availabilityTotal > 0 {
+		successRate = float64(totals["success"]) * 100 / float64(availabilityTotal)
+		errorRate = float64(totals["failed"]) * 100 / float64(availabilityTotal)
+	}
+	return map[string]any{
+		"date":               localNow.Format("2006-01-02"),
+		"start_time":         start,
+		"end_time":           now,
+		"total":              total,
+		"availability_total": availabilityTotal,
+		"success_rate":       successRate,
+		"error_rate":         errorRate,
+		"totals":             totals,
+		"by_status":          byStatus,
+		"by_endpoint":        byEndpoint,
+		"by_model":           byModel,
+		"recent_failed":      recentFailed,
+	}
+}
+
 // Stability returns a rolling view of completed API calls. It is intentionally
 // computed from the current time on every request so callers can poll it
 // continuously without waiting for a periodic aggregation job.

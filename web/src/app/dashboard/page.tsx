@@ -195,6 +195,35 @@ function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
 }
 
+function smoothLinePath(points: Array<{ x: number; y: number }>, minY: number, maxY: number) {
+  if (points.length === 0) return "";
+  if (points.length === 1) return `M ${points[0].x} ${points[0].y}`;
+  let path = `M ${points[0].x} ${points[0].y}`;
+  for (let index = 0; index < points.length - 1; index += 1) {
+    const previous = points[Math.max(0, index - 1)];
+    const current = points[index];
+    const next = points[index + 1];
+    const afterNext = points[Math.min(points.length - 1, index + 2)];
+    const cp1x = current.x + (next.x - previous.x) / 6;
+    const cp1y = clamp(current.y + (next.y - previous.y) / 6, minY, maxY);
+    const cp2x = next.x - (afterNext.x - current.x) / 6;
+    const cp2y = clamp(next.y - (afterNext.y - current.y) / 6, minY, maxY);
+    path += ` C ${cp1x} ${cp1y}, ${cp2x} ${cp2y}, ${next.x} ${next.y}`;
+  }
+  return path;
+}
+
+function smoothAreaPath(points: Array<{ x: number; y: number }>, baselineY: number, minY: number, maxY: number) {
+  if (points.length === 0) return "";
+  if (points.length === 1) {
+    return `M ${points[0].x} ${baselineY} L ${points[0].x} ${points[0].y} L ${points[0].x} ${baselineY} Z`;
+  }
+  const line = smoothLinePath(points, minY, maxY);
+  const first = points[0];
+  const last = points[points.length - 1];
+  return `${line} L ${last.x} ${baselineY} L ${first.x} ${baselineY} Z`;
+}
+
 function RuntimeTrendChart({ series, windowMinutes }: { series: RuntimeHealthData["series"]; windowMinutes: number }) {
   const points = series || [];
   const total = points.reduce((sum, item) => sum + Number(item.success || 0) + Number(item.failed || 0), 0);
@@ -209,13 +238,31 @@ function RuntimeTrendChart({ series, windowMinutes }: { series: RuntimeHealthDat
   const plotHeight = height - paddingTop - paddingBottom;
   const maxValue = Math.max(1, ...points.flatMap((item) => [Number(item.success || 0), Number(item.failed || 0)]));
   const bottomY = paddingTop + plotHeight;
-  const step = points.length <= 1 ? plotWidth : plotWidth / (points.length - 1);
-  const barWidth = points.length <= 60 ? clamp(step * 0.46, 5, 12) : clamp(step * 0.3, 1.2, 6);
   const xFor = (index: number) => paddingX + (points.length <= 1 ? plotWidth / 2 : (index / (points.length - 1)) * plotWidth);
   const yFor = (value: number) => paddingTop + (1 - value / maxValue) * plotHeight;
   const labelIndexes = Array.from(new Set([0, Math.floor((points.length - 1) / 2), points.length - 1])).filter((index) => index >= 0);
   const nonZeroBucketCount = points.filter((item) => Number(item.success || 0) > 0 || Number(item.failed || 0) > 0).length;
   const showValueLabels = points.length <= 60 && nonZeroBucketCount <= 14;
+  const showPointMarkers = points.length <= 360;
+  const chartPoints = points.map((item, index) => {
+    const success = Number(item.success || 0);
+    const failed = Number(item.failed || 0);
+    return {
+      item,
+      index,
+      x: xFor(index),
+      success,
+      failed,
+      successY: yFor(success),
+      failedY: yFor(failed),
+    };
+  });
+  const successLinePoints = chartPoints.map((item) => ({ x: item.x, y: item.successY }));
+  const failedLinePoints = chartPoints.map((item) => ({ x: item.x, y: item.failedY }));
+  const successPath = smoothLinePath(successLinePoints, paddingTop, bottomY);
+  const failedPath = smoothLinePath(failedLinePoints, paddingTop, bottomY);
+  const successAreaPath = smoothAreaPath(successLinePoints, bottomY, paddingTop, bottomY);
+  const failedAreaPath = smoothAreaPath(failedLinePoints, bottomY, paddingTop, bottomY);
 
   useEffect(() => {
     const element = chartContainerRef.current;
@@ -247,22 +294,22 @@ function RuntimeTrendChart({ series, windowMinutes }: { series: RuntimeHealthDat
       <div className="mb-2 flex flex-wrap items-center gap-4 text-xs">
         <span className="inline-flex items-center gap-1.5 text-slate-600"><i className="size-2 rounded-full bg-emerald-500" />成功 / 分钟</span>
         <span className="inline-flex items-center gap-1.5 text-slate-600"><i className="size-2 rounded-full bg-rose-500" />失败 / 分钟</span>
-        <span className="rounded-full bg-slate-100 px-2 py-0.5 font-medium text-slate-500">柱状视图</span>
+        <span className="rounded-full bg-slate-100 px-2 py-0.5 font-medium text-slate-500">曲线视图</span>
         <span className="ml-auto font-mono text-slate-400">max {maxValue}</span>
       </div>
       <div ref={chartContainerRef} className="w-full">
-        <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label="每分钟成功和失败调用柱状图" className="h-[255px] w-full overflow-visible">
+        <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label="每分钟成功和失败调用曲线图" className="h-[255px] w-full overflow-visible">
         <defs>
-          <linearGradient id="runtime-success-bar" x1="0" x2="0" y1="0" y2="1">
-            <stop offset="0%" stopColor="#34d399" />
-            <stop offset="100%" stopColor="#059669" />
+          <linearGradient id="runtime-success-area" x1="0" x2="0" y1="0" y2="1">
+            <stop offset="0%" stopColor="#10b981" stopOpacity="0.2" />
+            <stop offset="100%" stopColor="#10b981" stopOpacity="0.02" />
           </linearGradient>
-          <linearGradient id="runtime-failed-bar" x1="0" x2="0" y1="0" y2="1">
-            <stop offset="0%" stopColor="#fb7185" />
-            <stop offset="100%" stopColor="#e11d48" />
+          <linearGradient id="runtime-failed-area" x1="0" x2="0" y1="0" y2="1">
+            <stop offset="0%" stopColor="#f43f5e" stopOpacity="0.18" />
+            <stop offset="100%" stopColor="#f43f5e" stopOpacity="0.015" />
           </linearGradient>
-          <filter id="runtime-bar-soft-shadow" x="-20%" y="-20%" width="140%" height="150%">
-            <feDropShadow dx="0" dy="5" stdDeviation="4" floodColor="#0f172a" floodOpacity="0.12" />
+          <filter id="runtime-line-soft-shadow" x="-20%" y="-20%" width="140%" height="150%">
+            <feDropShadow dx="0" dy="5" stdDeviation="4" floodColor="#0f172a" floodOpacity="0.08" />
           </filter>
         </defs>
         <rect x={paddingX} y={paddingTop} width={plotWidth} height={plotHeight} rx="12" fill="#f8fafc" />
@@ -276,38 +323,32 @@ function RuntimeTrendChart({ series, windowMinutes }: { series: RuntimeHealthDat
             </g>
           );
         })}
-        {points.map((item, index) => {
-          const success = Number(item.success || 0);
-          const failed = Number(item.failed || 0);
-          if (!success && !failed) return null;
-
-          const centerX = xFor(index);
-          const hasBoth = Boolean(success && failed);
-          const successX = centerX - (hasBoth ? barWidth + 1 : barWidth / 2);
-          const failedX = centerX + (hasBoth ? 1 : -barWidth / 2);
-          const successHeight = Math.max(6, bottomY - yFor(success));
-          const failedHeight = Math.max(6, bottomY - yFor(failed));
-          const successTopY = bottomY - successHeight;
-          const failedTopY = bottomY - failedHeight;
-
+        <path d={successAreaPath} fill="url(#runtime-success-area)" />
+        <path d={failedAreaPath} fill="url(#runtime-failed-area)" />
+        <path d={successPath} fill="none" stroke="#10b981" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" filter="url(#runtime-line-soft-shadow)" />
+        <path d={failedPath} fill="none" stroke="#f43f5e" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" filter="url(#runtime-line-soft-shadow)" />
+        {showPointMarkers ? chartPoints.map((point) => {
+          const hasBoth = Boolean(point.success && point.failed && Math.abs(point.successY - point.failedY) < 14);
+          const failedLabelY = hasBoth && point.failedY + 16 < bottomY ? point.failedY + 16 : point.failedY - 8;
+          if (!point.success && !point.failed) return null;
           return (
-            <g key={`${item.time}-${index}`} filter="url(#runtime-bar-soft-shadow)">
-              <title>{`${item.label || item.time}：成功 ${success}，失败 ${failed}`}</title>
-              {success ? (
+            <g key={`${point.item.time}-${point.index}`}>
+              <title>{`${point.item.label || point.item.time}：成功 ${point.success}，失败 ${point.failed}`}</title>
+              {point.success ? (
                 <>
-                  <rect x={successX} y={successTopY} width={barWidth} height={successHeight} rx={Math.min(barWidth / 2, 3)} fill="url(#runtime-success-bar)" />
-                  {showValueLabels ? <text x={successX + barWidth / 2} y={successTopY - 7} textAnchor="middle" className="fill-emerald-600 text-[10px] font-semibold">{success}</text> : null}
+                  <circle cx={point.x} cy={point.successY} r="4" fill="#10b981" stroke="#ffffff" strokeWidth="2" />
+                  {showValueLabels ? <text x={point.x} y={point.successY - 8} textAnchor="middle" className="fill-emerald-600 text-[10px] font-semibold">{point.success}</text> : null}
                 </>
               ) : null}
-              {failed ? (
+              {point.failed ? (
                 <>
-                  <rect x={failedX} y={failedTopY} width={barWidth} height={failedHeight} rx={Math.min(barWidth / 2, 3)} fill="url(#runtime-failed-bar)" />
-                  {showValueLabels ? <text x={failedX + barWidth / 2} y={failedTopY - 7} textAnchor="middle" className="fill-rose-500 text-[10px] font-semibold">{failed}</text> : null}
+                  <circle cx={point.x} cy={point.failedY} r="4" fill="#f43f5e" stroke="#ffffff" strokeWidth="2" />
+                  {showValueLabels ? <text x={point.x} y={failedLabelY} textAnchor="middle" className="fill-rose-500 text-[10px] font-semibold">{point.failed}</text> : null}
                 </>
               ) : null}
             </g>
           );
-        })}
+        }) : null}
         {labelIndexes.map((index) => (
           <text key={index} x={xFor(index)} y={height - 16} textAnchor={index === 0 ? "start" : index === points.length - 1 ? "end" : "middle"} className="fill-slate-400 text-[11px]">
             {points[index]?.label || ""}
@@ -740,11 +781,17 @@ function DashboardContent() {
   }
 
   const totalAccounts = data.accounts.total;
-  const totalCalls = data.calls.total;
-  const failedCalls = data.calls.by_status.failed || 0;
+  const todayCalls = data.calls.today;
+  const totalCalls = todayCalls?.total ?? 0;
+  const todayTotals = todayCalls?.totals;
+  const failedCalls = todayTotals?.failed ?? todayCalls?.by_status.failed ?? 0;
+  const successCalls = todayTotals?.success ?? Math.max(0, totalCalls - failedCalls);
+  const availabilityCalls = todayCalls?.availability_total ?? successCalls + failedCalls;
   const runningTasks = (data.tasks.by_status.running || 0) + (data.tasks.by_status.queued || 0);
   const storageHealthy = data.storage.health.status === "healthy";
-  const callSuccessPercent = percent(totalCalls - failedCalls, totalCalls);
+  const callSuccessPercent = availabilityCalls > 0 ? percent(successCalls, availabilityCalls) : 100;
+  const todayEndpointEntries = todayCalls?.by_endpoint ?? {};
+  const todayModelEntries = todayCalls?.by_model ?? {};
 
   return (
     <div className="dashboard-console">
@@ -798,10 +845,10 @@ function DashboardContent() {
 
       <section className="grid gap-4 xl:grid-cols-3">
         <Card title="今日接口分布">
-          <EntryBars items={sortedEntries(data.calls.by_endpoint)} />
+          <EntryBars items={sortedEntries(todayEndpointEntries)} />
         </Card>
-        <Card title="模型使用">
-          <EntryBars items={sortedEntries(data.calls.by_model)} />
+        <Card title="今日模型使用">
+          <EntryBars items={sortedEntries(todayModelEntries)} />
         </Card>
         <Card title="账号类型">
           <EntryBars items={sortedEntries(data.accounts.by_type)} />
