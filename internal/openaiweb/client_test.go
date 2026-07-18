@@ -35,19 +35,10 @@ func TestExtractConversationAndImageReferences(t *testing.T) {
 	}
 }
 
-func TestImagePromptForWebStrengthensEditAndSize(t *testing.T) {
+func TestImagePromptForWebKeepsOriginalEditPrompt(t *testing.T) {
 	got := imagePromptForWeb("把背景改成海边", true, "1536x864", "high")
-	for _, want := range []string{
-		"图生图编辑指令",
-		"最终图片必须体现文字编辑指令",
-		"用户编辑指令：\n把背景改成海边",
-		"尺寸参数 1536x864",
-		"画面比例约 16:9",
-		"高质量",
-	} {
-		if !strings.Contains(got, want) {
-			t.Fatalf("prompt missing %q:\n%s", want, got)
-		}
+	if got != "把背景改成海边" {
+		t.Fatalf("prompt=%q", got)
 	}
 }
 

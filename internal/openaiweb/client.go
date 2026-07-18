@@ -379,72 +379,7 @@ func imageAttemptError(parent, generationCtx context.Context, err error) error {
 }
 
 func imagePromptForWeb(prompt string, edit bool, size, quality string) string {
-	prompt = strings.TrimSpace(prompt)
-	var sections []string
-	if edit {
-		sections = append(sections,
-			"请严格执行下面的图生图编辑指令。参考图只作为视觉素材、人物/物体、构图或风格依据；最终图片必须体现文字编辑指令，不要只是复刻参考图，也不要忽略文字要求。",
-			"用户编辑指令：\n"+prompt,
-		)
-	} else {
-		sections = append(sections, prompt)
-	}
-	if hint := imageSizePromptHint(size); hint != "" {
-		sections = append(sections, hint)
-	}
-	if hint := imageQualityPromptHint(quality); hint != "" {
-		sections = append(sections, hint)
-	}
-	return strings.Join(sections, "\n\n")
-}
-
-func imageSizePromptHint(size string) string {
-	size = strings.ToLower(strings.TrimSpace(size))
-	if size == "" || size == "auto" {
-		return ""
-	}
-	parts := strings.Split(size, "x")
-	if len(parts) != 2 {
-		return "输出画幅要求：按请求的 size 参数 " + size + " 构图。"
-	}
-	width, widthErr := strconv.Atoi(strings.TrimSpace(parts[0]))
-	height, heightErr := strconv.Atoi(strings.TrimSpace(parts[1]))
-	if widthErr != nil || heightErr != nil || width <= 0 || height <= 0 {
-		return "输出画幅要求：按请求的 size 参数 " + size + " 构图。"
-	}
-	orientation := "方图"
-	if width > height {
-		orientation = "横版"
-	} else if height > width {
-		orientation = "竖版"
-	}
-	divisor := gcd(width, height)
-	return fmt.Sprintf("输出画幅要求：%s，尺寸参数 %dx%d，画面比例约 %d:%d，请按这个画幅构图。", orientation, width, height, width/divisor, height/divisor)
-}
-
-func imageQualityPromptHint(quality string) string {
-	switch strings.ToLower(strings.TrimSpace(quality)) {
-	case "high", "hd":
-		return "输出质量要求：高质量、细节清晰、质感完整，避免模糊、低清晰度或草稿感。"
-	default:
-		return ""
-	}
-}
-
-func gcd(a, b int) int {
-	if a < 0 {
-		a = -a
-	}
-	if b < 0 {
-		b = -b
-	}
-	for b != 0 {
-		a, b = b, a%b
-	}
-	if a == 0 {
-		return 1
-	}
-	return a
+	return strings.TrimSpace(prompt)
 }
 
 // imageAttemptContext contains every network phase for one account. Setup is
