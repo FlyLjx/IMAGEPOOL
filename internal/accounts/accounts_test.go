@@ -928,3 +928,42 @@ func TestEnsureBrowserIdentityPersistsStableValues(t *testing.T) {
 		t.Fatalf("loaded=%#v found=%v", loaded, found)
 	}
 }
+
+func TestImageDispatchStatsCountsLeasesCoolingAndDeadAccounts(t *testing.T) {
+	now := time.Date(2026, time.July, 19, 2, 0, 0, 0, time.UTC)
+	store := NewStore([]Account{
+		{Email: "idle@example.com", AccessToken: "idle", Status: "正常", Quota: 3, ImageOK: 3, ImageFailures: 1},
+		{Email: "leased@example.com", AccessToken: "leased", Status: "正常", Quota: 2},
+		{Email: "cool@example.com", AccessToken: "cool", Status: "正常", Quota: 4, Extra: map[string]any{}},
+		{Email: "invalid@example.com", AccessToken: "invalid", Status: StatusCredentialInvalid},
+		{Email: "abnormal@example.com", AccessToken: "abnormal", Status: "异常"},
+		{Email: "limited@example.com", AccessToken: "limited", Status: "限流"},
+		{Email: "disabled@example.com", AccessToken: "disabled", Status: "正常", Disabled: true},
+	}, "")
+	store.now = func() time.Time { return now }
+
+	leased, err := store.AcquireAccountForImage(context.Background(), "leased", nil)
+	if err != nil || leased.AccessToken != "leased" {
+		t.Fatalf("leased=%#v err=%v", leased, err)
+	}
+	if err := store.MarkImageUpstreamFailure("cool", errors.New("upstream 502")); err != nil {
+		t.Fatal(err)
+	}
+
+	stats := store.ImageDispatchStats()
+	if stats.Total != 7 || stats.Usable != 3 || stats.Dispatchable != 2 || stats.Idle != 1 || stats.Leased != 1 || stats.Cooling != 1 {
+		t.Fatalf("dispatch stats=%#v", stats)
+	}
+	if stats.Dead != 2 || stats.Invalid != 1 || stats.Abnormal != 1 || stats.Limited != 1 || stats.Disabled != 1 {
+		t.Fatalf("status stats=%#v", stats)
+	}
+	if stats.KnownRemainingQuota != 9 || stats.KnownQuotaAccounts != 3 {
+		t.Fatalf("quota stats=%#v", stats)
+	}
+	if stats.DeadRate != 28.57 || stats.CoolingRate != 33.33 || stats.HistoricalFailureRate == 0 {
+		t.Fatalf("rates=%#v", stats)
+	}
+	if stats.NextCooldownEndsAt == nil || !stats.NextCooldownEndsAt.After(now) {
+		t.Fatalf("next cooldown=%v", stats.NextCooldownEndsAt)
+	}
+}

@@ -584,6 +584,98 @@ export type DashboardSummary = {
   };
 };
 
+export type ImagePoolCapacity = {
+  generated_at: string;
+  tasks: {
+    queued: number;
+    running: number;
+    pending: number;
+    oldest_queued_secs: number;
+    oldest_running_secs: number;
+    average_running_secs: number;
+    memory_task_total: number;
+  };
+  recent_60_tasks: {
+    limit: number;
+    total: number;
+    availability_total: number;
+    success: number;
+    failed: number;
+    rejected: number;
+    canceled: number;
+    other: number;
+    success_rate: number;
+    failure_rate: number;
+    average_duration_ms: number;
+    average_duration_secs: number;
+    average_success_duration_ms: number;
+    average_success_duration_secs: number;
+    average_failure_duration_ms: number;
+    average_failure_duration_secs: number;
+    duration_samples: number;
+    success_duration_samples: number;
+    failure_duration_samples: number;
+    arrival_samples: number;
+    arrival_span_secs: number;
+    arrival_rate_per_min: number;
+  };
+  accounts: {
+    total: number;
+    usable: number;
+    dispatchable: number;
+    idle: number;
+    leased: number;
+    cooling: number;
+    limited: number;
+    invalid: number;
+    recovering: number;
+    abnormal: number;
+    disabled: number;
+    dead: number;
+    known_remaining_quota: number;
+    known_quota_accounts: number;
+    unknown_quota_usable: number;
+    total_image_success: number;
+    total_image_failures: number;
+    historical_success_rate: number;
+    historical_failure_rate: number;
+    dead_rate: number;
+    unavailable_rate: number;
+    cooling_rate: number;
+    dispatchable_rate: number;
+    next_cooldown_ends_at?: string;
+    average_known_remaining_quota: number;
+  };
+  factors: {
+    observed_average_secs: number;
+    drain_window_secs: number;
+    success_probability: number;
+    retry_multiplier: number;
+    recent_failure_rate: number;
+    historical_account_failure_rate: number;
+    dead_account_rate: number;
+    cooling_rate: number;
+    pressure_ratio: number;
+    dynamic_reserve_ratio: number;
+    registration_adjustment_factor: number;
+  };
+  estimate: {
+    required_by_current_parallel: number;
+    required_by_recent_throughput: number;
+    required_by_queue_drain: number;
+    required_by_quota: number;
+    recommended_required_usable_accounts: number;
+    current_effective_accounts: number;
+    recommended_add_usable_accounts: number;
+    recommended_register_accounts: number;
+    expected_attempts_for_pending_tasks: number;
+    estimated_quota_capacity: number;
+    average_quota_per_usable_account: number;
+    status: "idle" | "enough" | "saturated" | "shortage" | string;
+    message: string;
+  };
+};
+
 export async function login(authKey: string) {
   const normalizedAuthKey = String(authKey || "").trim();
   return httpRequest<LoginResponse>("/auth/login", {
@@ -617,6 +709,10 @@ export async function fetchDashboard(runtimeWindowMinutes = 60) {
 
 export async function fetchSystemLoad() {
   return httpRequest<SystemLoad>("/api/system/load");
+}
+
+export async function fetchImagePoolCapacity(limit = 60) {
+  return httpRequest<ImagePoolCapacity>(`/api/image-pool/capacity?limit=${encodeURIComponent(String(limit))}`);
 }
 
 export async function debugChatGPTWeb(payload: ChatGPTWebDebugPayload) {

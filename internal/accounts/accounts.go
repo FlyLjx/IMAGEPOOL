@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -276,6 +277,10 @@ func maxFloat(a, b float64) float64 {
 	return b
 }
 
+func round2(value float64) float64 {
+	return math.Round(value*100) / 100
+}
+
 type Store struct {
 	mu                         sync.RWMutex
 	persist                    sync.Mutex
@@ -294,6 +299,34 @@ type Store struct {
 	stop                       chan struct{}
 	done                       chan struct{}
 	close                      sync.Once
+}
+
+type ImageDispatchStats struct {
+	Total                      int        `json:"total"`
+	Usable                     int        `json:"usable"`
+	Dispatchable               int        `json:"dispatchable"`
+	Idle                       int        `json:"idle"`
+	Leased                     int        `json:"leased"`
+	Cooling                    int        `json:"cooling"`
+	Limited                    int        `json:"limited"`
+	Invalid                    int        `json:"invalid"`
+	Recovering                 int        `json:"recovering"`
+	Abnormal                   int        `json:"abnormal"`
+	Disabled                   int        `json:"disabled"`
+	Dead                       int        `json:"dead"`
+	KnownRemainingQuota        int        `json:"known_remaining_quota"`
+	KnownQuotaAccounts         int        `json:"known_quota_accounts"`
+	UnknownQuotaUsable         int        `json:"unknown_quota_usable"`
+	TotalImageSuccess          int        `json:"total_image_success"`
+	TotalImageFailures         int        `json:"total_image_failures"`
+	HistoricalSuccessRate      float64    `json:"historical_success_rate"`
+	HistoricalFailureRate      float64    `json:"historical_failure_rate"`
+	DeadRate                   float64    `json:"dead_rate"`
+	UnavailableRate            float64    `json:"unavailable_rate"`
+	CoolingRate                float64    `json:"cooling_rate"`
+	DispatchableRate           float64    `json:"dispatchable_rate"`
+	NextCooldownEndsAt         *time.Time `json:"next_cooldown_ends_at,omitempty"`
+	AverageKnownRemainingQuota float64    `json:"average_known_remaining_quota"`
 }
 
 type imageWaiter struct {
@@ -459,6 +492,89 @@ func (s *Store) Summary() map[string]any {
 		"unlimited_quota_count": 0, "total_success": sumImageOK(list), "total_fail": sumImageFailures(list),
 		"by_type": byType, "by_error_type": map[string]int{}, "proxy_stats": map[string]any{"accounts": 0, "success": 0, "fail": 0, "cooling": 0, "by_error_type": map[string]int{}},
 	}
+}
+
+func (s *Store) ImageDispatchStats() ImageDispatchStats {
+	if s == nil {
+		return ImageDispatchStats{}
+	}
+	now := s.now()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	stats := ImageDispatchStats{Total: len(s.accounts)}
+	for _, account := range s.accounts {
+		stats.TotalImageSuccess += max(0, account.ImageOK)
+		stats.TotalImageFailures += max(0, account.ImageFailures)
+		token := strings.TrimSpace(account.AccessToken)
+		status := strings.TrimSpace(account.Status)
+		disabled := account.Disabled || isStatus(status, "disabled", "禁用")
+		recovering := isStatus(status, StatusCredentialRecovery)
+		invalid := token == "" || isStatus(status, "invalid", "token_revoked", "token_invalidated", StatusCredentialInvalid)
+		abnormal := isStatus(status, "abnormal", "异常")
+		limited := isStatus(status, "rate_limited", "limited", "no_quota", "限流")
+		switch {
+		case disabled:
+			stats.Disabled++
+			continue
+		case recovering:
+			stats.Recovering++
+			continue
+		case invalid:
+			stats.Invalid++
+			stats.Dead++
+			continue
+		case abnormal:
+			stats.Abnormal++
+			stats.Dead++
+			continue
+		case limited:
+			stats.Limited++
+			continue
+		}
+		if !usable(account) {
+			stats.Abnormal++
+			stats.Dead++
+			continue
+		}
+		stats.Usable++
+		if account.ImageQuotaUnknown {
+			stats.UnknownQuotaUsable++
+		} else {
+			stats.KnownQuotaAccounts++
+			stats.KnownRemainingQuota += max(0, account.Quota)
+		}
+		if until := imageCooldownUntil(account); until.After(now) {
+			stats.Cooling++
+			if stats.NextCooldownEndsAt == nil || until.Before(*stats.NextCooldownEndsAt) {
+				copied := until
+				stats.NextCooldownEndsAt = &copied
+			}
+			continue
+		}
+		stats.Dispatchable++
+		if _, occupied := s.imageLeases[token]; occupied {
+			stats.Leased++
+		} else {
+			stats.Idle++
+		}
+	}
+	if stats.Total > 0 {
+		stats.DeadRate = round2(float64(stats.Dead) * 100 / float64(stats.Total))
+		unavailable := stats.Total - stats.Dispatchable
+		stats.UnavailableRate = round2(float64(unavailable) * 100 / float64(stats.Total))
+		stats.DispatchableRate = round2(float64(stats.Dispatchable) * 100 / float64(stats.Total))
+	}
+	if stats.Usable > 0 {
+		stats.CoolingRate = round2(float64(stats.Cooling) * 100 / float64(stats.Usable))
+	}
+	if attempts := stats.TotalImageSuccess + stats.TotalImageFailures; attempts > 0 {
+		stats.HistoricalSuccessRate = round2(float64(stats.TotalImageSuccess) * 100 / float64(attempts))
+		stats.HistoricalFailureRate = round2(float64(stats.TotalImageFailures) * 100 / float64(attempts))
+	}
+	if stats.KnownQuotaAccounts > 0 {
+		stats.AverageKnownRemainingQuota = round2(float64(stats.KnownRemainingQuota) / float64(stats.KnownQuotaAccounts))
+	}
+	return stats
 }
 
 func (s *Store) Add(items []Account) error {

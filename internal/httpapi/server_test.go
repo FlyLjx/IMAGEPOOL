@@ -1175,6 +1175,74 @@ func TestSystemLoadEndpointIsAuthenticated(t *testing.T) {
 	}
 }
 
+func TestImagePoolCapacityEndpointReturnsDynamicRecommendation(t *testing.T) {
+	srv := httptest.NewServer(testServer(t))
+	defer srv.Close()
+
+	request, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/image-pool/capacity", nil)
+	request.Header.Set("Authorization", "Bearer k")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("status=%d body=%s", response.StatusCode, body)
+	}
+	var payload imagePoolCapacityResponse
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Accounts.Total == 0 || payload.Factors.ObservedAverageSecs <= 0 || payload.Estimate.Status == "" {
+		t.Fatalf("capacity payload=%#v", payload)
+	}
+}
+
+func TestImagePoolCapacityEstimateAdjustsRegistrationForDeadRate(t *testing.T) {
+	cfg := config.Default()
+	pressure := imagePoolTaskPressure{Queued: 9, Running: 1, Pending: 10}
+	recent := imagePoolRecentTaskStats{
+		Limit:                      60,
+		Total:                      10,
+		AvailabilityTotal:          10,
+		Success:                    8,
+		Failed:                     2,
+		SuccessRate:                80,
+		FailureRate:                20,
+		AverageSuccessDurationSecs: 60,
+		ArrivalSamples:             10,
+		ArrivalSpanSecs:            120,
+		ArrivalRatePerMin:          5,
+	}
+	accountStats := accounts.ImageDispatchStats{
+		Total:                 10,
+		Usable:                2,
+		Dispatchable:          2,
+		Idle:                  1,
+		Leased:                1,
+		Dead:                  5,
+		DeadRate:              50,
+		KnownRemainingQuota:   2,
+		KnownQuotaAccounts:    2,
+		TotalImageSuccess:     16,
+		TotalImageFailures:    4,
+		HistoricalSuccessRate: 80,
+		HistoricalFailureRate: 20,
+	}
+
+	factors, estimate := estimateImagePoolCapacity(cfg, pressure, recent, accountStats)
+	if estimate.RecommendedAddUsableAccounts <= 0 {
+		t.Fatalf("expected shortage estimate=%#v factors=%#v", estimate, factors)
+	}
+	if estimate.RecommendedRegisterAccounts <= estimate.RecommendedAddUsableAccounts {
+		t.Fatalf("dead rate should inflate registration target estimate=%#v factors=%#v", estimate, factors)
+	}
+	if factors.DeadAccountRate != 50 || factors.RegistrationAdjustmentFactor <= 1 {
+		t.Fatalf("dead-rate factors=%#v", factors)
+	}
+}
+
 func TestDashboardSupportsRuntimeWindow(t *testing.T) {
 	srv := httptest.NewServer(testServer(t))
 	defer srv.Close()

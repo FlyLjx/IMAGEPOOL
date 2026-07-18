@@ -263,6 +263,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleTaskEdit(w, r)
 	case strings.HasPrefix(r.URL.Path, "/api/image-tasks/"):
 		s.handleTaskItem(w, r)
+	case r.Method == http.MethodGet && r.URL.Path == "/api/image-pool/capacity":
+		s.handleImagePoolCapacity(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/api/accounts/recovery-logs":
 		s.handleAccountRecoveryLogs(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/api/accounts":
