@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 0.1.31 - 2026-07-19
+
++ [修复] 在线更新状态会识别固定 Docker 镜像 tag 部署，避免在 `IMAGE_POOL_IMAGE_TAG=0.x.x` 时误提示已启动升级；部署说明明确内置更新需使用 `latest` 模式。
++ [修复] 前端版本弹窗在固定 tag 部署时显示更新限制提示并禁用“立即升级”，避免用户误以为 Watchtower 已经切到新版本。
+
+## 0.1.30 - 2026-07-19
+
++ [修复] `/v1/images/edits` 图生图接口兼容 OpenAI/new-api 常见参考图字段：`image[]`、`images[]`、`image[0]`、`images[0]`、`image_url`、`image_urls`、`referenceImages`、`reference_image`、`reference_images`、`input_image` 和 `input_images`。
++ [优化] 图生图 JSON 参考图解析支持字符串、数组、`url/image_url` 对象、`b64_json/base64`，减少“图片编辑缺少参考图”的误报。
++ [新增] 号池容量评估新增突发并发保障配置 `image_capacity_burst_parallel`，默认按 50 并发估算建议补号数量。
+
 ## 0.1.29 - 2026-07-19
 
 + [修复] 版本检测改为前端请求后端 `/api/system/latest-version` 代理接口，后端并发查询 GitHub Release、GitHub Tags 与 jsDelivr，避免浏览器直连发布源失败导致“获取最新版本信息失败”。
@@ -209,3 +220,5 @@
 + [新增] 前端版本号支持点击查看版本更新弹窗，展示当前版本、最新版本和更新日志。
 + [优化] 优化注册机效率，成功率大幅提高。
 + [优化] 优化生图页面配置选项。
+
+

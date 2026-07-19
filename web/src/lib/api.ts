@@ -290,6 +290,10 @@ export type SystemUpdateStatus = {
   enabled: boolean;
   updating: boolean;
   target_version?: string;
+  image?: string;
+  image_tag?: string;
+  update_mode?: "disabled" | "watchtower" | "watchtower_latest" | "pinned" | string;
+  warning?: string;
   last_error?: string;
 };
 

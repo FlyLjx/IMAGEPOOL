@@ -43,6 +43,8 @@ services:
     environment:
       DATABASE_URL: postgresql://imagepool:imagepool@postgres:5432/imagepool?sslmode=disable
       TZ: Asia/Shanghai
+      IMAGE_POOL_IMAGE: ${IMAGE_POOL_IMAGE:-ghcr.io/flyljx/imagepool}
+      IMAGE_POOL_IMAGE_TAG: ${IMAGE_POOL_IMAGE_TAG:-latest}
       IMAGE_POOL_UPDATE_URL: http://image-pool-updater:8080/v1/update
       IMAGE_POOL_UPDATE_TOKEN: ${IMAGE_POOL_UPDATE_TOKEN:-image-pool-update-local-token}
     labels:

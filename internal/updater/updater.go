@@ -16,6 +16,7 @@ import (
 var (
 	ErrDisabled       = errors.New("container updater is not configured")
 	ErrInvalidVersion = errors.New("invalid release version")
+	ErrPinnedImageTag = errors.New("当前部署固定了 IMAGE_POOL_IMAGE_TAG，在线更新需要 IMAGE_POOL_IMAGE_TAG=latest")
 	versionPattern    = regexp.MustCompile(`^v?\d+\.\d+\.\d+$`)
 )
 
@@ -23,6 +24,10 @@ type Status struct {
 	Enabled       bool   `json:"enabled"`
 	Updating      bool   `json:"updating"`
 	TargetVersion string `json:"target_version,omitempty"`
+	Image         string `json:"image,omitempty"`
+	ImageTag      string `json:"image_tag,omitempty"`
+	UpdateMode    string `json:"update_mode,omitempty"`
+	Warning       string `json:"warning,omitempty"`
 	LastError     string `json:"last_error,omitempty"`
 }
 
@@ -33,6 +38,8 @@ type Service struct {
 	token    string
 	client   *http.Client
 	delay    time.Duration
+	image    string
+	imageTag string
 
 	mu            sync.RWMutex
 	updating      bool
@@ -41,16 +48,27 @@ type Service struct {
 }
 
 func New(endpoint, token string) *Service {
+	return NewWithImage(endpoint, token, "", "")
+}
+
+func NewWithImage(endpoint, token, image, imageTag string) *Service {
 	return &Service{
 		endpoint: strings.TrimSpace(endpoint),
 		token:    strings.TrimSpace(token),
 		client:   &http.Client{Timeout: 15 * time.Second},
 		delay:    time.Second,
+		image:    strings.TrimSpace(image),
+		imageTag: strings.TrimSpace(imageTag),
 	}
 }
 
 func NewFromEnvironment() *Service {
-	return New(os.Getenv("IMAGE_POOL_UPDATE_URL"), os.Getenv("IMAGE_POOL_UPDATE_TOKEN"))
+	return NewWithImage(
+		os.Getenv("IMAGE_POOL_UPDATE_URL"),
+		os.Getenv("IMAGE_POOL_UPDATE_TOKEN"),
+		os.Getenv("IMAGE_POOL_IMAGE"),
+		os.Getenv("IMAGE_POOL_IMAGE_TAG"),
+	)
 }
 
 func (s *Service) Status() Status {
@@ -63,6 +81,10 @@ func (s *Service) Status() Status {
 		Enabled:       s.endpoint != "",
 		Updating:      s.updating,
 		TargetVersion: s.targetVersion,
+		Image:         s.image,
+		ImageTag:      s.imageTag,
+		UpdateMode:    s.updateMode(),
+		Warning:       s.warning(),
 		LastError:     s.lastError,
 	}
 }
@@ -76,6 +98,11 @@ func (s *Service) Trigger(version string) (Status, bool, error) {
 	version = strings.TrimSpace(version)
 	if !versionPattern.MatchString(version) {
 		return s.Status(), false, ErrInvalidVersion
+	}
+	if s.pinnedImageTag() {
+		status := s.Status()
+		status.LastError = ErrPinnedImageTag.Error()
+		return status, false, ErrPinnedImageTag
 	}
 
 	s.mu.Lock()
@@ -133,6 +160,39 @@ func (s *Service) statusLocked() Status {
 		Enabled:       s.endpoint != "",
 		Updating:      s.updating,
 		TargetVersion: s.targetVersion,
+		Image:         s.image,
+		ImageTag:      s.imageTag,
+		UpdateMode:    s.updateMode(),
+		Warning:       s.warning(),
 		LastError:     s.lastError,
 	}
+}
+
+func (s *Service) pinnedImageTag() bool {
+	if s == nil {
+		return false
+	}
+	tag := strings.ToLower(strings.TrimSpace(s.imageTag))
+	return tag != "" && tag != "latest"
+}
+
+func (s *Service) updateMode() string {
+	if s == nil || strings.TrimSpace(s.endpoint) == "" {
+		return "disabled"
+	}
+	tag := strings.ToLower(strings.TrimSpace(s.imageTag))
+	if tag == "" {
+		return "watchtower"
+	}
+	if tag == "latest" {
+		return "watchtower_latest"
+	}
+	return "pinned"
+}
+
+func (s *Service) warning() string {
+	if s.pinnedImageTag() {
+		return ErrPinnedImageTag.Error()
+	}
+	return ""
 }

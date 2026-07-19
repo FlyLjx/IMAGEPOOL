@@ -4,6 +4,10 @@ set -euo pipefail
 # Deploy IMAGE POOL from the published GHCR image on a fresh Debian server.
 # Run as root. Optional overrides:
 #   IMAGE_POOL_PORT=8080 IMAGE_POOL_ADMIN_KEY=... bash deploy-image-pool.sh
+#
+# Keep IMAGE_POOL_IMAGE_TAG=latest for the built-in web updater. A fixed
+# version tag can still be used for manual rollback/pinning, but Watchtower's
+# HTTP API cannot advance a container from one fixed tag to another.
 
 if [[ "$(id -u)" -ne 0 ]]; then
   echo "Run this script as root." >&2

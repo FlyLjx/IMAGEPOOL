@@ -38,9 +38,12 @@ export function VersionReleaseDialog({ className, canUpdate = false }: { classNa
     startUpdate,
   } = useVersionCheck(canUpdate);
   const updateInProgress = startingUpdate || Boolean(updateStatus?.updating);
+  const updatePinned = updateStatus?.update_mode === "pinned";
   const releaseState = hasNewVersion ? "available" : checking ? "checking" : "current";
   const statusText = updateStatus?.last_error
     ? updateStatus.last_error
+    : updateStatus?.warning
+      ? updateStatus.warning
     : releaseState === "available"
       ? "发现可用更新"
       : releaseState === "checking"
@@ -152,7 +155,7 @@ export function VersionReleaseDialog({ className, canUpdate = false }: { classNa
               <Button
                 size="sm"
                 className="bg-blue-600 hover:bg-blue-700"
-                disabled={!updateStatus?.enabled || updateInProgress}
+                disabled={!updateStatus?.enabled || updateInProgress || updatePinned}
                 onClick={() => void startUpdate()}
               >
                 {updateInProgress ? <RefreshCw className="size-4 animate-spin" /> : <Download className="size-4" />}
