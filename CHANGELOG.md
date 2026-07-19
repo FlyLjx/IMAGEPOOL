@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 0.1.29 - 2026-07-19
+
++ [修复] 版本检测改为前端请求后端 `/api/system/latest-version` 代理接口，后端并发查询 GitHub Release、GitHub Tags 与 jsDelivr，避免浏览器直连发布源失败导致“获取最新版本信息失败”。
++ [优化] 发布源不可达时版本检测返回当前版本与 fallback 状态，不再弹出失败提示；Docker 运行镜像补充 `ca-certificates`，提升服务端 HTTPS 查询稳定性。
+
 ## 0.1.28 - 2026-07-19
 
 + [新增] 新增 `/api/image-pool/capacity` 动态号池容量评估接口，综合当前排队/运行任务、近 60 次任务耗时与成功率、账号冷却率、死号率和剩余额度，返回建议可用账号数与注册机建议补号数。

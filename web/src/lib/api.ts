@@ -292,6 +292,16 @@ export type SystemUpdateStatus = {
   last_error?: string;
 };
 
+export type LatestVersionResponse = {
+  version: string;
+  source: "github_release" | "github_tags" | "jsdelivr" | "fallback" | string;
+  checked_at: string;
+  current?: string;
+  update_available: boolean;
+  changelog?: string;
+  error?: string;
+};
+
 export type CredentialRecoveryLog = {
   id: string;
   time: string;
@@ -709,6 +719,10 @@ export async function fetchDashboard(runtimeWindowMinutes = 60) {
 
 export async function fetchSystemLoad() {
   return httpRequest<SystemLoad>("/api/system/load");
+}
+
+export async function fetchLatestVersion(currentVersion: string) {
+  return httpRequest<LatestVersionResponse>(`/api/system/latest-version?current=${encodeURIComponent(currentVersion)}`);
 }
 
 export async function fetchImagePoolCapacity(limit = 60) {

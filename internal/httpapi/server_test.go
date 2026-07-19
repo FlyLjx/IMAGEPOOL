@@ -1175,6 +1175,82 @@ func TestSystemLoadEndpointIsAuthenticated(t *testing.T) {
 	}
 }
 
+func TestLatestVersionEndpointUsesBackendProxy(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/latest":
+			_, _ = w.Write([]byte(`{"tag_name":"v0.1.30"}`))
+		case "/resolved":
+			_, _ = w.Write([]byte(`{"version":"0.1.29"}`))
+		case "/tags":
+			_, _ = w.Write([]byte(`[{"name":"v0.1.28"},{"name":"v0.1.31"}]`))
+		case "/changelog/0.1.31":
+			_, _ = w.Write([]byte("## 0.1.31 - 2026-07-19\n\n+ [修复] 测试发布记录\n"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer upstream.Close()
+	restore := overrideLatestVersionLookupForTest(upstream.URL)
+	defer restore()
+
+	srv := httptest.NewServer(testServer(t))
+	defer srv.Close()
+	request, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/system/latest-version?current=0.1.28", nil)
+	request.Header.Set("Authorization", "Bearer k")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	var payload latestVersionResponse
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusOK || payload.Version != "0.1.31" || payload.Source != "github_tags" || !payload.UpdateAvailable || !strings.Contains(payload.Changelog, "测试发布记录") {
+		t.Fatalf("status=%d payload=%#v", response.StatusCode, payload)
+	}
+}
+
+func TestLatestVersionEndpointFallsBackToCurrentVersion(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "offline", http.StatusBadGateway)
+	}))
+	defer upstream.Close()
+	restore := overrideLatestVersionLookupForTest(upstream.URL)
+	defer restore()
+
+	srv := httptest.NewServer(testServer(t))
+	defer srv.Close()
+	request, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/system/latest-version?current=0.1.28", nil)
+	request.Header.Set("Authorization", "Bearer k")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	var payload latestVersionResponse
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusOK || payload.Version != "0.1.28" || payload.Source != "fallback" || payload.UpdateAvailable || payload.Error == "" {
+		t.Fatalf("status=%d payload=%#v", response.StatusCode, payload)
+	}
+}
+
+func overrideLatestVersionLookupForTest(baseURL string) func() {
+	previous := latestVersionLookupConfig
+	latestVersionLookupConfig.client = http.DefaultClient
+	latestVersionLookupConfig.githubLatestRelease = baseURL + "/latest"
+	latestVersionLookupConfig.githubTags = baseURL + "/tags"
+	latestVersionLookupConfig.jsdelivrResolved = baseURL + "/resolved"
+	latestVersionLookupConfig.jsdelivrChangelog = baseURL + "/changelog/%s"
+	latestVersionLookupConfig.githubRawChangelog = baseURL + "/raw/%s"
+	return func() {
+		latestVersionLookupConfig = previous
+	}
+}
+
 func TestImagePoolCapacityEndpointReturnsDynamicRecommendation(t *testing.T) {
 	srv := httptest.NewServer(testServer(t))
 	defer srv.Close()

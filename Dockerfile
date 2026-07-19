@@ -18,7 +18,7 @@ RUN go test ./... && go build -trimpath -ldflags="-s -w" -o /out/image-pool ./cm
 FROM alpine:3.20
 WORKDIR /app
 
-RUN apk add --no-cache nodejs tzdata
+RUN apk add --no-cache ca-certificates nodejs tzdata
 ENV TZ=Asia/Shanghai
 
 COPY --from=go-build /out/image-pool /app/image-pool

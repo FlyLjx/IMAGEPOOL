@@ -4,14 +4,8 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 
 import webConfig from "@/constants/common-env";
-import { fetchSystemUpdateStatus, startSystemUpdate, type SystemUpdateStatus } from "@/lib/api";
-import {
-  githubLatestReleaseURL,
-  parseChangelog,
-  releaseChangelogURL,
-  releaseVersionResolverURL,
-  type ReleaseInfo,
-} from "@/lib/release";
+import { fetchLatestVersion, fetchSystemUpdateStatus, startSystemUpdate, type SystemUpdateStatus } from "@/lib/api";
+import { parseChangelog, type ReleaseInfo } from "@/lib/release";
 
 function readLocalReleases(): ReleaseInfo[] {
   return JSON.parse(process.env.NEXT_PUBLIC_APP_RELEASES || "[]");
@@ -48,7 +42,8 @@ export function useVersionCheck(canUpdate = false) {
     async (showMessage = false) => {
       setChecking(true);
       try {
-        const version = await fetchLatestPublishedVersion();
+        const latest = await fetchLatestVersion(currentVersion);
+        const version = latest.version || currentVersion;
         if (!version) {
           setLatestVersion(currentVersion);
           setReleases(localReleases);
@@ -56,16 +51,18 @@ export function useVersionCheck(canUpdate = false) {
           return;
         }
         setLatestVersion(version);
-        try {
-          const changelogResponse = await fetch(releaseChangelogURL(version), { cache: "no-store" });
-          if (changelogResponse.ok) {
-            const changelog = await changelogResponse.text();
-            if (changelog.trim()) setReleases(parseChangelog(changelog));
-          }
-        } catch {
-          // Release metadata remains sufficient to notify about an upgrade.
+        if (latest.changelog?.trim()) {
+          setReleases(parseChangelog(latest.changelog));
+        } else {
+          setReleases(localReleases);
         }
-        if (showMessage) toast.success("已获取最新版本信息");
+        if (showMessage) {
+          if (latest.source === "fallback" && latest.error) {
+            toast.info("发布源暂时不可达，已使用本地版本信息");
+          } else {
+            toast.success("已获取最新版本信息");
+          }
+        }
       } catch {
         setLatestVersion(currentVersion);
         setReleases(localReleases);
@@ -130,35 +127,4 @@ export function useVersionCheck(canUpdate = false) {
     startUpdate,
     refreshUpdateStatus,
   };
-}
-
-async function fetchLatestPublishedVersion() {
-  const lookups = await Promise.allSettled([
-    fetchResolvedReleaseVersion(),
-    fetchGitHubReleaseVersion(),
-  ]);
-  const versions = lookups
-    .filter((result): result is PromiseFulfilledResult<string> => result.status === "fulfilled")
-    .map((result) => result.value)
-    .filter((version) => Boolean(toVersionParts(version)));
-  if (!versions.length) {
-    throw new Error("all release lookups failed");
-  }
-  return versions.reduce((latest, version) => (isNewerVersion(version, latest) ? version : latest));
-}
-
-async function fetchResolvedReleaseVersion() {
-  const resolverURL = `${releaseVersionResolverURL}&_t=${Date.now()}`;
-  const response = await fetch(resolverURL, { cache: "no-store" });
-  if (!response.ok) throw new Error(`jsDelivr release lookup failed: HTTP ${response.status}`);
-  const payload = await (response.json() as Promise<{ version?: string }>);
-  return String(payload.version || "").trim().replace(/^v/, "");
-}
-
-async function fetchGitHubReleaseVersion() {
-  const response = await fetch(`${githubLatestReleaseURL}?_t=${Date.now()}`, { cache: "no-store" });
-  if (response.status === 404) return "";
-  if (!response.ok) throw new Error(`GitHub release lookup failed: HTTP ${response.status}`);
-  const release = await (response.json() as Promise<{ tag_name?: string }>);
-  return String(release.tag_name || "").trim().replace(/^v/, "");
 }

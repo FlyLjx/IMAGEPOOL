@@ -205,6 +205,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodGet && r.URL.Path == "/api/system/load":
 		w.Header().Set("Cache-Control", "no-store")
 		writeJSON(w, http.StatusOK, s.system.Sample())
+	case r.Method == http.MethodGet && r.URL.Path == "/api/system/latest-version":
+		s.handleLatestVersion(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/api/logs":
 		s.handleLogs(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/api/logs/delete":
