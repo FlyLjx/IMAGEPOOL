@@ -1925,7 +1925,7 @@ func (s *Server) parseEditRequest(r *http.Request) (images.Request, string, erro
 		if n, _ := strconv.Atoi(formValue(form, "n")); n > 0 {
 			req.N = n
 		}
-		for _, key := range []string{"image", "images"} {
+		for _, key := range editMultipartImageFields(form.File) {
 			for _, fh := range form.File[key] {
 				f, err := fh.Open()
 				if err != nil {
@@ -1946,36 +1946,177 @@ func (s *Server) parseEditRequest(r *http.Request) (images.Request, string, erro
 		return req, formValue(form, "client_task_id"), nil
 	}
 	var body struct {
-		ClientTaskID   string   `json:"client_task_id"`
-		Prompt         string   `json:"prompt"`
-		Model          string   `json:"model"`
-		N              int      `json:"n"`
-		Size           string   `json:"size"`
-		Quality        string   `json:"quality"`
-		ResponseFormat string   `json:"response_format"`
-		OutputFormat   string   `json:"output_format"`
-		Images         []string `json:"images"`
-		Image          any      `json:"image"`
+		ClientTaskID    string `json:"client_task_id"`
+		Prompt          string `json:"prompt"`
+		Model           string `json:"model"`
+		N               int    `json:"n"`
+		Size            string `json:"size"`
+		Quality         string `json:"quality"`
+		ResponseFormat  string `json:"response_format"`
+		OutputFormat    string `json:"output_format"`
+		Image           any    `json:"image"`
+		Images          any    `json:"images"`
+		ImageURL        any    `json:"image_url"`
+		ImageURLs       any    `json:"image_urls"`
+		ReferenceItems  any    `json:"referenceImages"`
+		ReferenceImage  any    `json:"reference_image"`
+		ReferenceImages any    `json:"reference_images"`
+		InputImage      any    `json:"input_image"`
+		InputImages     any    `json:"input_images"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		return images.Request{}, "", err
 	}
-	sources := append([]string(nil), body.Images...)
-	switch v := body.Image.(type) {
-	case string:
-		sources = append(sources, v)
-	case []any:
-		for _, item := range v {
-			if s, ok := item.(string); ok {
-				sources = append(sources, s)
-			}
-		}
-	}
+	sources := editImageSources(
+		body.ImageURL,
+		body.ImageURLs,
+		body.Image,
+		body.Images,
+		body.ReferenceItems,
+		body.ReferenceImage,
+		body.ReferenceImages,
+		body.InputImage,
+		body.InputImages,
+	)
 	refs, err := s.imageInputsFromSources(r.Context(), sources)
 	if err != nil {
 		return images.Request{}, "", err
 	}
 	return images.Request{Prompt: body.Prompt, Model: body.Model, N: body.N, Size: body.Size, Quality: body.Quality, ResponseFormat: body.ResponseFormat, OutputFormat: body.OutputFormat, References: refs}, body.ClientTaskID, nil
+}
+
+func editMultipartImageFields(files map[string][]*multipart.FileHeader) []string {
+	fields := []string{}
+	for field := range files {
+		if isEditImageFileField(field) {
+			fields = append(fields, field)
+		}
+	}
+	sort.SliceStable(fields, func(i, j int) bool {
+		leftRank, leftIndex := editImageFileFieldOrder(fields[i])
+		rightRank, rightIndex := editImageFileFieldOrder(fields[j])
+		if leftRank != rightRank {
+			return leftRank < rightRank
+		}
+		if leftIndex != rightIndex {
+			return leftIndex < rightIndex
+		}
+		return fields[i] < fields[j]
+	})
+	return fields
+}
+
+func isEditImageFileField(field string) bool {
+	field = strings.TrimSpace(field)
+	switch field {
+	case "image", "images", "image[]", "images[]", "reference_image", "reference_images", "reference_image[]", "reference_images[]":
+		return true
+	}
+	return strings.HasPrefix(field, "image[") ||
+		strings.HasPrefix(field, "images[") ||
+		strings.HasPrefix(field, "reference_image[") ||
+		strings.HasPrefix(field, "reference_images[")
+}
+
+func editImageFileFieldOrder(field string) (int, int) {
+	switch field {
+	case "image":
+		return 0, 0
+	case "images":
+		return 1, 0
+	case "image[]":
+		return 2, 0
+	case "images[]":
+		return 3, 0
+	case "reference_image":
+		return 6, 0
+	case "reference_images":
+		return 7, 0
+	case "reference_image[]":
+		return 8, 0
+	case "reference_images[]":
+		return 9, 0
+	}
+	if index, ok := editBracketIndex(field, "image"); ok {
+		return 4, index
+	}
+	if index, ok := editBracketIndex(field, "images"); ok {
+		return 5, index
+	}
+	if index, ok := editBracketIndex(field, "reference_image"); ok {
+		return 10, index
+	}
+	if index, ok := editBracketIndex(field, "reference_images"); ok {
+		return 11, index
+	}
+	return 99, 0
+}
+
+func editBracketIndex(field string, prefix string) (int, bool) {
+	if !strings.HasPrefix(field, prefix+"[") || !strings.HasSuffix(field, "]") {
+		return 0, false
+	}
+	raw := strings.TrimSuffix(strings.TrimPrefix(field, prefix+"["), "]")
+	if raw == "" {
+		return 0, true
+	}
+	index, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, true
+	}
+	return index, true
+}
+
+func editImageSources(values ...any) []string {
+	result := []string{}
+	for _, value := range values {
+		result = append(result, extractEditImageSources(value)...)
+	}
+	return result
+}
+
+func extractEditImageSources(value any) []string {
+	if value == nil {
+		return nil
+	}
+	switch item := value.(type) {
+	case string:
+		item = strings.TrimSpace(item)
+		if item == "" {
+			return nil
+		}
+		return []string{item}
+	case []string:
+		result := []string{}
+		for _, child := range item {
+			result = append(result, extractEditImageSources(child)...)
+		}
+		return result
+	case []any:
+		result := []string{}
+		for _, child := range item {
+			result = append(result, extractEditImageSources(child)...)
+		}
+		return result
+	case map[string]string:
+		return mapStringEditImageSources(item)
+	case map[string]any:
+		for _, key := range []string{"url", "image_url", "imageUrl", "image_urls", "imageUrls", "input_image", "inputImage", "reference_image", "referenceImage", "reference_images", "referenceImages", "b64_json", "base64"} {
+			if result := extractEditImageSources(item[key]); len(result) > 0 {
+				return result
+			}
+		}
+	}
+	return nil
+}
+
+func mapStringEditImageSources(item map[string]string) []string {
+	for _, key := range []string{"url", "image_url", "imageUrl", "b64_json", "base64"} {
+		if value := strings.TrimSpace(item[key]); value != "" {
+			return []string{value}
+		}
+	}
+	return nil
 }
 
 func formValue(form *multipart.Form, key string) string {

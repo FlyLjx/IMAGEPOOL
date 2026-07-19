@@ -76,6 +76,7 @@ type imagePoolCapacityEstimate struct {
 	RequiredByCurrentParallel         int     `json:"required_by_current_parallel"`
 	RequiredByRecentThroughput        int     `json:"required_by_recent_throughput"`
 	RequiredByQueueDrain              int     `json:"required_by_queue_drain"`
+	RequiredByBurstParallel           int     `json:"required_by_burst_parallel"`
 	RequiredByQuota                   int     `json:"required_by_quota"`
 	RecommendedRequiredUsableAccounts int     `json:"recommended_required_usable_accounts"`
 	CurrentEffectiveAccounts          int     `json:"current_effective_accounts"`
@@ -101,7 +102,11 @@ func (s *Server) handleImagePoolCapacity(w http.ResponseWriter, r *http.Request)
 	taskPressure := summarizeImagePoolTasks(activeTasks, now)
 	recent := summarizeRecentImageTasks(recentItems, limit)
 	accountStats := s.accounts.ImageDispatchStats()
-	factors, estimate := estimateImagePoolCapacity(s.currentConfig(), taskPressure, recent, accountStats)
+	cfg := s.currentConfig()
+	if r.URL.Query().Has("burst_parallel") {
+		cfg.ImageCapacityBurstParallel = boundedQueryInt(r, "burst_parallel", cfg.ImageCapacityBurstParallel, 1, 10000)
+	}
+	factors, estimate := estimateImagePoolCapacity(cfg, taskPressure, recent, accountStats)
 	writeJSON(w, http.StatusOK, imagePoolCapacityResponse{
 		GeneratedAt: now,
 		Tasks:       taskPressure,
@@ -278,6 +283,10 @@ func estimateImagePoolCapacity(cfg config.Config, pressure imagePoolTaskPressure
 	if expectedAttempts > 0 && avgQuota > 0 && estimatedQuotaCapacity < expectedAttempts {
 		requiredByQuota = int(math.Ceil(expectedAttempts / avgQuota))
 	}
+	requiredByBurst := cfg.ImageCapacityBurstParallel
+	if requiredByBurst <= 0 {
+		requiredByBurst = config.Default().ImageCapacityBurstParallel
+	}
 	baseRequired := maxInt(pressure.Running, requiredByQueueDrain)
 	baseRequired = maxInt(baseRequired, requiredByQuota)
 	if pressure.Pending == 0 {
@@ -286,14 +295,15 @@ func estimateImagePoolCapacity(cfg config.Config, pressure imagePoolTaskPressure
 		baseRequired = maxInt(baseRequired, minInt(requiredByThroughput, pressure.Pending))
 	}
 	reserveRatio := dynamicCapacityReserveRatio(recent, recentFailureRate, coolingRate, pressureRatio)
-	recommendedRequired := baseRequired
+	dynamicRequired := baseRequired
 	if baseRequired > 0 {
 		reserveAccounts := int(math.Ceil(float64(baseRequired) * reserveRatio))
 		if baseRequired <= 2 && reserveRatio < 0.25 {
 			reserveAccounts = 0
 		}
-		recommendedRequired += reserveAccounts
+		dynamicRequired += reserveAccounts
 	}
+	recommendedRequired := maxInt(dynamicRequired, requiredByBurst)
 	currentEffective := accountStats.Dispatchable
 	addUsable := maxInt(0, recommendedRequired-currentEffective)
 	registrationFactor := registrationAdjustmentFactor(deadRate)
@@ -318,6 +328,7 @@ func estimateImagePoolCapacity(cfg config.Config, pressure imagePoolTaskPressure
 		RequiredByCurrentParallel:         requiredByParallel,
 		RequiredByRecentThroughput:        requiredByThroughput,
 		RequiredByQueueDrain:              requiredByQueueDrain,
+		RequiredByBurstParallel:           requiredByBurst,
 		RequiredByQuota:                   requiredByQuota,
 		RecommendedRequiredUsableAccounts: recommendedRequired,
 		CurrentEffectiveAccounts:          currentEffective,

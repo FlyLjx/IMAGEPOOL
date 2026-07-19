@@ -99,6 +99,7 @@ export function ConfigCard() {
   const setRefreshAccountConcurrency = useSettingsStore((state) => state.setRefreshAccountConcurrency);
   const setImageRetentionDays = useSettingsStore((state) => state.setImageRetentionDays);
   const setImagePollTimeoutSecs = useSettingsStore((state) => state.setImagePollTimeoutSecs);
+  const setImageCapacityBurstParallel = useSettingsStore((state) => state.setImageCapacityBurstParallel);
   const setImageWebModelSlug = useSettingsStore((state) => state.setImageWebModelSlug);
   const setLogLevel = useSettingsStore((state) => state.setLogLevel);
   const setProxy = useSettingsStore((state) => state.setProxy);
@@ -221,6 +222,15 @@ export function ConfigCard() {
               placeholder="300"
               help="固定 300 秒；从首个账号分配后开始计时，旧配置会自动迁移。"
               disabled
+            />
+          </Col>
+          <Col xs={24} md={12} xl={6}>
+            <NumberInput
+              label="突发并发保障"
+              value={String(config.image_capacity_burst_parallel || "")}
+              onChange={setImageCapacityBurstParallel}
+              placeholder="50"
+              help="号池容量评估最低按多少个同时进来的生图请求预留账号。"
             />
           </Col>
           <Col xs={24} lg={12}>

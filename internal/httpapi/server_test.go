@@ -1319,6 +1319,43 @@ func TestImagePoolCapacityEstimateAdjustsRegistrationForDeadRate(t *testing.T) {
 	}
 }
 
+func TestImagePoolCapacityEstimateMaintainsBurstParallelBaseline(t *testing.T) {
+	cfg := config.Default()
+	cfg.ImageCapacityBurstParallel = 50
+	pressure := imagePoolTaskPressure{}
+	recent := imagePoolRecentTaskStats{Limit: 60}
+	accountStats := accounts.ImageDispatchStats{
+		Total:        2,
+		Usable:       2,
+		Dispatchable: 2,
+		Idle:         2,
+	}
+
+	_, estimate := estimateImagePoolCapacity(cfg, pressure, recent, accountStats)
+	if estimate.RequiredByBurstParallel != 50 {
+		t.Fatalf("burst baseline=%d, want 50", estimate.RequiredByBurstParallel)
+	}
+	if estimate.RecommendedRequiredUsableAccounts != 50 {
+		t.Fatalf("required usable=%d, want 50", estimate.RecommendedRequiredUsableAccounts)
+	}
+	if estimate.RecommendedAddUsableAccounts != 48 || estimate.RecommendedRegisterAccounts != 48 {
+		t.Fatalf("estimate=%#v, want add/register 48", estimate)
+	}
+	if estimate.Status != "shortage" {
+		t.Fatalf("status=%q, want shortage", estimate.Status)
+	}
+}
+
+func TestImagePoolCapacityEstimateSuggestsBurstBaselineWhenPoolEmpty(t *testing.T) {
+	cfg := config.Default()
+	cfg.ImageCapacityBurstParallel = 50
+
+	_, estimate := estimateImagePoolCapacity(cfg, imagePoolTaskPressure{}, imagePoolRecentTaskStats{Limit: 60}, accounts.ImageDispatchStats{})
+	if estimate.RecommendedAddUsableAccounts != 50 || estimate.RecommendedRegisterAccounts != 50 {
+		t.Fatalf("empty pool estimate=%#v, want add/register 50", estimate)
+	}
+}
+
 func TestDashboardSupportsRuntimeWindow(t *testing.T) {
 	srv := httptest.NewServer(testServer(t))
 	defer srv.Close()

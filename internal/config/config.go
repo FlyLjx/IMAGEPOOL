@@ -31,6 +31,7 @@ type Config struct {
 	ImagePollInitialWaitSecs            float64       `json:"image_poll_initial_wait_secs"`
 	ImageTaskTimeoutSecs                float64       `json:"image_task_timeout_secs"`
 	ImageSettleSecs                     float64       `json:"image_settle_secs"`
+	ImageCapacityBurstParallel          int           `json:"image_capacity_burst_parallel"`
 	ImageAccountPrecheckIntervalMinutes int           `json:"image_account_precheck_interval_minutes"`
 	ImageAccountPrecheckConcurrency     int           `json:"image_account_precheck_concurrency"`
 	ImageAccountPrecheckTimeoutSecs     float64       `json:"image_account_precheck_timeout_secs"`
@@ -115,6 +116,7 @@ func Default() Config {
 		ImagePollInitialWaitSecs:            0,
 		ImageTaskTimeoutSecs:                300,
 		ImageSettleSecs:                     2,
+		ImageCapacityBurstParallel:          50,
 		ImageAccountPrecheckIntervalMinutes: 10,
 		ImageAccountPrecheckConcurrency:     6,
 		ImageAccountPrecheckTimeoutSecs:     75,
@@ -292,6 +294,12 @@ func (c Config) Normalize() Config {
 	c.ImageTaskTimeoutSecs = d.ImageTaskTimeoutSecs
 	if c.ImageSettleSecs < 0 {
 		c.ImageSettleSecs = 0
+	}
+	if c.ImageCapacityBurstParallel <= 0 {
+		c.ImageCapacityBurstParallel = d.ImageCapacityBurstParallel
+	}
+	if c.ImageCapacityBurstParallel > 10000 {
+		c.ImageCapacityBurstParallel = 10000
 	}
 	if c.ImageAccountPrecheckIntervalMinutes <= 0 {
 		c.ImageAccountPrecheckIntervalMinutes = d.ImageAccountPrecheckIntervalMinutes

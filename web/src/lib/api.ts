@@ -239,6 +239,7 @@ export type SettingsConfig = {
   image_account_precheck_interval_minutes?: number | string;
   image_account_precheck_concurrency?: number | string;
   image_account_precheck_timeout_secs?: number | string;
+  image_capacity_burst_parallel?: number | string;
   image_parallel_generation?: boolean;
   image_settle_enabled?: boolean;
   image_check_before_hit_enabled?: boolean;
@@ -673,6 +674,7 @@ export type ImagePoolCapacity = {
     required_by_current_parallel: number;
     required_by_recent_throughput: number;
     required_by_queue_drain: number;
+    required_by_burst_parallel: number;
     required_by_quota: number;
     recommended_required_usable_accounts: number;
     current_effective_accounts: number;

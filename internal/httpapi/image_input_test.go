@@ -8,6 +8,7 @@ import (
 	"image"
 	"image/color"
 	"image/png"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -105,6 +106,79 @@ func TestParseEditRequestDownloadsReferencesConcurrentlyAndPreservesOrder(t *tes
 	}
 	if result.references[0].FileName != "first.png" || result.references[1].FileName != "second.png" {
 		t.Fatalf("reference order=%q, %q", result.references[0].FileName, result.references[1].FileName)
+	}
+}
+
+func TestParseEditRequestSupportsMultipartImageArrayFields(t *testing.T) {
+	server := newImageInputTestServer(t, 1)
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, err := writer.CreateFormFile("image[]", "ref.png")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := part.Write(imageInputTestPNG(t, color.RGBA{G: 0xff, A: 0xff})); err != nil {
+		t.Fatal(err)
+	}
+	part, err = writer.CreateFormFile("image[1]", "ref-2.png")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := part.Write(imageInputTestPNG(t, color.RGBA{B: 0xff, A: 0xff})); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.WriteField("prompt", "edit prompt"); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/images/edits", &body)
+	request.Header.Set("Content-Type", writer.FormDataContentType())
+	req, _, err := server.parseEditRequest(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if req.Prompt != "edit prompt" {
+		t.Fatalf("prompt=%q", req.Prompt)
+	}
+	if len(req.References) != 2 {
+		t.Fatalf("reference count=%d, want 2", len(req.References))
+	}
+	if req.References[0].FileName != "ref.png" || req.References[1].FileName != "ref-2.png" {
+		t.Fatalf("reference order=%q, %q", req.References[0].FileName, req.References[1].FileName)
+	}
+}
+
+func TestParseEditRequestSupportsJSONImageAliases(t *testing.T) {
+	imageData := imageInputTestPNG(t, color.RGBA{R: 0x88, A: 0xff})
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write(imageData)
+	}))
+	defer remote.Close()
+
+	server := newImageInputTestServer(t, 1)
+	body := fmt.Sprintf(`{"image_urls":[%q],"reference_images":[{"image_url":{"url":%q}}],"input_image":%q}`,
+		remote.URL+"/first.png",
+		remote.URL+"/second.png",
+		remote.URL+"/third.png",
+	)
+	request := httptest.NewRequest(http.MethodPost, "/v1/images/edits", strings.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	req, _, err := server.parseEditRequest(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(req.References) != 3 {
+		t.Fatalf("reference count=%d, want 3", len(req.References))
+	}
+	wantNames := []string{"first.png", "second.png", "third.png"}
+	for index, want := range wantNames {
+		if req.References[index].FileName != want {
+			t.Fatalf("reference %d filename=%q, want %q", index, req.References[index].FileName, want)
+		}
 	}
 }
 
