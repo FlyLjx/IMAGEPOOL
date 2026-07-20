@@ -138,8 +138,9 @@ func TestGenerateImageReverseProtocol(t *testing.T) {
 			if len(hints) != 0 {
 				t.Errorf("bad hints: %#v", hints)
 			}
-			if _, hasPartialQuery := body["partial_query"]; hasPartialQuery {
-				t.Errorf("prepare %d unexpectedly included partial_query", prepareIndex)
+			partial, _ := body["partial_query"].(map[string]any)
+			if partial["author"] == nil || partial["content"] == nil {
+				t.Errorf("prepare %d missing partial_query: %#v", prepareIndex, body)
 			}
 			json.NewEncoder(w).Encode(map[string]any{"conduit_token": fmt.Sprintf("conduit-%d", prepareIndex+1)})
 		case r.Method == http.MethodPost && r.URL.Path == "/backend-api/f/conversation":
@@ -397,8 +398,11 @@ func TestPrepareImageConversationIncludesReferenceMetadata(t *testing.T) {
 		if body["client_prepare_state"] != "none" {
 			t.Errorf("prepare state=%#v", body["client_prepare_state"])
 		}
-		if _, hasPartialQuery := body["partial_query"]; hasPartialQuery {
-			t.Errorf("prepare unexpectedly included partial_query: %#v", body)
+		partial, _ := body["partial_query"].(map[string]any)
+		content, _ := partial["content"].(map[string]any)
+		parts, _ := content["parts"].([]any)
+		if content["content_type"] != "multimodal_text" || len(parts) != 2 {
+			t.Errorf("prepare partial_query content=%#v", content)
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"conduit_token": "conduit-1"})
 	}))
@@ -414,6 +418,66 @@ func TestPrepareImageConversationIncludesReferenceMetadata(t *testing.T) {
 	}
 	if prepareCount != 1 || conduit != "conduit-1" || traceID == "" || parentMessageID == "" {
 		t.Fatalf("prepare count=%d conduit=%q trace=%q parent=%q", prepareCount, conduit, traceID, parentMessageID)
+	}
+}
+
+func TestGenerateImagePrepareFallbackUsesSuccessState(t *testing.T) {
+	var prepareCount atomic.Int32
+	var startState string
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			w.Write([]byte(`<html data-build="build"><script src="/c/test/_abc.js"></script></html>`))
+		case "/backend-api/sentinel/chat-requirements/prepare":
+			_ = json.NewEncoder(w).Encode(map[string]any{"prepare_token": "prep", "proofofwork": map[string]any{"required": false}})
+		case "/backend-api/sentinel/chat-requirements/finalize":
+			_ = json.NewEncoder(w).Encode(map[string]any{"token": "sentinel"})
+		case "/backend-api/f/conversation/prepare":
+			index := prepareCount.Add(1)
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			if _, ok := body["partial_query"]; !ok {
+				t.Errorf("prepare %d missing partial_query: %#v", index, body)
+			}
+			if index == 1 {
+				if body["client_prepare_state"] != "none" {
+					t.Errorf("first prepare state=%#v", body["client_prepare_state"])
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{"detail": "no conduit for old prepare state"})
+				return
+			}
+			if body["client_prepare_state"] != "success" {
+				t.Errorf("fallback prepare state=%#v", body["client_prepare_state"])
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"conduit_token": "fallback-conduit"})
+		case "/backend-api/f/conversation":
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			startState = fmt.Sprint(body["client_prepare_state"])
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.Write([]byte("data: {\"conversation_id\":\"conv-fallback\"}\n\n"))
+		case "/backend-api/conversation/conv-fallback":
+			_ = json.NewEncoder(w).Encode(map[string]any{"mapping": map[string]any{"m": map[string]any{"message": map[string]any{"author": map[string]any{"role": "tool"}, "content": map[string]any{"parts": []any{map[string]any{"asset_pointer": "file-service://file_00000000bbbbbbbbbbbbbbbbbbbbbbbb"}}}}}}})
+		case "/backend-api/files/download/file_00000000bbbbbbbbbbbbbbbbbbbbbbbb":
+			_ = json.NewEncoder(w).Encode(map[string]any{"download_url": srv.URL + "/fallback.png"})
+		case "/fallback.png":
+			w.Write([]byte("PNG"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	cfg := config.Default()
+	cfg.ChatGPTBaseURL = srv.URL
+	client := NewClient(cfg, WithHTTPClient(srv.Client()))
+	result, err := client.GenerateImage(context.Background(), accounts.Account{Email: "a@example.com", AccessToken: "tok"}, ImageRequest{Prompt: "draw", Model: "gpt-image-2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prepareCount.Load() != 2 || startState != "success" || len(result.URLs) != 1 {
+		t.Fatalf("prepare=%d startState=%q result=%#v", prepareCount.Load(), startState, result)
 	}
 }
 

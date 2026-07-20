@@ -48,6 +48,9 @@ func TestImagePollTimeoutSwitchesAccounts(t *testing.T) {
 	if !IsRetryableImageError(fmt.Errorf("tool failed: %w", ErrImageGenerationTerminated)) {
 		t.Fatal("terminal image-tool status must switch accounts")
 	}
+	if !IsRetryableImageError(fmt.Errorf("prepare conversation(none): %w", ErrMissingConduitToken)) {
+		t.Fatal("missing conduit token must switch accounts")
+	}
 }
 
 func TestRetryableImageErrorIncludesTransientUpstreamStatuses(t *testing.T) {

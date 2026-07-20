@@ -95,9 +95,17 @@ func (c *Client) startImageGeneration(ctx context.Context, account accounts.Acco
 // limit for direct callers and tests without creating a second 180-second
 // window inside an account attempt.
 func (c *Client) startImageGenerationWithinBudget(ctx context.Context, account accounts.Account, prompt, model string, requirements chatRequirements, conduit, turnTraceID, parentMessageID string, refs []uploadMeta) (conversationID string, fileIDs []string, sedimentIDs []string, err error) {
+	return c.startImageGenerationWithinBudgetWithState(ctx, account, prompt, model, requirements, conduit, turnTraceID, parentMessageID, "sent", refs)
+}
+
+func (c *Client) startImageGenerationWithinBudgetWithState(ctx context.Context, account accounts.Account, prompt, model string, requirements chatRequirements, conduit, turnTraceID, parentMessageID, clientPrepareState string, refs []uploadMeta) (conversationID string, fileIDs []string, sedimentIDs []string, err error) {
 	path := "/backend-api/f/conversation"
 	if parentMessageID == "" {
 		parentMessageID = c.newID()
+	}
+	clientPrepareState = strings.TrimSpace(clientPrepareState)
+	if clientPrepareState == "" {
+		clientPrepareState = "sent"
 	}
 	content := imageMessageContent(prompt, refs)
 	metadata := map[string]any{"developer_mode_connector_ids": []any{}, "selected_github_repos": []any{}, "selected_all_github_repos": false, "system_hints": []string{"picture_v2"}, "serialization_metadata": map[string]any{"custom_symbol_offsets": []any{}}}
@@ -111,7 +119,7 @@ func (c *Client) startImageGenerationWithinBudget(ctx context.Context, account a
 	payload := map[string]any{
 		"action":            "next",
 		"messages":          []any{map[string]any{"id": c.newID(), "author": map[string]any{"role": "user"}, "create_time": float64(time.Now().UnixNano()) / 1e9, "content": content, "metadata": metadata}},
-		"parent_message_id": parentMessageID, "model": model, "client_prepare_state": "sent", "timezone_offset_min": -480, "timezone": "Asia/Shanghai",
+		"parent_message_id": parentMessageID, "model": model, "client_prepare_state": clientPrepareState, "timezone_offset_min": -480, "timezone": "Asia/Shanghai",
 		"conversation_mode": map[string]any{"kind": "primary_assistant"}, "enable_message_followups": true, "system_hints": []string{"picture_v2"}, "supports_buffering": true, "supported_encodings": []string{"v1"},
 		"client_contextual_info":               map[string]any{"is_dark_mode": false, "time_since_loaded": 1200, "page_height": 1072, "page_width": 1724, "pixel_ratio": 1.2, "screen_height": 1440, "screen_width": 2560, "app_name": "chatgpt.com"},
 		"paragen_cot_summary_display_override": "allow", "force_parallel_switch": "auto", "thinking_effort": "standard",

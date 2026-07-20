@@ -11,6 +11,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -161,6 +162,12 @@ type uploadMeta struct {
 	FileSize         int
 	MIMEType         string
 	Width, Height    int
+}
+type imagePrepareResult struct {
+	ConduitToken    string
+	TurnTraceID     string
+	ParentMessageID string
+	StartState      string
 }
 
 func (c *Client) ListModels(ctx context.Context, token string) ([]string, error) {
@@ -331,7 +338,7 @@ func (c *Client) GenerateImage(ctx context.Context, account accounts.Account, re
 		return ImageResult{}, c.imagePreparationError(ctx, err)
 	}
 	progress(ProgressEvent{Progress: "preparing_conversation", Message: "准备生图会话"})
-	conduit, turnTraceID, parentMessageID, err := c.prepareImageConversation(preparationCtx, account, effectivePrompt, backendModel, requirements, refs)
+	prepare, err := c.prepareImageConversationForStart(preparationCtx, account, effectivePrompt, backendModel, requirements, refs)
 	if err != nil {
 		return ImageResult{}, c.imagePreparationError(ctx, err)
 	}
@@ -341,7 +348,7 @@ func (c *Client) GenerateImage(ctx context.Context, account accounts.Account, re
 	progress(ProgressEvent{Progress: "starting_generation", Message: "提交生图请求"})
 	generationCtx, cancelGeneration := c.imageGenerationContext(attemptCtx)
 	defer cancelGeneration()
-	conversationID, fileIDs, sedimentIDs, err := c.startImageGenerationWithinBudget(generationCtx, account, effectivePrompt, backendModel, requirements, conduit, turnTraceID, parentMessageID, refs)
+	conversationID, fileIDs, sedimentIDs, err := c.startImageGenerationWithinBudgetWithState(generationCtx, account, effectivePrompt, backendModel, requirements, prepare.ConduitToken, prepare.TurnTraceID, prepare.ParentMessageID, prepare.StartState, refs)
 	if err != nil {
 		return ImageResult{}, imageAttemptError(ctx, generationCtx, err)
 	}
@@ -627,19 +634,54 @@ func str(v any) string {
 }
 
 func (c *Client) prepareImageConversation(ctx context.Context, account accounts.Account, prompt, model string, requirements chatRequirements, refs []uploadMeta) (string, string, string, error) {
+	result, err := c.prepareImageConversationForStart(ctx, account, prompt, model, requirements, refs)
+	if err != nil {
+		return "", "", "", err
+	}
+	return result.ConduitToken, result.TurnTraceID, result.ParentMessageID, nil
+}
+
+func (c *Client) prepareImageConversationForStart(ctx context.Context, account accounts.Account, prompt, model string, requirements chatRequirements, refs []uploadMeta) (imagePrepareResult, error) {
+	attempts := []struct {
+		PrepareState string
+		StartState   string
+	}{
+		{PrepareState: "none", StartState: "sent"},
+		{PrepareState: "success", StartState: "success"},
+	}
+	var lastErr error
+	for index, attempt := range attempts {
+		result, err := c.prepareImageConversationState(ctx, account, prompt, model, requirements, refs, attempt.PrepareState, attempt.StartState)
+		if err == nil {
+			if index > 0 {
+				log.Printf("ChatGPT image prepare recovered with fallback state=%s start_state=%s", attempt.PrepareState, attempt.StartState)
+			}
+			return result, nil
+		}
+		lastErr = err
+		if !isImagePrepareFallbackError(err) {
+			break
+		}
+	}
+	return imagePrepareResult{}, lastErr
+}
+
+func (c *Client) prepareImageConversationState(ctx context.Context, account accounts.Account, prompt, model string, requirements chatRequirements, refs []uploadMeta, prepareState, startState string) (imagePrepareResult, error) {
 	path := "/backend-api/f/conversation/prepare"
 	turnTraceID := c.newID()
 	parentMessageID := c.newID()
+	content := imageMessageContent(prompt, refs)
 	payload := map[string]any{
 		"action":                 "next",
 		"fork_from_shared_post":  false,
 		"parent_message_id":      parentMessageID,
 		"model":                  model,
-		"client_prepare_state":   "none",
+		"client_prepare_state":   prepareState,
 		"timezone_offset_min":    -480,
 		"timezone":               "Asia/Shanghai",
 		"conversation_mode":      map[string]any{"kind": "primary_assistant"},
 		"system_hints":           []string{},
+		"partial_query":          map[string]any{"id": c.newID(), "author": map[string]any{"role": "user"}, "content": content},
 		"supports_buffering":     true,
 		"supported_encodings":    []string{"v1"},
 		"client_contextual_info": map[string]any{"app_name": "chatgpt.com"},
@@ -648,17 +690,56 @@ func (c *Client) prepareImageConversation(ctx context.Context, account accounts.
 	if mimeTypes := imageAttachmentMIMETypes(refs); len(mimeTypes) > 0 {
 		payload["attachment_mime_types"] = mimeTypes
 	}
-	var out struct {
-		ConduitToken string `json:"conduit_token"`
-	}
+	var out map[string]any
 	if err := c.doJSON(ctx, account, http.MethodPost, path, path, payload, c.imageHeaders(requirements, "no-token", "*/*", turnTraceID), &out); err != nil {
-		return "", "", "", fmt.Errorf("prepare conversation(none): %w", err)
+		return imagePrepareResult{}, fmt.Errorf("prepare conversation(%s): %w", prepareState, err)
 	}
-	conduit := strings.TrimSpace(out.ConduitToken)
+	conduit := strings.TrimSpace(str(out["conduit_token"]))
 	if conduit == "" {
-		return "", "", "", fmt.Errorf("prepare conversation(none): missing conduit_token")
+		logImagePrepareMissingConduit(prepareState, out)
+		return imagePrepareResult{}, fmt.Errorf("prepare conversation(%s): %w", prepareState, ErrMissingConduitToken)
 	}
-	return conduit, turnTraceID, parentMessageID, nil
+	return imagePrepareResult{ConduitToken: conduit, TurnTraceID: turnTraceID, ParentMessageID: parentMessageID, StartState: startState}, nil
+}
+
+func isImagePrepareFallbackError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, ErrMissingConduitToken) {
+		return true
+	}
+	var upstream *UpstreamError
+	if errors.As(err, &upstream) {
+		return upstream.StatusCode == http.StatusBadRequest || upstream.StatusCode == http.StatusConflict || upstream.StatusCode == http.StatusUnprocessableEntity
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "missing conduit_token")
+}
+
+func logImagePrepareMissingConduit(state string, payload map[string]any) {
+	keys := make([]string, 0, len(payload))
+	for key := range payload {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	message := ""
+	code := ""
+	if errValue, ok := payload["error"].(map[string]any); ok {
+		message = str(errValue["message"])
+		code = str(errValue["code"])
+	} else {
+		message = str(payload["message"])
+		code = str(payload["code"])
+	}
+	log.Printf("ChatGPT image prepare returned no conduit_token: state=%s keys=%s code=%q message=%q", state, strings.Join(keys, ","), code, compactLogValue(message, 240))
+}
+
+func compactLogValue(value string, limit int) string {
+	value = strings.TrimSpace(value)
+	if limit <= 0 || len(value) <= limit {
+		return value
+	}
+	return value[:limit] + "..."
 }
 
 func (c *Client) downloadBase64(ctx context.Context, account accounts.Account, urls []string) ([]string, error) {

@@ -10,13 +10,14 @@ Go 版当前保留 Python 项目的普通 Image-2 反代链路，核心请求顺
    - `model: "auto"`（普通 `gpt-image-2`）
    - `client_prepare_state: "none"`
    - `conversation_mode.kind: "primary_assistant"`
+   - `partial_query`：包含即将提交的用户消息；文生图为 `text`，图生图为 `multimodal_text` + `file-service://...` 引用。
    - `supports_buffering: true`
    - `supported_encodings: ["v1"]`
-   - 单次请求返回 `conduit_token`，不再追加 `sent`/`success` prepare。
+   - 单次请求返回 `conduit_token`；如果旧的 `client_prepare_state: "none"` 不再下发 token，会自动 fallback 到 `client_prepare_state: "success"`。
 5. `POST /backend-api/f/conversation`：真正提交生图，关键字段：
    - Header `X-Conduit-Token`
    - Header `Accept: text/event-stream`
-   - `client_prepare_state: "sent"`
+   - `client_prepare_state: "sent"`；prepare fallback 到 `success` 时，这里同步使用 `success`。
    - `messages[0].content` 为文本或 `multimodal_text`。
 6. 从 SSE 中提取 `conversation_id`。
 7. `GET /backend-api/conversation/{conversation_id}` 轮询对话文档，提取：

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.1.32 - 2026-07-20
+
++ [修复] ChatGPT Web 生图 `conversation/prepare` 请求补入当前协议需要的 `partial_query`，避免上游返回 200 但缺少 `conduit_token` 导致任务失败。
++ [优化] 当旧的 `client_prepare_state=none` 不再返回 `conduit_token` 时自动 fallback 到 `success` 流程，并把 `missing conduit_token` 归类为可切号重试错误。
++ [诊断] prepare 阶段缺少 `conduit_token` 时记录返回 key/code/message，便于后续快速比对官方协议变化。
+
 ## 0.1.31 - 2026-07-19
 
 + [修复] 在线更新状态会识别固定 Docker 镜像 tag 部署，避免在 `IMAGE_POOL_IMAGE_TAG=0.x.x` 时误提示已启动升级；部署说明明确内置更新需使用 `latest` 模式。

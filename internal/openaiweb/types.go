@@ -77,6 +77,7 @@ var (
 	ErrPollTimeout               = errors.New("image poll timeout")
 	ErrImagePreparationTimeout   = errors.New("image preparation timeout")
 	ErrImageGenerationTerminated = errors.New("image generation terminated")
+	ErrMissingConduitToken       = errors.New("missing conduit_token")
 )
 
 const (
@@ -284,7 +285,7 @@ func IsRetryableImageError(err error) bool {
 		return true
 	}
 	text := strings.ToLower(err.Error())
-	if IsAuthenticationError(err) || IsNoFreeImageQuotaError(err) || errors.Is(err, ErrPollTimeout) || errors.Is(err, ErrImagePreparationTimeout) || errors.Is(err, ErrImageGenerationTerminated) {
+	if IsAuthenticationError(err) || IsNoFreeImageQuotaError(err) || errors.Is(err, ErrPollTimeout) || errors.Is(err, ErrImagePreparationTimeout) || errors.Is(err, ErrImageGenerationTerminated) || errors.Is(err, ErrMissingConduitToken) {
 		return true
 	}
 	var upstream *UpstreamError
@@ -299,6 +300,7 @@ func IsRetryableImageError(err error) bool {
 	return strings.Contains(text, "image generation failed") ||
 		strings.Contains(text, "failed to generate image") ||
 		strings.Contains(text, "upstream completed without generating images") ||
+		strings.Contains(text, "missing conduit_token") ||
 		strings.Contains(text, "no image generated") ||
 		strings.Contains(text, "result could not be retrieved") ||
 		strings.Contains(text, "timeout") ||
