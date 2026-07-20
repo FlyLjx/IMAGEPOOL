@@ -33,8 +33,8 @@ func TestAuthenticationErrorIncludesGenericUpstream401(t *testing.T) {
 	if !IsAuthenticationError(&UpstreamError{Path: "/backend-api/me", StatusCode: 401, Body: "unauthorized"}) {
 		t.Fatal("upstream 401 must be eligible for credential recovery")
 	}
-	if !IsAuthenticationError(fmt.Errorf("prepare conversation(success): %w", ErrMissingConduitToken)) {
-		t.Fatal("persistent empty conduit token must be eligible for account removal")
+	if IsAuthenticationError(fmt.Errorf("prepare conversation(success): %w", ErrMissingConduitToken)) {
+		t.Fatal("empty conduit token is not credential revocation")
 	}
 	if IsAuthenticationError(&UpstreamError{Path: "/backend-api/me", StatusCode: 403, Body: "forbidden"}) {
 		t.Fatal("non-401 upstream error must not be treated as credential failure")

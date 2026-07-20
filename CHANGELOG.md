@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.1.35 - 2026-07-20
+
++ [修复] 对齐官方 ChatGPT Web：`/f/conversation/prepare` 返回 `status=ok` 但 `conduit_token` 为空时不再判定为账号凭证失效，而是继续提交 `/f/conversation` 并省略 `X-Conduit-Token`。
++ [修复] 空 `conduit_token` 不再归类为 `token_revoked`/认证失败，避免把全量可用账号误删或反复切号。
++ [优化] `status=ok` 的空 conduit prepare 不再刷错误日志，仅对异常 prepare payload 保留诊断日志。
+
 ## 0.1.34 - 2026-07-20
 
 + [修复] ChatGPT Web 协议头改为从首页实时 `data-build/data-seq` 同步 `OAI-Client-Version` 与 `OAI-Client-Build-Number`，避免长期使用过期客户端标识。

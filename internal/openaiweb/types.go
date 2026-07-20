@@ -228,9 +228,6 @@ func IsAuthenticationError(err error) bool {
 	if err == nil {
 		return false
 	}
-	if errors.Is(err, ErrMissingConduitToken) {
-		return true
-	}
 	if IsTokenInvalidError(err) {
 		return true
 	}

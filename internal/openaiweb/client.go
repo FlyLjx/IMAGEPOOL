@@ -762,8 +762,9 @@ func (c *Client) prepareImageConversationState(ctx context.Context, account acco
 	}
 	conduit := strings.TrimSpace(str(out["conduit_token"]))
 	if conduit == "" {
-		logImagePrepareMissingConduit(prepareState, out)
-		return imagePrepareResult{}, fmt.Errorf("prepare conversation(%s): %w", prepareState, ErrMissingConduitToken)
+		if shouldLogImagePrepareMissingConduit(out) {
+			logImagePrepareMissingConduit(prepareState, out)
+		}
 	}
 	return imagePrepareResult{ConduitToken: conduit, TurnTraceID: turnTraceID, ParentMessageID: parentMessageID, StartState: startState}, nil
 }
@@ -780,6 +781,22 @@ func isImagePrepareFallbackError(err error) bool {
 		return upstream.StatusCode == http.StatusBadRequest || upstream.StatusCode == http.StatusConflict || upstream.StatusCode == http.StatusUnprocessableEntity
 	}
 	return strings.Contains(strings.ToLower(err.Error()), "missing conduit_token")
+}
+
+func shouldLogImagePrepareMissingConduit(payload map[string]any) bool {
+	if payload == nil {
+		return true
+	}
+	status := strings.TrimSpace(strings.ToLower(str(payload["status"])))
+	if status != "" && status != "ok" {
+		return true
+	}
+	if _, ok := payload["error"]; ok {
+		return true
+	}
+	code := strings.TrimSpace(str(payload["code"]))
+	message := strings.TrimSpace(str(payload["message"]))
+	return code != "" || message != ""
 }
 
 func logImagePrepareMissingConduit(state string, payload map[string]any) {

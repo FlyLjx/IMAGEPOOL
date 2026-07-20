@@ -450,7 +450,7 @@ func TestGenerateImagePrepareFallbackUsesSuccessState(t *testing.T) {
 				if body["client_prepare_state"] != "none" {
 					t.Errorf("first prepare state=%#v", body["client_prepare_state"])
 				}
-				_ = json.NewEncoder(w).Encode(map[string]any{"detail": "no conduit for old prepare state"})
+				http.Error(w, `{"detail":"old prepare state conflicted"}`, http.StatusConflict)
 				return
 			}
 			if body["client_prepare_state"] != "success" {
@@ -487,9 +487,10 @@ func TestGenerateImagePrepareFallbackUsesSuccessState(t *testing.T) {
 	}
 }
 
-func TestGenerateImagePrepareRetriesEmptyConduitOnSuccessState(t *testing.T) {
+func TestGenerateImageContinuesWhenPrepareReturnsEmptyConduit(t *testing.T) {
 	var prepareCount atomic.Int32
 	var startState string
+	var startConduit string
 	var srv *httptest.Server
 	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -503,27 +504,18 @@ func TestGenerateImagePrepareRetriesEmptyConduitOnSuccessState(t *testing.T) {
 			index := prepareCount.Add(1)
 			var body map[string]any
 			_ = json.NewDecoder(r.Body).Decode(&body)
-			switch index {
-			case 1:
-				if body["client_prepare_state"] != "none" {
-					t.Errorf("first prepare state=%#v", body["client_prepare_state"])
-				}
-				_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok", "conduit_token": ""})
-			case 2, 3:
-				if body["client_prepare_state"] != "success" {
-					t.Errorf("retry prepare state=%#v", body["client_prepare_state"])
-				}
-				_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok", "conduit_token": ""})
-			default:
-				if body["client_prepare_state"] != "success" {
-					t.Errorf("final prepare state=%#v", body["client_prepare_state"])
-				}
-				_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok", "conduit_token": "retry-conduit"})
+			if index != 1 {
+				t.Errorf("empty conduit should not trigger prepare retry, got attempt %d", index)
 			}
+			if body["client_prepare_state"] != "none" {
+				t.Errorf("prepare state=%#v", body["client_prepare_state"])
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok", "conduit_token": ""})
 		case "/backend-api/f/conversation":
 			var body map[string]any
 			_ = json.NewDecoder(r.Body).Decode(&body)
 			startState = fmt.Sprint(body["client_prepare_state"])
+			startConduit = r.Header.Get("X-Conduit-Token")
 			w.Header().Set("Content-Type", "text/event-stream")
 			w.Write([]byte("data: {\"conversation_id\":\"conv-retry\"}\n\n"))
 		case "/backend-api/conversation/conv-retry":
@@ -545,8 +537,8 @@ func TestGenerateImagePrepareRetriesEmptyConduitOnSuccessState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if prepareCount.Load() != 4 || startState != "success" || len(result.URLs) != 1 {
-		t.Fatalf("prepare=%d startState=%q result=%#v", prepareCount.Load(), startState, result)
+	if prepareCount.Load() != 1 || startState != "sent" || startConduit != "" || len(result.URLs) != 1 {
+		t.Fatalf("prepare=%d startState=%q startConduit=%q result=%#v", prepareCount.Load(), startState, startConduit, result)
 	}
 }
 
