@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 0.1.33 - 2026-07-20
+
++ [修复] ChatGPT Web 生图 prepare 在 `status=ok` 但 `conduit_token` 为空时，会在同账号短间隔重试，减少高并发下误切号和任务失败。
++ [诊断] prepare 缺少 `conduit_token` 的日志补充 `status` 字段，便于判断上游空 token 是否为临时态。
+
 ## 0.1.32 - 2026-07-20
 
 + [修复] ChatGPT Web 生图 `conversation/prepare` 请求补入当前协议需要的 `partial_query`，避免上游返回 200 但缺少 `conduit_token` 导致任务失败。

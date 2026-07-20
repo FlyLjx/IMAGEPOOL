@@ -481,6 +481,69 @@ func TestGenerateImagePrepareFallbackUsesSuccessState(t *testing.T) {
 	}
 }
 
+func TestGenerateImagePrepareRetriesEmptyConduitOnSuccessState(t *testing.T) {
+	var prepareCount atomic.Int32
+	var startState string
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			w.Write([]byte(`<html data-build="build"><script src="/c/test/_abc.js"></script></html>`))
+		case "/backend-api/sentinel/chat-requirements/prepare":
+			_ = json.NewEncoder(w).Encode(map[string]any{"prepare_token": "prep", "proofofwork": map[string]any{"required": false}})
+		case "/backend-api/sentinel/chat-requirements/finalize":
+			_ = json.NewEncoder(w).Encode(map[string]any{"token": "sentinel"})
+		case "/backend-api/f/conversation/prepare":
+			index := prepareCount.Add(1)
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			switch index {
+			case 1:
+				if body["client_prepare_state"] != "none" {
+					t.Errorf("first prepare state=%#v", body["client_prepare_state"])
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok", "conduit_token": ""})
+			case 2, 3:
+				if body["client_prepare_state"] != "success" {
+					t.Errorf("retry prepare state=%#v", body["client_prepare_state"])
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok", "conduit_token": ""})
+			default:
+				if body["client_prepare_state"] != "success" {
+					t.Errorf("final prepare state=%#v", body["client_prepare_state"])
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok", "conduit_token": "retry-conduit"})
+			}
+		case "/backend-api/f/conversation":
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			startState = fmt.Sprint(body["client_prepare_state"])
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.Write([]byte("data: {\"conversation_id\":\"conv-retry\"}\n\n"))
+		case "/backend-api/conversation/conv-retry":
+			_ = json.NewEncoder(w).Encode(map[string]any{"mapping": map[string]any{"m": map[string]any{"message": map[string]any{"author": map[string]any{"role": "tool"}, "content": map[string]any{"parts": []any{map[string]any{"asset_pointer": "file-service://file_00000000cccccccccccccccccccccccc"}}}}}}})
+		case "/backend-api/files/download/file_00000000cccccccccccccccccccccccc":
+			_ = json.NewEncoder(w).Encode(map[string]any{"download_url": srv.URL + "/retry.png"})
+		case "/retry.png":
+			w.Write([]byte("PNG"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	cfg := config.Default()
+	cfg.ChatGPTBaseURL = srv.URL
+	client := NewClient(cfg, WithHTTPClient(srv.Client()), WithSleep(func(context.Context, time.Duration) error { return nil }))
+	result, err := client.GenerateImage(context.Background(), accounts.Account{Email: "a@example.com", AccessToken: "tok"}, ImageRequest{Prompt: "draw", Model: "gpt-image-2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prepareCount.Load() != 4 || startState != "success" || len(result.URLs) != 1 {
+		t.Fatalf("prepare=%d startState=%q result=%#v", prepareCount.Load(), startState, result)
+	}
+}
+
 func TestListModelsUsesOfficialModelsEndpoint(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {

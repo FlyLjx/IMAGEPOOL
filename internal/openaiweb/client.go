@@ -28,6 +28,7 @@ const (
 	defaultClientVersion     = "prod-de97061a1c9aff3931a7342defd6241031cd316a"
 	defaultClientBuildNumber = "8160987"
 	bootstrapResourcesTTL    = 5 * time.Minute
+	imagePrepareRetryDelay   = 350 * time.Millisecond
 	// Keep setup failures from consuming the full image-generation window. A
 	// submitted image still receives the complete poll timeout below.
 	defaultImagePreparationTimeout = 30 * time.Second
@@ -645,21 +646,36 @@ func (c *Client) prepareImageConversationForStart(ctx context.Context, account a
 	attempts := []struct {
 		PrepareState string
 		StartState   string
+		MaxAttempts  int
 	}{
-		{PrepareState: "none", StartState: "sent"},
-		{PrepareState: "success", StartState: "success"},
+		{PrepareState: "none", StartState: "sent", MaxAttempts: 1},
+		{PrepareState: "success", StartState: "success", MaxAttempts: 5},
 	}
 	var lastErr error
 	for index, attempt := range attempts {
-		result, err := c.prepareImageConversationState(ctx, account, prompt, model, requirements, refs, attempt.PrepareState, attempt.StartState)
-		if err == nil {
-			if index > 0 {
-				log.Printf("ChatGPT image prepare recovered with fallback state=%s start_state=%s", attempt.PrepareState, attempt.StartState)
+		var stateErr error
+		for retry := 0; retry < attempt.MaxAttempts; retry++ {
+			result, err := c.prepareImageConversationState(ctx, account, prompt, model, requirements, refs, attempt.PrepareState, attempt.StartState)
+			if err == nil {
+				if index > 0 || retry > 0 {
+					log.Printf("ChatGPT image prepare recovered with fallback state=%s start_state=%s retry=%d", attempt.PrepareState, attempt.StartState, retry)
+				}
+				return result, nil
 			}
-			return result, nil
+			stateErr = err
+			lastErr = err
+			if !isImagePrepareFallbackError(err) {
+				break
+			}
+			if retry+1 >= attempt.MaxAttempts {
+				break
+			}
+			delay := time.Duration(retry+1) * imagePrepareRetryDelay
+			if sleepErr := c.sleep(ctx, delay); sleepErr != nil {
+				return imagePrepareResult{}, sleepErr
+			}
 		}
-		lastErr = err
-		if !isImagePrepareFallbackError(err) {
+		if !isImagePrepareFallbackError(stateErr) {
 			break
 		}
 	}
@@ -731,7 +747,7 @@ func logImagePrepareMissingConduit(state string, payload map[string]any) {
 		message = str(payload["message"])
 		code = str(payload["code"])
 	}
-	log.Printf("ChatGPT image prepare returned no conduit_token: state=%s keys=%s code=%q message=%q", state, strings.Join(keys, ","), code, compactLogValue(message, 240))
+	log.Printf("ChatGPT image prepare returned no conduit_token: state=%s status=%q keys=%s code=%q message=%q", state, str(payload["status"]), strings.Join(keys, ","), code, compactLogValue(message, 240))
 }
 
 func compactLogValue(value string, limit int) string {
