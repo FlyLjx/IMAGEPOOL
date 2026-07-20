@@ -1047,7 +1047,8 @@ func (c *Client) baseHeaders(account accounts.Account) map[string]string {
 	if account.FP != nil && account.FP["sec-ch-ua"] != "" {
 		secCHUA = account.FP["sec-ch-ua"]
 	}
-	h := map[string]string{"User-Agent": c.userAgent(account), "Origin": c.baseURL, "Referer": c.baseURL + "/", "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8,en-US;q=0.7", "Cache-Control": "no-cache", "Pragma": "no-cache", "Sec-Ch-Ua": secCHUA, "Sec-Ch-Ua-Mobile": "?0", "Sec-Ch-Ua-Platform": `"Windows"`, "Sec-Fetch-Dest": "empty", "Sec-Fetch-Mode": "cors", "Sec-Fetch-Site": "same-origin", "OAI-Device-Id": device, "OAI-Session-Id": session, "OAI-Language": "zh-CN", "OAI-Client-Version": defaultClientVersion, "OAI-Client-Build-Number": defaultClientBuildNumber}
+	clientVersion, clientBuildNumber := c.currentClientIdentity()
+	h := map[string]string{"User-Agent": c.userAgent(account), "Origin": c.baseURL, "Referer": c.baseURL + "/", "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8,en-US;q=0.7", "Cache-Control": "no-cache", "Pragma": "no-cache", "Sec-Ch-Ua": secCHUA, "Sec-Ch-Ua-Mobile": "?0", "Sec-Ch-Ua-Platform": `"Windows"`, "Sec-Fetch-Dest": "empty", "Sec-Fetch-Mode": "cors", "Sec-Fetch-Site": "same-origin", "OAI-Device-Id": device, "OAI-Session-Id": session, "OAI-Language": "zh-CN", "OAI-Client-Version": clientVersion, "OAI-Client-Build-Number": clientBuildNumber}
 	if account.AccessToken != "" {
 		h["Authorization"] = "Bearer " + account.AccessToken
 	}

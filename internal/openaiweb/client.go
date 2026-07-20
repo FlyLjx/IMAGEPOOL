@@ -42,6 +42,7 @@ type bootstrapResourcesCacheKey struct {
 type bootstrapResourcesCacheEntry struct {
 	scripts   []string
 	build     string
+	seq       string
 	expiresAt time.Time
 }
 
@@ -49,6 +50,7 @@ type bootstrapResourcesFlight struct {
 	done    chan struct{}
 	scripts []string
 	build   string
+	seq     string
 	err     error
 }
 
@@ -80,6 +82,9 @@ type Client struct {
 	bootstrapMu                 sync.Mutex
 	bootstrapResources          map[bootstrapResourcesCacheKey]bootstrapResourcesCacheEntry
 	bootstrapFlights            map[bootstrapResourcesCacheKey]*bootstrapResourcesFlight
+	clientIdentityMu            sync.RWMutex
+	clientVersion               string
+	clientBuildNumber           string
 	now                         func() time.Time
 	newID                       func() string
 	sleep                       func(context.Context, time.Duration) error
@@ -459,6 +464,7 @@ func (c *Client) bootstrapWithResources(ctx context.Context, account accounts.Ac
 	c.bootstrapMu.Lock()
 	if cached, ok := c.bootstrapResources[key]; ok {
 		if now.Before(cached.expiresAt) {
+			c.setClientIdentity(cached.build, cached.seq)
 			scripts, build := cloneBootstrapScripts(cached.scripts), cached.build
 			c.bootstrapMu.Unlock()
 			return scripts, build, nil
@@ -469,6 +475,7 @@ func (c *Client) bootstrapWithResources(ctx context.Context, account accounts.Ac
 		c.bootstrapMu.Unlock()
 		select {
 		case <-flight.done:
+			c.setClientIdentity(flight.build, flight.seq)
 			return cloneBootstrapScripts(flight.scripts), flight.build, flight.err
 		case <-ctx.Done():
 			return nil, "", ctx.Err()
@@ -481,41 +488,43 @@ func (c *Client) bootstrapWithResources(ctx context.Context, account accounts.Ac
 	c.bootstrapFlights[key] = flight
 	c.bootstrapMu.Unlock()
 
-	scripts, build, err := c.bootstrapWithResourcesUncached(ctx, account)
+	scripts, build, seq, err := c.bootstrapWithResourcesUncached(ctx, account)
 	c.bootstrapMu.Lock()
 	delete(c.bootstrapFlights, key)
 	flight.scripts = cloneBootstrapScripts(scripts)
 	flight.build = build
+	flight.seq = seq
 	flight.err = err
 	if err == nil {
 		if c.bootstrapResources == nil {
 			c.bootstrapResources = map[bootstrapResourcesCacheKey]bootstrapResourcesCacheEntry{}
 		}
-		c.bootstrapResources[key] = bootstrapResourcesCacheEntry{scripts: cloneBootstrapScripts(scripts), build: build, expiresAt: c.bootstrapNow().Add(bootstrapResourcesTTL)}
+		c.bootstrapResources[key] = bootstrapResourcesCacheEntry{scripts: cloneBootstrapScripts(scripts), build: build, seq: seq, expiresAt: c.bootstrapNow().Add(bootstrapResourcesTTL)}
 	}
 	close(flight.done)
 	c.bootstrapMu.Unlock()
 	return scripts, build, err
 }
 
-func (c *Client) bootstrapWithResourcesUncached(ctx context.Context, account accounts.Account) ([]string, string, error) {
-	scripts, build, err := c.bootstrapWithResourcesOnce(ctx, account)
+func (c *Client) bootstrapWithResourcesUncached(ctx context.Context, account accounts.Account) ([]string, string, string, error) {
+	scripts, build, seq, err := c.bootstrapWithResourcesOnce(ctx, account)
 	if err == nil || !isBootstrapCloudflareError(err) || c.bootstrapClearanceRefresh == nil {
-		return scripts, build, err
+		return scripts, build, seq, err
 	}
 	refreshed, refreshErr := c.bootstrapClearanceRefresh(ctx)
 	if refreshErr != nil || refreshed == nil {
 		if refreshErr != nil {
 			log.Printf("ChatGPT bootstrap HTTP 403; FlareSolverr clearance refresh failed: %v", refreshErr)
 		}
-		return scripts, build, err
+		return scripts, build, seq, err
 	}
 	log.Printf("ChatGPT bootstrap HTTP 403; refreshed FlareSolverr clearance and retrying once")
-	scripts, build, err = refreshed.bootstrapWithResourcesOnce(ctx, account)
+	scripts, build, seq, err = refreshed.bootstrapWithResourcesOnce(ctx, account)
 	if err == nil && refreshed != c {
-		refreshed.cacheBootstrapResources(account, scripts, build)
+		refreshed.cacheBootstrapResources(account, scripts, build, seq)
+		c.setClientIdentity(build, seq)
 	}
-	return scripts, build, err
+	return scripts, build, seq, err
 }
 
 func bootstrapResourcesKey(account accounts.Account) bootstrapResourcesCacheKey {
@@ -533,22 +542,23 @@ func (c *Client) bootstrapNow() time.Time {
 	return time.Now()
 }
 
-func (c *Client) cacheBootstrapResources(account accounts.Account, scripts []string, build string) {
+func (c *Client) cacheBootstrapResources(account accounts.Account, scripts []string, build, seq string) {
 	if c == nil {
 		return
 	}
+	c.setClientIdentity(build, seq)
 	c.bootstrapMu.Lock()
 	defer c.bootstrapMu.Unlock()
 	if c.bootstrapResources == nil {
 		c.bootstrapResources = map[bootstrapResourcesCacheKey]bootstrapResourcesCacheEntry{}
 	}
-	c.bootstrapResources[bootstrapResourcesKey(account)] = bootstrapResourcesCacheEntry{scripts: cloneBootstrapScripts(scripts), build: build, expiresAt: c.bootstrapNow().Add(bootstrapResourcesTTL)}
+	c.bootstrapResources[bootstrapResourcesKey(account)] = bootstrapResourcesCacheEntry{scripts: cloneBootstrapScripts(scripts), build: build, seq: seq, expiresAt: c.bootstrapNow().Add(bootstrapResourcesTTL)}
 }
 
-func (c *Client) bootstrapWithResourcesOnce(ctx context.Context, account accounts.Account) ([]string, string, error) {
+func (c *Client) bootstrapWithResourcesOnce(ctx context.Context, account accounts.Account) ([]string, string, string, error) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/", nil)
 	if err != nil {
-		return nil, "", err
+		return nil, "", "", err
 	}
 	for k, v := range c.baseHeaders(account) {
 		request.Header.Set(k, v)
@@ -556,15 +566,52 @@ func (c *Client) bootstrapWithResourcesOnce(ctx context.Context, account account
 	request.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
 	resp, err := c.clientFor(account, false).Do(request)
 	if err != nil {
-		return nil, "", err
+		return nil, "", "", err
 	}
 	defer resp.Body.Close()
 	if err := ensureOK(resp, "bootstrap"); err != nil {
-		return nil, "", err
+		return nil, "", "", err
 	}
 	data, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
-	scripts, build := parsePOWResources(string(data))
-	return scripts, build, nil
+	scripts, build, seq := parseBootstrapResources(string(data))
+	c.setClientIdentity(build, seq)
+	return scripts, build, seq, nil
+}
+
+func (c *Client) setClientIdentity(version, buildNumber string) {
+	if c == nil {
+		return
+	}
+	version = strings.TrimSpace(version)
+	buildNumber = strings.TrimSpace(buildNumber)
+	if version == "" && buildNumber == "" {
+		return
+	}
+	c.clientIdentityMu.Lock()
+	if version != "" {
+		c.clientVersion = version
+	}
+	if buildNumber != "" {
+		c.clientBuildNumber = buildNumber
+	}
+	c.clientIdentityMu.Unlock()
+}
+
+func (c *Client) currentClientIdentity() (string, string) {
+	if c == nil {
+		return defaultClientVersion, defaultClientBuildNumber
+	}
+	c.clientIdentityMu.RLock()
+	version := c.clientVersion
+	buildNumber := c.clientBuildNumber
+	c.clientIdentityMu.RUnlock()
+	if strings.TrimSpace(version) == "" {
+		version = defaultClientVersion
+	}
+	if strings.TrimSpace(buildNumber) == "" {
+		buildNumber = defaultClientBuildNumber
+	}
+	return version, buildNumber
 }
 
 func isBootstrapCloudflareError(err error) bool {
@@ -688,26 +735,29 @@ func (c *Client) prepareImageConversationState(ctx context.Context, account acco
 	parentMessageID := c.newID()
 	content := imageMessageContent(prompt, refs)
 	payload := map[string]any{
-		"action":                 "next",
-		"fork_from_shared_post":  false,
-		"parent_message_id":      parentMessageID,
-		"model":                  model,
-		"client_prepare_state":   prepareState,
-		"timezone_offset_min":    -480,
-		"timezone":               "Asia/Shanghai",
-		"conversation_mode":      map[string]any{"kind": "primary_assistant"},
-		"system_hints":           []string{},
-		"partial_query":          map[string]any{"id": c.newID(), "author": map[string]any{"role": "user"}, "content": content},
-		"supports_buffering":     true,
-		"supported_encodings":    []string{"v1"},
-		"client_contextual_info": map[string]any{"app_name": "chatgpt.com"},
-		"thinking_effort":        "standard",
+		"action":                  "next",
+		"messages":                []any{},
+		"fork_from_shared_post":   false,
+		"parent_message_id":       parentMessageID,
+		"model":                   model,
+		"client_prepare_state":    prepareState,
+		"client_prepare_dispatch": "immediate",
+		"client_prepare_source":   "composer",
+		"timezone_offset_min":     -480,
+		"timezone":                "Asia/Shanghai",
+		"conversation_mode":       map[string]any{"kind": "primary_assistant"},
+		"system_hints":            []string{},
+		"partial_query":           map[string]any{"id": c.newID(), "author": map[string]any{"role": "user"}, "content": content},
+		"supports_buffering":      true,
+		"supported_encodings":     []string{"v1"},
+		"client_contextual_info":  map[string]any{"app_name": "chatgpt.com"},
+		"thinking_effort":         "standard",
 	}
 	if mimeTypes := imageAttachmentMIMETypes(refs); len(mimeTypes) > 0 {
 		payload["attachment_mime_types"] = mimeTypes
 	}
 	var out map[string]any
-	if err := c.doJSON(ctx, account, http.MethodPost, path, path, payload, c.imageHeaders(requirements, "no-token", "*/*", turnTraceID), &out); err != nil {
+	if err := c.doJSON(ctx, account, http.MethodPost, path, path, payload, c.imageHeaders(requirements, "", "*/*", turnTraceID), &out); err != nil {
 		return imagePrepareResult{}, fmt.Errorf("prepare conversation(%s): %w", prepareState, err)
 	}
 	conduit := strings.TrimSpace(str(out["conduit_token"]))

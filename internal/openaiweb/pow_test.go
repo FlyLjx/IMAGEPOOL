@@ -17,6 +17,16 @@ func TestBuildProofTokenHonorsCanceledContext(t *testing.T) {
 	}
 }
 
+func TestParseBootstrapResourcesExtractsClientIdentity(t *testing.T) {
+	scripts, build, seq := parseBootstrapResources(`<html data-build="prod-current" data-seq="8370486"><link rel="modulepreload" href="/cdn/assets/app.js"><script src="/backend-api/sentinel/sdk.js"></script></html>`)
+	if build != "prod-current" || seq != "8370486" {
+		t.Fatalf("build=%q seq=%q", build, seq)
+	}
+	if len(scripts) != 1 || scripts[0] != "/backend-api/sentinel/sdk.js" {
+		t.Fatalf("scripts=%#v", scripts)
+	}
+}
+
 func TestBuildProofTokenHonorsDeadlineDuringSearch(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
 	defer cancel()

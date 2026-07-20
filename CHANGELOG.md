@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.1.34 - 2026-07-20
+
++ [修复] ChatGPT Web 协议头改为从首页实时 `data-build/data-seq` 同步 `OAI-Client-Version` 与 `OAI-Client-Build-Number`，避免长期使用过期客户端标识。
++ [修复] 生图 prepare 请求对齐官方当前包体，补充 `messages` 与 prepare dispatch/source 字段，并取消初始请求中的伪 `X-Conduit-Token: no-token`。
++ [修复] 对 `status=ok` 但 `conduit_token` 持续为空的账号按半失效凭证处理，自动移除并切换其他账号，避免半失效账号反复进入调度导致高错误率。
+
 ## 0.1.33 - 2026-07-20
 
 + [修复] ChatGPT Web 生图 prepare 在 `status=ok` 但 `conduit_token` 为空时，会在同账号短间隔重试，减少高并发下误切号和任务失败。

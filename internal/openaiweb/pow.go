@@ -24,11 +24,17 @@ const (
 
 var scriptSrcRE = regexp.MustCompile(`<script[^>]+src=["']([^"']+)["']`)
 var dataBuildRE = regexp.MustCompile(`data-build=["']([^"']+)["']`)
+var dataSeqRE = regexp.MustCompile(`data-seq=["']([^"']+)["']`)
 var cBuildRE = regexp.MustCompile(`c/[^/]*/_`)
 
 func parsePOWResources(html string) ([]string, string) {
+	scripts, build, _ := parseBootstrapResources(html)
+	return scripts, build
+}
+
+func parseBootstrapResources(html string) ([]string, string, string) {
 	scripts := []string{}
-	dataBuild := ""
+	dataBuild := firstSubmatch(dataBuildRE, html)
 	for _, m := range scriptSrcRE.FindAllStringSubmatch(html, -1) {
 		scripts = append(scripts, m[1])
 		if dataBuild == "" {
@@ -40,12 +46,14 @@ func parsePOWResources(html string) ([]string, string) {
 	if len(scripts) == 0 {
 		scripts = []string{defaultPOWScript}
 	}
-	if dataBuild == "" {
-		if m := dataBuildRE.FindStringSubmatch(html); len(m) == 2 {
-			dataBuild = m[1]
-		}
+	return scripts, dataBuild, firstSubmatch(dataSeqRE, html)
+}
+
+func firstSubmatch(re *regexp.Regexp, value string) string {
+	if m := re.FindStringSubmatch(value); len(m) == 2 {
+		return m[1]
 	}
-	return scripts, dataBuild
+	return ""
 }
 
 func buildLegacyRequirementsToken(userAgent string, scripts []string, dataBuild string) string {

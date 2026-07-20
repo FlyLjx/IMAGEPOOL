@@ -81,12 +81,12 @@ func TestGenerateImageReverseProtocol(t *testing.T) {
 	var turnTraceID string
 	const expectedTurnstileToken = "dHVybnN0aWxlLXByb29m"
 	expectedPrepareStates := []string{"none"}
-	expectedConduitHeaders := []string{"no-token"}
+	expectedConduitHeaders := []string{""}
 	var srv *httptest.Server
 	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/":
-			w.Write([]byte(`<html data-build="build"><script src="/c/test/_abc.js"></script></html>`))
+			w.Write([]byte(`<html data-build="build" data-seq="1234567"><script src="/c/test/_abc.js"></script></html>`))
 		case r.Method == http.MethodPost && r.URL.Path == "/backend-api/sentinel/chat-requirements/prepare":
 			var body map[string]any
 			_ = json.NewDecoder(r.Body).Decode(&body)
@@ -116,7 +116,7 @@ func TestGenerateImageReverseProtocol(t *testing.T) {
 			if r.Header.Get("OpenAI-Sentinel-Turnstile-Token") != expectedTurnstileToken {
 				t.Errorf("missing turnstile header")
 			}
-			if r.Header.Get("OAI-Client-Version") != "prod-de97061a1c9aff3931a7342defd6241031cd316a" || r.Header.Get("OAI-Client-Build-Number") != "8160987" {
+			if r.Header.Get("OAI-Client-Version") != "build" || r.Header.Get("OAI-Client-Build-Number") != "1234567" {
 				t.Errorf("outdated client identity headers: version=%q build=%q", r.Header.Get("OAI-Client-Version"), r.Header.Get("OAI-Client-Build-Number"))
 			}
 			if got := r.Header.Get("X-Conduit-Token"); got != expectedConduitHeaders[prepareIndex] {
@@ -133,6 +133,12 @@ func TestGenerateImageReverseProtocol(t *testing.T) {
 			json.NewDecoder(r.Body).Decode(&body)
 			if body["model"] != "auto" || body["client_prepare_state"] != expectedPrepareStates[prepareIndex] || body["thinking_effort"] != "standard" {
 				t.Errorf("bad prepare payload: %#v", body)
+			}
+			if body["client_prepare_dispatch"] != "immediate" || body["client_prepare_source"] != "composer" {
+				t.Errorf("missing prepare metadata: %#v", body)
+			}
+			if messages, ok := body["messages"].([]any); !ok || len(messages) != 0 {
+				t.Errorf("bad prepare messages: %#v", body["messages"])
 			}
 			hints, _ := body["system_hints"].([]any)
 			if len(hints) != 0 {
@@ -383,8 +389,8 @@ func TestPrepareImageConversationIncludesReferenceMetadata(t *testing.T) {
 			return
 		}
 		prepareCount++
-		if got := r.Header.Get("X-Conduit-Token"); got != "no-token" {
-			t.Errorf("prepare %d conduit header=%q want=%q", prepareCount, got, "no-token")
+		if got := r.Header.Get("X-Conduit-Token"); got != "" {
+			t.Errorf("prepare %d conduit header=%q want empty", prepareCount, got)
 		}
 		var body map[string]any
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
