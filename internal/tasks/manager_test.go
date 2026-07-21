@@ -446,6 +446,30 @@ func TestFailedTaskHidesImagePollTimeoutDetails(t *testing.T) {
 	}
 }
 
+func TestTaskDeadlineIsReportedAsImageTimeout(t *testing.T) {
+	m := NewManager(taskSvc{})
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	task, _, err := m.runSyncWith(ctx, "generate", "user-a", images.Request{Prompt: "draw"}, func(ctx context.Context, req images.Request) (images.Response, error) {
+		if req.Progress != nil {
+			req.Progress(openaiweb.ProgressEvent{Progress: "polling_image", Message: "图片仍在生成"})
+		}
+		<-ctx.Done()
+		return images.Response{}, ctx.Err()
+	})
+	if !errors.Is(err, openaiweb.ErrPollTimeout) {
+		t.Fatalf("err=%v", err)
+	}
+	if task.Status != StatusFailed || task.Progress != "failed" || task.Error != openaiweb.PublicImagePollTimeoutMessage {
+		t.Fatalf("task=%#v", task)
+	}
+	for _, entry := range task.StatusLogs {
+		if entry.Message == "任务已取消" {
+			t.Fatalf("deadline was recorded as cancellation: %#v", task.StatusLogs)
+		}
+	}
+}
+
 func TestCompletedTasksAreCompacted(t *testing.T) {
 	m := NewManager(verboseTaskSvc{})
 	defer m.Close()

@@ -35,6 +35,26 @@ func TestFindImageGenerationTerminalError(t *testing.T) {
 	}
 }
 
+func TestFindImageGenerationTerminalErrorFromCurrentToolPayload(t *testing.T) {
+	err := findImageGenerationTerminalError(map[string]any{
+		"async_status": float64(4),
+		"mapping": map[string]any{
+			"tool": map[string]any{
+				"message": map[string]any{
+					"author": map[string]any{"role": "tool", "name": "t2uay3k.sj1i4kz"},
+					"content": map[string]any{"content_type": "text", "parts": []any{
+						"We experienced an error when generating images.",
+					}},
+					"metadata": map[string]any{"is_error": true},
+				},
+			},
+		},
+	})
+	if !errors.Is(err, ErrImageGenerationTerminated) {
+		t.Fatalf("err=%v", err)
+	}
+}
+
 func TestStartImageGenerationStopsOnTerminalToolStatus(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/backend-api/f/conversation" {

@@ -193,6 +193,12 @@ func imageToolTerminalStatus(value map[string]any, terminal map[string]bool) str
 	if !isImageGenerationTool(message, metadata) {
 		return ""
 	}
+	// Current ImageGen tool failures may omit metadata.status entirely and
+	// instead mark the tool message with is_error=true. Treat that as a
+	// terminal generation result so polling can switch accounts immediately.
+	if imageToolTruthy(metadata["is_error"]) {
+		return "image_generation_failed"
+	}
 	if status := terminalImageStatus(metadata["status"], terminal); status != "" {
 		return status
 	}
@@ -203,7 +209,30 @@ func imageToolTerminalStatus(value map[string]any, terminal map[string]bool) str
 			}
 		}
 	}
+	if imageToolErrorText(message) {
+		return "image_generation_failed"
+	}
 	return ""
+}
+
+func imageToolErrorText(message map[string]any) bool {
+	content, _ := message["content"].(map[string]any)
+	parts, _ := content["parts"].([]any)
+	for _, part := range parts {
+		text, ok := part.(string)
+		if !ok {
+			continue
+		}
+		lower := strings.ToLower(strings.TrimSpace(text))
+		if strings.Contains(lower, "error when generating images") ||
+			strings.Contains(lower, "unable to generate images") ||
+			strings.Contains(lower, "failed to generate images") ||
+			strings.Contains(text, "生成图片时遇到错误") ||
+			strings.Contains(text, "图片生成失败") {
+			return true
+		}
+	}
+	return false
 }
 
 func isImageGenerationTool(message, metadata map[string]any) bool {

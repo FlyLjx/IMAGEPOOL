@@ -368,7 +368,13 @@ func (m *Manager) runWith(ctx context.Context, id string, req images.Request, ge
 		task.DurationMS = now.Sub(*task.StartedAt).Milliseconds()
 		task.ElapsedSecs = float64(task.DurationMS) / 1000
 	}
-	if ctx.Err() != nil {
+	// A task deadline is a generation timeout, not a user cancellation. Keep
+	// the public timeout status/error while reserving "任务已取消" for an
+	// explicit client cancellation or service shutdown.
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		err = fmt.Errorf("%w: task deadline exceeded", openaiweb.ErrPollTimeout)
+	}
+	if ctx.Err() != nil && !errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		task.Status = StatusCanceled
 		task.Progress = "canceled"
 		task.ProgressPercent = 100
