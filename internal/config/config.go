@@ -23,6 +23,7 @@ type Config struct {
 	RegisterFile                        string        `json:"register_file"`
 	WebDistDir                          string        `json:"web_dist_dir"`
 	ImageOutputDir                      string        `json:"image_output_dir"`
+	ImageRetentionDays                  int           `json:"image_retention_days"`
 	ChatGPTBaseURL                      string        `json:"chatgpt_base_url"`
 	UpstreamTransport                   string        `json:"upstream_transport"`
 	ImageWebModelSlug                   string        `json:"image_web_model_slug"`
@@ -108,13 +109,14 @@ func Default() Config {
 		RegisterFile:                        "data/register.json",
 		WebDistDir:                          "web_dist",
 		ImageOutputDir:                      "data/images",
+		ImageRetentionDays:                  30,
 		ChatGPTBaseURL:                      "https://chatgpt.com",
 		UpstreamTransport:                   "standard",
 		ImageWebModelSlug:                   "gpt-5-5",
-		ImagePollTimeoutSecs:                180,
+		ImagePollTimeoutSecs:                300,
 		ImagePollIntervalSecs:               3,
 		ImagePollInitialWaitSecs:            0,
-		ImageTaskTimeoutSecs:                300,
+		ImageTaskTimeoutSecs:                330,
 		ImageSettleSecs:                     2,
 		ImageCapacityBurstParallel:          50,
 		ImageAccountPrecheckIntervalMinutes: 10,
@@ -269,6 +271,12 @@ func (c Config) Normalize() Config {
 	if strings.TrimSpace(c.ImageOutputDir) == "" {
 		c.ImageOutputDir = d.ImageOutputDir
 	}
+	if c.ImageRetentionDays <= 0 {
+		c.ImageRetentionDays = d.ImageRetentionDays
+	}
+	if c.ImageRetentionDays > 3650 {
+		c.ImageRetentionDays = 3650
+	}
 	if strings.TrimSpace(c.ChatGPTBaseURL) == "" {
 		c.ChatGPTBaseURL = d.ChatGPTBaseURL
 	}
@@ -279,8 +287,8 @@ func (c Config) Normalize() Config {
 	if c.ImagePollTimeoutSecs < d.ImagePollTimeoutSecs {
 		c.ImagePollTimeoutSecs = d.ImagePollTimeoutSecs
 	}
-	if c.ImagePollTimeoutSecs > 180 {
-		c.ImagePollTimeoutSecs = 180
+	if c.ImagePollTimeoutSecs > d.ImagePollTimeoutSecs {
+		c.ImagePollTimeoutSecs = d.ImagePollTimeoutSecs
 	}
 	if c.ImagePollIntervalSecs <= 0 {
 		c.ImagePollIntervalSecs = d.ImagePollIntervalSecs
@@ -288,9 +296,9 @@ func (c Config) Normalize() Config {
 	if c.ImagePollInitialWaitSecs < 0 {
 		c.ImagePollInitialWaitSecs = 0
 	}
-	// The request budget must leave room for a short preparation phase plus a
-	// full 180-second submitted generation. Older configurations, including
-	// zero (unlimited), are all migrated to the fixed 300-second budget.
+	// The request budget must leave room for the bounded preparation phase plus
+	// a full 300-second submitted generation. Older configurations, including
+	// zero (unlimited), are all migrated to this fixed end-to-end budget.
 	c.ImageTaskTimeoutSecs = d.ImageTaskTimeoutSecs
 	if c.ImageSettleSecs < 0 {
 		c.ImageSettleSecs = 0

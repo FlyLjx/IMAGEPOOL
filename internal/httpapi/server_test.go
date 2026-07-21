@@ -187,8 +187,8 @@ func TestErrorClassificationDoesNotTreatCanceledOrRejectedRequestsAsFailures(t *
 	}
 }
 
-func TestImagePollTimeoutReturnsPublicQuotaRetryError(t *testing.T) {
-	err := fmt.Errorf("generation: %w: ChatGPT 生图任务已等待 180 秒", openaiweb.ErrPollTimeout)
+func TestImagePollTimeoutReturnsPublicOAITimeoutError(t *testing.T) {
+	err := fmt.Errorf("generation: %w: ChatGPT 生图任务已等待 300 秒", openaiweb.ErrPollTimeout)
 	if status := statusFromError(err); status != http.StatusTooManyRequests {
 		t.Fatalf("status=%d", status)
 	}
@@ -204,7 +204,7 @@ func TestImagePollTimeoutReturnsPublicQuotaRetryError(t *testing.T) {
 	if decodeErr := json.NewDecoder(recorder.Body).Decode(&body); decodeErr != nil {
 		t.Fatal(decodeErr)
 	}
-	if recorder.Code != http.StatusTooManyRequests || body.Error.Message != openaiweb.PublicImagePollTimeoutMessage || body.Error.Type != "rate_limit_error" || body.Error.Code != "image_quota_reservation_failed" {
+	if recorder.Code != http.StatusTooManyRequests || body.Error.Message != openaiweb.PublicImagePollTimeoutMessage || body.Error.Type != "timeout_error" || body.Error.Code != "oai_image_generation_timeout" {
 		t.Fatalf("status=%d body=%#v", recorder.Code, body)
 	}
 }
@@ -231,7 +231,7 @@ func TestImagePreparationTimeoutReturnsGatewayTimeout(t *testing.T) {
 }
 
 func TestImageGenerationEndpointReturnsPublicPollTimeoutError(t *testing.T) {
-	err := fmt.Errorf("%w: ChatGPT 生图任务已等待 180 秒", openaiweb.ErrPollTimeout)
+	err := fmt.Errorf("%w: ChatGPT 生图任务已等待 300 秒", openaiweb.ErrPollTimeout)
 	srv := httptest.NewServer(testServerWithGenerateError(t, err))
 	defer srv.Close()
 	req, err := http.NewRequest(http.MethodPost, srv.URL+"/v1/images/generations", strings.NewReader(`{"prompt":"draw"}`))
@@ -254,13 +254,13 @@ func TestImageGenerationEndpointReturnsPublicPollTimeoutError(t *testing.T) {
 	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
 		t.Fatal(err)
 	}
-	if response.StatusCode != http.StatusTooManyRequests || body.Error.Message != openaiweb.PublicImagePollTimeoutMessage || body.Error.Type != "rate_limit_error" || body.Error.Code != "image_quota_reservation_failed" {
+	if response.StatusCode != http.StatusTooManyRequests || body.Error.Message != openaiweb.PublicImagePollTimeoutMessage || body.Error.Type != "timeout_error" || body.Error.Code != "oai_image_generation_timeout" {
 		t.Fatalf("status=%d body=%#v", response.StatusCode, body)
 	}
 }
 
 func TestStreamingImageGenerationEndpointReturnsPublicPollTimeoutError(t *testing.T) {
-	err := fmt.Errorf("%w: ChatGPT 生图任务已等待 180 秒", openaiweb.ErrPollTimeout)
+	err := fmt.Errorf("%w: ChatGPT 生图任务已等待 300 秒", openaiweb.ErrPollTimeout)
 	srv := httptest.NewServer(testServerWithGenerateError(t, err))
 	defer srv.Close()
 	req, err := http.NewRequest(http.MethodPost, srv.URL+"/v1/images/generations", strings.NewReader(`{"prompt":"draw","stream":true}`))
@@ -1009,21 +1009,21 @@ func TestSettingsPersistAndNotify(t *testing.T) {
 	var updated config.Config
 	srv := httptest.NewServer(newTestServer(cfg, func(next config.Config) { updated = next }))
 	defer srv.Close()
-	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/settings", strings.NewReader(`{"image_web_model_slug":"gpt-5-6","refresh_account_interval_minute":2,"refresh_account_concurrency":3}`))
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/settings", strings.NewReader(`{"image_web_model_slug":"gpt-5-6","refresh_account_interval_minute":2,"refresh_account_concurrency":3,"image_retention_days":7}`))
 	req.Header.Set("Authorization", "Bearer k")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
-	if resp.StatusCode != http.StatusOK || updated.ImageWebModelSlug != "gpt-5-6" || updated.RefreshAccountIntervalMinutes != 2 || updated.RefreshAccountConcurrency != 3 {
+	if resp.StatusCode != http.StatusOK || updated.ImageWebModelSlug != "gpt-5-6" || updated.RefreshAccountIntervalMinutes != 2 || updated.RefreshAccountConcurrency != 3 || updated.ImageRetentionDays != 7 {
 		t.Fatalf("status=%d updated=%#v", resp.StatusCode, updated)
 	}
 	reloaded, err := config.Load(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reloaded.ImageWebModelSlug != "gpt-5-6" || reloaded.RefreshAccountIntervalMinutes != 2 || reloaded.RefreshAccountConcurrency != 3 {
+	if reloaded.ImageWebModelSlug != "gpt-5-6" || reloaded.RefreshAccountIntervalMinutes != 2 || reloaded.RefreshAccountConcurrency != 3 || reloaded.ImageRetentionDays != 7 {
 		t.Fatalf("persisted config=%#v", reloaded)
 	}
 }

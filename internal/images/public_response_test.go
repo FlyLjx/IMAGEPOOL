@@ -31,7 +31,7 @@ func TestMarshalForOpenAIRedactsUpstreamAttemptDiagnostics(t *testing.T) {
 }
 
 func TestMarshalForOpenAIHidesPollTimeoutDetails(t *testing.T) {
-	raw := "image poll timeout: ChatGPT 生图任务已等待 180 秒"
+	raw := "image poll timeout: ChatGPT 生图任务已等待 300 秒"
 	payload := (Response{Attempts: []openaiweb.AttemptLog{{Attempt: 1, Status: "failed", Error: raw}}}).MarshalForOpenAI()
 	body, err := json.Marshal(payload)
 	if err != nil {

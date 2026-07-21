@@ -14,16 +14,19 @@ func TestDefaultNormalize(t *testing.T) {
 	if cfg.ImageWebModelSlug != "gpt-5-5" {
 		t.Fatalf("slug=%q", cfg.ImageWebModelSlug)
 	}
+	if cfg.ImageRetentionDays != 30 {
+		t.Fatalf("image retention days=%d", cfg.ImageRetentionDays)
+	}
 	if cfg.ImageAccountPrecheckIntervalMinutes != 10 {
 		t.Fatalf("precheck interval=%d", cfg.ImageAccountPrecheckIntervalMinutes)
 	}
 	if cfg.ImageAccountPrecheckConcurrency != 6 || cfg.ImageAccountPrecheckTimeoutSecs != 75 {
 		t.Fatalf("precheck limits=%d/%.0f", cfg.ImageAccountPrecheckConcurrency, cfg.ImageAccountPrecheckTimeoutSecs)
 	}
-	if cfg.ImagePollTimeoutSecs != 180 {
+	if cfg.ImagePollTimeoutSecs != 300 {
 		t.Fatalf("image poll timeout=%.0f", cfg.ImagePollTimeoutSecs)
 	}
-	if cfg.ImageTaskTimeoutSecs != 300 {
+	if cfg.ImageTaskTimeoutSecs != 330 {
 		t.Fatalf("image task timeout=%.0f", cfg.ImageTaskTimeoutSecs)
 	}
 	if cfg.RefreshAccountIntervalMinutes != 60 {
@@ -36,25 +39,37 @@ func TestDefaultNormalize(t *testing.T) {
 
 func TestNormalizeFixesImageWaits(t *testing.T) {
 	cfg := Config{ImagePollTimeoutSecs: 300, ImageTaskTimeoutSecs: 600}.Normalize()
-	if cfg.ImagePollTimeoutSecs != 180 || cfg.ImageTaskTimeoutSecs != 300 {
+	if cfg.ImagePollTimeoutSecs != 300 || cfg.ImageTaskTimeoutSecs != 330 {
 		t.Fatalf("image timeouts=%.0f/%.0f", cfg.ImagePollTimeoutSecs, cfg.ImageTaskTimeoutSecs)
 	}
-	if timeout := (Config{ImageTaskTimeoutSecs: 120}).Normalize().ImageTaskTimeoutSecs; timeout != 300 {
+	if timeout := (Config{ImageTaskTimeoutSecs: 120}).Normalize().ImageTaskTimeoutSecs; timeout != 330 {
 		t.Fatalf("configured image task timeout=%.0f", timeout)
 	}
 }
 
 func TestNormalizeMigratesLegacyImagePollTimeout(t *testing.T) {
-	for _, configured := range []float64{60, 90} {
-		if timeout := (Config{ImagePollTimeoutSecs: configured}).Normalize().ImagePollTimeoutSecs; timeout != 180 {
+	for _, configured := range []float64{60, 90, 180} {
+		if timeout := (Config{ImagePollTimeoutSecs: configured}).Normalize().ImagePollTimeoutSecs; timeout != 300 {
 			t.Fatalf("configured=%.0f image poll timeout=%.0f", configured, timeout)
 		}
 	}
 }
 
 func TestZeroImageTaskTimeoutMigratesToBoundedDefault(t *testing.T) {
-	if timeout := (Config{ImageTaskTimeoutSecs: 0}).Normalize().ImageTaskTimeoutSecs; timeout != 300 {
+	if timeout := (Config{ImageTaskTimeoutSecs: 0}).Normalize().ImageTaskTimeoutSecs; timeout != 330 {
 		t.Fatalf("image task timeout=%.0f", timeout)
+	}
+}
+
+func TestNormalizePreservesImageRetentionDays(t *testing.T) {
+	if days := (Config{ImageRetentionDays: 7}).Normalize().ImageRetentionDays; days != 7 {
+		t.Fatalf("image retention days=%d", days)
+	}
+	if days := (Config{ImageRetentionDays: 0}).Normalize().ImageRetentionDays; days != 30 {
+		t.Fatalf("default image retention days=%d", days)
+	}
+	if days := (Config{ImageRetentionDays: 5000}).Normalize().ImageRetentionDays; days != 3650 {
+		t.Fatalf("capped image retention days=%d", days)
 	}
 }
 

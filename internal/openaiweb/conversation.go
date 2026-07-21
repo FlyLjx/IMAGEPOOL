@@ -92,7 +92,7 @@ func (c *Client) startImageGeneration(ctx context.Context, account accounts.Acco
 
 // startImageGenerationWithinBudget is used after GenerateImage has created a
 // shared generation context. Keeping the wrapper above preserves the same
-// limit for direct callers and tests without creating a second 180-second
+// limit for direct callers and tests without creating a second 300-second
 // window inside an account attempt.
 func (c *Client) startImageGenerationWithinBudget(ctx context.Context, account accounts.Account, prompt, model string, requirements chatRequirements, conduit, turnTraceID, parentMessageID string, refs []uploadMeta) (conversationID string, fileIDs []string, sedimentIDs []string, err error) {
 	return c.startImageGenerationWithinBudgetWithState(ctx, account, prompt, model, requirements, conduit, turnTraceID, parentMessageID, "sent", refs)
@@ -140,7 +140,7 @@ func (c *Client) startImageGenerationWithinBudgetWithState(ctx context.Context, 
 	foundReferences, streamDone, streamErr := c.consumeImageStream(ctx, resp.Body, refs, state)
 	if streamErr != nil {
 		if ctx.Err() != nil {
-			return state.conversationID, state.fileIDs, state.sedimentIDs, imageGenerationError(ctx, ctx.Err())
+			return state.conversationID, state.fileIDs, state.sedimentIDs, imageGenerationErrorForConversation(ctx, ctx.Err(), state.conversationID)
 		}
 		if state.conversationID == "" || !isRetryableResumeError(streamErr) {
 			return state.conversationID, state.fileIDs, state.sedimentIDs, streamErr
@@ -167,24 +167,24 @@ func (c *Client) startImageGenerationWithinBudgetWithState(ctx context.Context, 
 				break
 			}
 			if !isRetryableResumeError(resumeErr) {
-				return state.conversationID, state.fileIDs, state.sedimentIDs, imageGenerationError(ctx, resumeErr)
+				return state.conversationID, state.fileIDs, state.sedimentIDs, imageGenerationErrorForConversation(ctx, resumeErr, state.conversationID)
 			}
 			lastResumeErr = resumeErr
 			if attempt+1 >= maxImageResumeAttempts {
 				break
 			}
 			if err := c.sleep(ctx, imageResumeRetryDelay(attempt)); err != nil {
-				return state.conversationID, state.fileIDs, state.sedimentIDs, imageGenerationError(ctx, err)
+				return state.conversationID, state.fileIDs, state.sedimentIDs, imageGenerationErrorForConversation(ctx, err, state.conversationID)
 			}
 			continue
 		}
 		foundReferences, streamDone, streamErr = c.consumeImageStream(ctx, resumeBody, refs, state)
 		if streamErr != nil {
 			if ctx.Err() != nil {
-				return state.conversationID, state.fileIDs, state.sedimentIDs, imageGenerationError(ctx, ctx.Err())
+				return state.conversationID, state.fileIDs, state.sedimentIDs, imageGenerationErrorForConversation(ctx, ctx.Err(), state.conversationID)
 			}
 			if !isRetryableResumeError(streamErr) {
-				return state.conversationID, state.fileIDs, state.sedimentIDs, imageGenerationError(ctx, streamErr)
+				return state.conversationID, state.fileIDs, state.sedimentIDs, imageGenerationErrorForConversation(ctx, streamErr, state.conversationID)
 			}
 			lastResumeErr = streamErr
 		}
@@ -193,7 +193,7 @@ func (c *Client) startImageGenerationWithinBudgetWithState(ctx context.Context, 
 		}
 	}
 	if ctx.Err() != nil {
-		return state.conversationID, state.fileIDs, state.sedimentIDs, imageGenerationError(ctx, ctx.Err())
+		return state.conversationID, state.fileIDs, state.sedimentIDs, imageGenerationErrorForConversation(ctx, ctx.Err(), state.conversationID)
 	}
 	if !foundReferences && !streamDone && errors.Is(lastResumeErr, errImageStreamOpenTimeout) {
 		return state.conversationID, state.fileIDs, state.sedimentIDs, lastResumeErr
@@ -214,18 +214,36 @@ func (c *Client) imageGenerationContext(ctx context.Context) (context.Context, c
 
 func imageGenerationError(ctx context.Context, err error) error {
 	if errors.Is(err, context.DeadlineExceeded) {
-		if ctx != nil {
-			if started, ok := ctx.Value(imageGenerationStartedAtKey{}).(time.Time); ok {
-				elapsed := int(time.Since(started).Round(time.Second).Seconds())
-				if elapsed < 1 {
-					elapsed = 1
-				}
-				return fmt.Errorf("%w: ChatGPT 生图任务已等待 %d 秒", ErrPollTimeout, elapsed)
-			}
+		if elapsed := imageGenerationElapsedSecs(ctx); elapsed > 0 {
+			return fmt.Errorf("%w: ChatGPT 生图任务已等待 %d 秒", ErrPollTimeout, elapsed)
 		}
 		return fmt.Errorf("%w: ChatGPT 生图任务超时", ErrPollTimeout)
 	}
 	return err
+}
+
+func imageGenerationErrorForConversation(ctx context.Context, err error, conversationID string) error {
+	if strings.TrimSpace(conversationID) != "" {
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ErrPollTimeout) {
+			return NewImageConversationTimeoutError(conversationID, imageGenerationElapsedSecs(ctx))
+		}
+	}
+	return imageGenerationError(ctx, err)
+}
+
+func imageGenerationElapsedSecs(ctx context.Context) int {
+	if ctx == nil {
+		return 0
+	}
+	started, ok := ctx.Value(imageGenerationStartedAtKey{}).(time.Time)
+	if !ok {
+		return 0
+	}
+	elapsed := int(time.Since(started).Round(time.Second).Seconds())
+	if elapsed < 1 {
+		elapsed = 1
+	}
+	return elapsed
 }
 
 func (c *Client) openImageGenerationStream(ctx context.Context, account accounts.Account, path string, body []byte, headers map[string]string) (*http.Response, error) {
@@ -361,7 +379,7 @@ func (c *Client) consumeImageStream(ctx context.Context, body io.ReadCloser, ref
 	defer idleTimer.Stop()
 	streamTimeout := c.pollTimeout
 	if streamTimeout <= 0 {
-		streamTimeout = 180 * time.Second
+		streamTimeout = 300 * time.Second
 	}
 	streamTimer := time.NewTimer(streamTimeout)
 	defer streamTimer.Stop()
@@ -664,9 +682,23 @@ func (c *Client) pollImageResultsWithProgress(ctx context.Context, account accou
 	fileIDs := filterExcludedIDs(initialFileIDs, excludedFileIDs)
 	sedimentIDs := filterExcludedIDs(initialSedimentIDs, excludedFileIDs)
 	startedAt := time.Now()
-	deadline := startedAt.Add(c.pollTimeout)
+	pollTimeout := c.pollTimeout
+	if pollTimeout <= 0 {
+		pollTimeout = 300 * time.Second
+	}
+	deadline := startedAt.Add(pollTimeout)
+	pollTimeoutError := func() error {
+		elapsed := int(time.Since(startedAt).Round(time.Second).Seconds())
+		if elapsed < int(pollTimeout.Round(time.Second).Seconds()) {
+			elapsed = int(pollTimeout.Round(time.Second).Seconds())
+		}
+		return NewImageConversationTimeoutError(conversationID, elapsed)
+	}
 	if len(fileIDs) == 0 && len(sedimentIDs) == 0 && c.pollInitialWait > 0 {
 		if err := c.sleep(ctx, c.pollInitialWait); err != nil {
+			if errors.Is(err, context.DeadlineExceeded) {
+				return nil, nil, pollTimeoutError()
+			}
 			return nil, nil, err
 		}
 	}
@@ -696,7 +728,13 @@ func (c *Client) pollImageResultsWithProgress(ctx context.Context, account accou
 	waitForNextPoll := func() error {
 		delay := adaptiveImagePollDelay(c.pollInterval, pollMisses)
 		pollMisses++
-		return c.sleep(ctx, delay)
+		if err := c.sleep(ctx, delay); err != nil {
+			if errors.Is(err, context.DeadlineExceeded) {
+				return pollTimeoutError()
+			}
+			return err
+		}
+		return nil
 	}
 	for time.Now().Before(deadline) {
 		reportHeartbeat()
@@ -742,7 +780,7 @@ func (c *Client) pollImageResultsWithProgress(ctx context.Context, account accou
 			return nil, nil, err
 		}
 	}
-	return nil, nil, fmt.Errorf("%w: ChatGPT 生图超时（已等待 %.0f 秒）", ErrPollTimeout, c.pollTimeout.Seconds())
+	return nil, nil, pollTimeoutError()
 }
 
 // adaptiveImagePollDelay retains a quick first check while preventing a

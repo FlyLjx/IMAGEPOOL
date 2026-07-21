@@ -248,6 +248,9 @@ func TestGenerateImageUsesOneBudgetForStreamAndPolling(t *testing.T) {
 	if !errors.Is(err, ErrPollTimeout) {
 		t.Fatalf("err=%v", err)
 	}
+	if !IsImageConversationTimeout(err) {
+		t.Fatalf("accepted conversation timeout was not classified: %v", err)
+	}
 	if elapsed := time.Since(started); elapsed > 250*time.Millisecond {
 		t.Fatalf("generation exceeded its shared budget for %s", elapsed)
 	}

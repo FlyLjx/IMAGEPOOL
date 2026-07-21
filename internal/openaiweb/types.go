@@ -80,12 +80,50 @@ var (
 	ErrMissingConduitToken       = errors.New("missing conduit_token")
 )
 
+// ImageConversationTimeoutError marks the case where ChatGPT has already
+// accepted an image conversation but the generated image is still not available
+// by the configured poll budget. The same account and conversation must be
+// allowed to finish until this timeout; switching accounts cannot retrieve that
+// already-submitted conversation.
+type ImageConversationTimeoutError struct {
+	ConversationID string
+	ElapsedSecs    int
+}
+
+func (e *ImageConversationTimeoutError) Error() string {
+	elapsed := e.ElapsedSecs
+	if elapsed <= 0 {
+		elapsed = 1
+	}
+	conversationID := strings.TrimSpace(e.ConversationID)
+	if conversationID == "" {
+		return fmt.Sprintf("%s: ChatGPT 生图任务已等待 %d 秒", ErrPollTimeout, elapsed)
+	}
+	return fmt.Sprintf("%s: ChatGPT 生图任务已等待 %d 秒; conversation_id=%s", ErrPollTimeout, elapsed, conversationID)
+}
+
+func (e *ImageConversationTimeoutError) Unwrap() error {
+	return ErrPollTimeout
+}
+
+func NewImageConversationTimeoutError(conversationID string, elapsedSecs int) error {
+	if elapsedSecs <= 0 {
+		elapsedSecs = 1
+	}
+	return &ImageConversationTimeoutError{ConversationID: strings.TrimSpace(conversationID), ElapsedSecs: elapsedSecs}
+}
+
+func IsImageConversationTimeout(err error) bool {
+	var timeout *ImageConversationTimeoutError
+	return errors.As(err, &timeout) && strings.TrimSpace(timeout.ConversationID) != ""
+}
+
 const (
 	// PublicCredentialInvalidMessage is intentionally independent of the
 	// upstream response. Upstream OAuth bodies can contain endpoint and token
 	// details which must never reach API consumers or persisted task history.
 	PublicCredentialInvalidMessage = "账号凭证已失效，已自动删除并切换账号重试"
-	PublicImagePollTimeoutMessage  = "任务占用额度失败，请再次提交。"
+	PublicImagePollTimeoutMessage  = "OAI侧出图超出300s，请重新提交任务。"
 	PublicUpstreamFailureMessage   = "上游服务请求失败，请稍后重试"
 )
 
@@ -279,6 +317,9 @@ func IsRetryableImageError(err error) bool {
 		return false
 	}
 	if errors.Is(err, ErrContentPolicy) {
+		return false
+	}
+	if IsImageConversationTimeout(err) {
 		return false
 	}
 	if errors.Is(err, ErrTurnstileVMCapacity) {

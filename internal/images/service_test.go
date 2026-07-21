@@ -295,12 +295,32 @@ func TestGenerateAllowsAuthenticationRetryAfterOrdinaryAttemptLimit(t *testing.T
 	}
 }
 
-func TestGenerateSwitchesAccountsAfterConversationPollTimeout(t *testing.T) {
+func TestGenerateSwitchesAccountsAfterPreConversationPollTimeout(t *testing.T) {
 	store := accounts.NewStore([]accounts.Account{{Email: "old", AccessToken: "old", CreatedAt: 1}, {Email: "new", AccessToken: "new", CreatedAt: 2}}, "")
 	backend := &fakeBackend{errs: []error{fmt.Errorf("wait failed: %w", openaiweb.ErrPollTimeout)}}
 	response, err := NewService(config.Default(), store, backend).Generate(context.Background(), Request{Prompt: "draw"})
 	if err != nil || backend.calls != 2 || response.AccountEmail != "old" {
 		t.Fatalf("response=%#v err=%v calls=%d", response, err, backend.calls)
+	}
+}
+
+func TestGenerateDoesNotSwitchAccountsAfterAcceptedConversationTimeout(t *testing.T) {
+	store := accounts.NewStore([]accounts.Account{
+		{Email: "old", AccessToken: "old", CreatedAt: 1, Extra: map[string]any{}},
+		{Email: "new", AccessToken: "new", CreatedAt: 2, Extra: map[string]any{}},
+	}, "")
+	timeout := openaiweb.NewImageConversationTimeoutError("conv-1", 300)
+	backend := &fakeBackend{errs: []error{timeout}}
+	response, err := NewService(config.Default(), store, backend).Generate(context.Background(), Request{Prompt: "draw"})
+	if !errors.Is(err, openaiweb.ErrPollTimeout) || backend.calls != 1 {
+		t.Fatalf("response=%#v err=%v calls=%d", response, err, backend.calls)
+	}
+	newAccount, found := store.Get("new")
+	if !found || newAccount.ImageFailures != 1 {
+		t.Fatalf("new account failure not recorded without switching: account=%#v found=%v", newAccount, found)
+	}
+	if _, cooling := newAccount.Extra["image_cooldown_until"]; cooling {
+		t.Fatalf("accepted conversation timeout should not cool account: %#v", newAccount.Extra)
 	}
 }
 

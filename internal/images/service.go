@@ -475,6 +475,10 @@ func (s *Service) recordImageFailure(token string, err error) {
 		_ = s.store.MarkFailure(token, err)
 		return
 	}
+	if openaiweb.IsImageConversationTimeout(err) {
+		_ = s.store.MarkFailure(token, err)
+		return
+	}
 	if errors.Is(err, openaiweb.ErrImageGenerationTerminated) {
 		_ = s.store.MarkImageGenerationTerminated(token, err)
 		return

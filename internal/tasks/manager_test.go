@@ -426,7 +426,7 @@ func TestFailedTaskRedactsUpstreamCredentialDetails(t *testing.T) {
 }
 
 func TestFailedTaskHidesImagePollTimeoutDetails(t *testing.T) {
-	raw := fmt.Errorf("%w: ChatGPT 生图任务已等待 180 秒", openaiweb.ErrPollTimeout)
+	raw := fmt.Errorf("%w: ChatGPT 生图任务已等待 300 秒", openaiweb.ErrPollTimeout)
 	m := NewManager(sensitiveFailureTaskSvc{err: raw})
 	task, result, err := m.RunGenerationForOwner(context.Background(), "user-a", images.Request{Prompt: "draw"})
 	if !errors.Is(err, openaiweb.ErrPollTimeout) {

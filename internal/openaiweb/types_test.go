@@ -41,9 +41,15 @@ func TestAuthenticationErrorIncludesGenericUpstream401(t *testing.T) {
 	}
 }
 
-func TestImagePollTimeoutSwitchesAccounts(t *testing.T) {
+func TestImageTimeoutRetryClassification(t *testing.T) {
 	if !IsRetryableImageError(fmt.Errorf("poll failed: %w", ErrPollTimeout)) {
-		t.Fatal("poll timeout must switch to another account")
+		t.Fatal("pre-conversation poll timeout must switch to another account")
+	}
+	if IsRetryableImageError(NewImageConversationTimeoutError("conv-1", 300)) {
+		t.Fatal("accepted conversation timeout must not switch to another account")
+	}
+	if !IsImageConversationTimeout(fmt.Errorf("polling failed: %w", NewImageConversationTimeoutError("conv-1", 300))) {
+		t.Fatal("accepted conversation timeout must remain identifiable through wrapping")
 	}
 	if !IsRetryableImageError(fmt.Errorf("prepare failed: %w", ErrImagePreparationTimeout)) {
 		t.Fatal("preparation timeout must switch accounts")

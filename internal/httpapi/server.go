@@ -2322,7 +2322,7 @@ func writeError(w http.ResponseWriter, status int, err error) {
 	case errors.Is(err, openaiweb.ErrContentPolicy):
 		errType, code = "invalid_request_error", "content_policy_violation"
 	case isImagePollTimeoutError(err):
-		errType, code = "rate_limit_error", "image_quota_reservation_failed"
+		errType, code = "timeout_error", "oai_image_generation_timeout"
 	case isImageTimeoutError(err):
 		errType, code = "timeout_error", "upstream_timeout"
 	case openaiweb.IsAuthenticationError(err):
