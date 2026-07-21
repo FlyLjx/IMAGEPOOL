@@ -27,6 +27,11 @@ const (
 	legacyImageStreamIdleWindow       = 8 * time.Second
 	defaultImageStreamIdleWindow      = 60 * time.Second
 	defaultImageStreamReferenceWindow = 75 * time.Second
+	// The upstream stream can emit a resume token and keep the connection
+	// alive with heartbeats. Give a final image event a short grace period,
+	// then hand control to /conversation/resume instead of waiting for the
+	// long stream timers.
+	imageResumeHandoffWindow = 2 * time.Second
 )
 
 var errImageStreamOpenTimeout = errors.New("image stream open timeout")
@@ -392,6 +397,22 @@ func (c *Client) consumeImageStream(ctx context.Context, body io.ReadCloser, ref
 	}
 	referenceTimer := time.NewTimer(referenceTimeout)
 	defer referenceTimer.Stop()
+	var resumeTimer *time.Timer
+	var resumeTimerC <-chan time.Time
+	stopResumeTimer := func() {
+		if resumeTimer == nil {
+			return
+		}
+		if !resumeTimer.Stop() {
+			select {
+			case <-resumeTimer.C:
+			default:
+			}
+		}
+		resumeTimer = nil
+		resumeTimerC = nil
+	}
+	defer stopResumeTimer()
 	resetIdleTimer := func() {
 		if !idleTimer.Stop() {
 			select {
@@ -428,6 +449,10 @@ func (c *Client) consumeImageStream(ctx context.Context, body io.ReadCloser, ref
 					state.conversationID = conversationID
 				}
 				state.offset++
+				if resumeTimer == nil {
+					resumeTimer = time.NewTimer(imageResumeHandoffWindow)
+					resumeTimerC = resumeTimer.C
+				}
 				continue
 			}
 			if state.conversationID == "" {
@@ -459,6 +484,8 @@ func (c *Client) consumeImageStream(ctx context.Context, body io.ReadCloser, ref
 				return false, true, nil
 			}
 			return false, false, fmt.Errorf("%w: ChatGPT 生图提交后 %.0f 秒未返回任务信息", ErrPollTimeout, referenceTimeout.Seconds())
+		case <-resumeTimerC:
+			return false, false, nil
 		case <-ctx.Done():
 			cancel()
 			_ = body.Close()

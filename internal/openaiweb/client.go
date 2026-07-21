@@ -445,7 +445,10 @@ func (c *Client) imagePreparationError(parent context.Context, err error) error 
 func (c *Client) imageSlug(model string) string {
 	model = strings.TrimSpace(model)
 	if model == "" || model == "gpt-image-2" {
-		return "auto"
+		// The current ChatGPT Web route resolves `auto` to the regular
+		// gpt-5-5-mini assistant and never emits image references. Keep the
+		// public gpt-image-2 name, but use the image-capable Web slug upstream.
+		return "codex-gpt-image-2"
 	}
 	if model == "codex-gpt-image-2" || strings.HasSuffix(model, "-codex-gpt-image-2") {
 		return model

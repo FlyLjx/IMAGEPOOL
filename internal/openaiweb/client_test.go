@@ -49,6 +49,19 @@ func TestImagePromptForWebKeepsPlainPromptForAutoTextImage(t *testing.T) {
 	}
 }
 
+func TestImageSlugUsesImageCapableRoute(t *testing.T) {
+	client := NewClient(config.Default())
+	if got := client.imageSlug("gpt-image-2"); got != "codex-gpt-image-2" {
+		t.Fatalf("gpt-image-2 backend slug=%q", got)
+	}
+	if got := client.imageSlug(""); got != "codex-gpt-image-2" {
+		t.Fatalf("empty backend slug=%q", got)
+	}
+	if got := client.imageSlug("team-codex-gpt-image-2"); got != "team-codex-gpt-image-2" {
+		t.Fatalf("team backend slug=%q", got)
+	}
+}
+
 func TestExtractGeneratedImageReferenceIDsSkipsUserAttachments(t *testing.T) {
 	payload := `{
 		"mapping": {
@@ -131,7 +144,7 @@ func TestGenerateImageReverseProtocol(t *testing.T) {
 			}
 			var body map[string]any
 			json.NewDecoder(r.Body).Decode(&body)
-			if body["model"] != "auto" || body["client_prepare_state"] != expectedPrepareStates[prepareIndex] || body["thinking_effort"] != "standard" {
+			if body["model"] != "codex-gpt-image-2" || body["client_prepare_state"] != expectedPrepareStates[prepareIndex] || body["thinking_effort"] != "standard" {
 				t.Errorf("bad prepare payload: %#v", body)
 			}
 			if body["client_prepare_dispatch"] != "immediate" || body["client_prepare_source"] != "composer" {
@@ -168,7 +181,7 @@ func TestGenerateImageReverseProtocol(t *testing.T) {
 			}
 			var body map[string]any
 			json.NewDecoder(r.Body).Decode(&body)
-			if body["model"] != "auto" || body["client_prepare_state"] != "sent" || body["thinking_effort"] != "standard" {
+			if body["model"] != "codex-gpt-image-2" || body["client_prepare_state"] != "sent" || body["thinking_effort"] != "standard" {
 				t.Errorf("bad start payload: %#v", body)
 			}
 			w.Header().Set("Content-Type", "text/event-stream")
