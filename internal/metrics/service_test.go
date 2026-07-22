@@ -117,8 +117,22 @@ func TestTodaySummaryUsesLocalDayAndExcludesRejectedFromFailureRate(t *testing.T
 	if byEndpoint["/v1/images/generations"] != 2 || byEndpoint["/v1/images/edits"] != 2 {
 		t.Fatalf("byEndpoint=%#v", byEndpoint)
 	}
-	if failed := today["recent_failed"].([]map[string]any); len(failed) != 1 || failed[0]["error"] != "upstream failed" {
+	if failed := today["recent_failed"].([]map[string]any); len(failed) != 1 || failed[0]["error_code"] != "upstream_service_error" || failed[0]["error"] != "上游服务暂时异常，请稍后重试。" {
 		t.Fatalf("recent_failed=%#v", failed)
+	}
+}
+
+func TestSummaryAggregatesDynamicErrorsByStableCode(t *testing.T) {
+	svc := NewService("")
+	now := time.Date(2026, 7, 22, 16, 0, 0, 0, time.Local)
+	svc.now = func() time.Time { return now }
+	svc.Record(Call{Time: now.Add(-2 * time.Second), Endpoint: "/v1/images/generations", Status: "failed", StatusCode: 429, Error: "image poll timeout: ChatGPT 生图任务已等待 61 秒"})
+	svc.Record(Call{Time: now.Add(-time.Second), Endpoint: "/v1/images/generations", Status: "failed", StatusCode: 429, Error: "image poll timeout: ChatGPT 生图任务已等待 299 秒"})
+
+	runtime := svc.Summary(time.Hour)["runtime"].(map[string]any)
+	reasons := runtime["error_reasons"].([]map[string]any)
+	if len(reasons) != 1 || reasons[0]["code"] != "oai_image_generation_timeout" || reasons[0]["value"] != 2 {
+		t.Fatalf("error_reasons=%#v", reasons)
 	}
 }
 

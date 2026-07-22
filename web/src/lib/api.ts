@@ -342,14 +342,18 @@ export type ImageTask = {
   conversation_id?: string;
   data?: Array<{ b64_json?: string; url?: string; mime_type?: string; format?: string; revised_prompt?: string }>;
   error?: string;
+  error_code?: string;
+  error_title?: string;
+  error_category?: string;
+  error_category_label?: string;
+  error_retryable?: boolean;
+  error_action?: string;
+  error_hint?: string;
   progress?: string;
   progress_percent?: number;
   realtime_status?: string;
   status_log_count?: number;
   status_logs?: ImageTaskStatusLog[];
-  image_route_attempt_count?: number;
-  used_account_count?: number;
-  failed_account_count?: number;
   client_retry_count?: number;
   run_count?: number;
   elapsed_secs?: number;
@@ -483,7 +487,13 @@ export type DashboardRecentFailedCall = {
   endpoint?: string;
   model?: string;
   error?: string;
-  account_email?: string;
+  error_code?: string;
+  error_title?: string;
+  error_category?: string;
+  error_category_label?: string;
+  retryable?: boolean;
+  action?: string;
+  hint?: string;
 };
 
 export type DashboardTodayCalls = {
@@ -583,7 +593,10 @@ export type DashboardSummary = {
         status: "success" | "failed" | "running" | "other" | string;
       }>;
       error_reasons: Array<{
+        code?: string;
         label: string;
+        category?: string;
+        category_label?: string;
         value: number;
       }>;
     };

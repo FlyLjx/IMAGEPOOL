@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"imagepool/internal/errorinfo"
 	"imagepool/internal/persistence"
 )
 
@@ -21,16 +22,22 @@ const (
 )
 
 type Call struct {
-	ID         string         `json:"id"`
-	Time       time.Time      `json:"time"`
-	Endpoint   string         `json:"endpoint"`
-	Model      string         `json:"model,omitempty"`
-	Status     string         `json:"status"`
-	StatusCode int            `json:"status_code"`
-	DurationMS int64          `json:"duration_ms,omitempty"`
-	Error      string         `json:"error,omitempty"`
-	Summary    string         `json:"summary,omitempty"`
-	Details    map[string]any `json:"detail,omitempty"`
+	ID             string         `json:"id"`
+	Time           time.Time      `json:"time"`
+	Endpoint       string         `json:"endpoint"`
+	Model          string         `json:"model,omitempty"`
+	Status         string         `json:"status"`
+	StatusCode     int            `json:"status_code"`
+	DurationMS     int64          `json:"duration_ms,omitempty"`
+	Error          string         `json:"error,omitempty"`
+	ErrorCode      string         `json:"error_code,omitempty"`
+	ErrorTitle     string         `json:"error_title,omitempty"`
+	ErrorCategory  string         `json:"error_category,omitempty"`
+	ErrorRetryable bool           `json:"error_retryable,omitempty"`
+	ErrorAction    string         `json:"error_action,omitempty"`
+	ErrorHint      string         `json:"error_hint,omitempty"`
+	Summary        string         `json:"summary,omitempty"`
+	Details        map[string]any `json:"detail,omitempty"`
 }
 
 type StabilityPoint struct {
@@ -128,6 +135,11 @@ func (s *Service) Record(call Call) {
 	call.Endpoint = strings.TrimSpace(call.Endpoint)
 	call.Model = strings.TrimSpace(call.Model)
 	call.Error = strings.TrimSpace(call.Error)
+	call.ErrorCode = strings.TrimSpace(call.ErrorCode)
+	call.ErrorTitle = strings.TrimSpace(call.ErrorTitle)
+	call.ErrorCategory = strings.TrimSpace(call.ErrorCategory)
+	call.ErrorAction = strings.TrimSpace(call.ErrorAction)
+	call.ErrorHint = strings.TrimSpace(call.ErrorHint)
 	if call.Status == "" {
 		if call.StatusCode >= 400 {
 			call.Status = "failed"
@@ -224,7 +236,7 @@ func (s *Service) Summary(window time.Duration) map[string]any {
 	byStatus := map[string]int{}
 	byEndpoint := map[string]int{}
 	byModel := map[string]int{}
-	byReason := map[string]int{}
+	byReason := map[string]errorReasonCount{}
 	totals := map[string]int{"success": 0, "failed": 0, "canceled": 0, "rejected": 0, "running": 0, "other": 0}
 	bucketCounts := map[string]map[string]int{}
 	recentFailed := []map[string]any{}
@@ -246,12 +258,15 @@ func (s *Service) Summary(window time.Duration) map[string]any {
 		}
 		bucketCounts[bucketKey][category]++
 		if category == "failed" {
-			reason := failureReason(call.Error)
-			if reason != "" {
-				byReason[reason]++
-			}
+			classified := callErrorInfo(call)
+			reason := byReason[classified.Code]
+			reason.Code = classified.Code
+			reason.Label = classified.Title
+			reason.Category = classified.Category
+			reason.Value++
+			byReason[classified.Code] = reason
 			if len(recentFailed) < 20 {
-				recentFailed = append(recentFailed, map[string]any{"id": call.ID, "time": call.Time, "summary": call.Summary, "endpoint": call.Endpoint, "model": call.Model, "error": call.Error})
+				recentFailed = append(recentFailed, recentFailedCall(call, classified))
 			}
 		}
 	}
@@ -276,7 +291,7 @@ func (s *Service) Summary(window time.Duration) map[string]any {
 			statusPie = append(statusPie, map[string]any{"label": status, "value": totals[status], "status": status})
 		}
 	}
-	reasons := sortedCounts(byReason, "label")
+	reasons := sortedErrorReasons(byReason)
 	total := totals["success"] + totals["failed"] + totals["canceled"] + totals["rejected"] + totals["running"] + totals["other"]
 	availabilityTotal := totals["success"] + totals["failed"]
 	successRate, errorRate := 0.0, 0.0
@@ -312,7 +327,7 @@ func (s *Service) TodaySummary() map[string]any {
 			byModel[call.Model]++
 		}
 		if category == "failed" && len(recentFailed) < 20 {
-			recentFailed = append(recentFailed, map[string]any{"id": call.ID, "time": call.Time, "summary": call.Summary, "endpoint": call.Endpoint, "model": call.Model, "error": call.Error})
+			recentFailed = append(recentFailed, recentFailedCall(call, callErrorInfo(call)))
 		}
 	}
 	total := totals["success"] + totals["failed"] + totals["canceled"] + totals["rejected"] + totals["running"] + totals["other"]
@@ -679,15 +694,64 @@ func isContentPolicyError(value string) bool {
 		strings.Contains(value, "可能违反")
 }
 
-func failureReason(value string) string {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return "unknown"
+type errorReasonCount struct {
+	Code     string
+	Label    string
+	Category string
+	Value    int
+}
+
+func callErrorInfo(call Call) errorinfo.Info {
+	if strings.TrimSpace(call.ErrorCode) == "" {
+		return errorinfo.ClassifyText(call.Error, call.StatusCode)
 	}
-	if len(value) > 120 {
-		return value[:120]
+	classified := errorinfo.ClassifyText(call.Error, call.StatusCode)
+	classified.Code = strings.TrimSpace(call.ErrorCode)
+	if value := strings.TrimSpace(call.ErrorTitle); value != "" {
+		classified.Title = value
 	}
-	return value
+	if value := strings.TrimSpace(call.ErrorCategory); value != "" {
+		classified.Category = value
+	}
+	if value := strings.TrimSpace(call.ErrorAction); value != "" {
+		classified.Action = value
+	}
+	if value := strings.TrimSpace(call.ErrorHint); value != "" {
+		classified.Hint = value
+	}
+	classified.Retryable = call.ErrorRetryable
+	return classified
+}
+
+func recentFailedCall(call Call, classified errorinfo.Info) map[string]any {
+	return map[string]any{
+		"id": call.ID, "time": call.Time, "summary": call.Summary,
+		"endpoint": call.Endpoint, "model": call.Model, "error": classified.Message,
+		"error_code": classified.Code, "error_title": classified.Title,
+		"error_category": classified.Category, "error_category_label": errorinfo.CategoryLabel(classified.Category),
+		"retryable": classified.Retryable, "action": classified.Action, "hint": classified.Hint,
+	}
+}
+
+func sortedErrorReasons(counts map[string]errorReasonCount) []map[string]any {
+	items := make([]errorReasonCount, 0, len(counts))
+	for _, item := range counts {
+		items = append(items, item)
+	}
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].Value != items[j].Value {
+			return items[i].Value > items[j].Value
+		}
+		return items[i].Code < items[j].Code
+	})
+	out := make([]map[string]any, 0, len(items))
+	for _, item := range items {
+		out = append(out, map[string]any{
+			"code": item.Code, "label": item.Label, "category": item.Category,
+			"category_label": errorinfo.CategoryLabel(item.Category), "value": item.Value,
+		})
+	}
+	return out
 }
 
 func sortedCounts(counts map[string]int, key string) []map[string]any {

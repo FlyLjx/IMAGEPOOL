@@ -231,11 +231,12 @@ func TestGenerateHidesUpstreamImageModelSlug(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if response.BackendModel != PublicImageModel || response.ImageRoute["backend_model"] != PublicImageModel {
-		t.Fatalf("response=%#v", response)
+	public := response.Public()
+	if public.BackendModel != PublicImageModel || public.ImageRoute["backend_model"] != PublicImageModel {
+		t.Fatalf("response=%#v", public)
 	}
-	if len(response.Attempts) != 1 || response.Attempts[0].BackendModel != PublicImageModel {
-		t.Fatalf("attempts=%#v", response.Attempts)
+	if public.AccountEmail != "" || len(public.Attempts) != 0 {
+		t.Fatalf("public response exposed account routing: %#v", public)
 	}
 	payload := response.MarshalForOpenAI()
 	if payload["backend_model"] != PublicImageModel {
@@ -280,7 +281,7 @@ func TestGenerateAuthenticationFailureRetriesAtMostTenTimes(t *testing.T) {
 		t.Fatalf("retry events=%d", len(retryEvents))
 	}
 	lastEvent := retryEvents[len(retryEvents)-1]
-	if lastEvent.Message != "账号凭证失效，已删除账号并切换账号重试（10/10）" || lastEvent.Details["retry"] != 10 || lastEvent.Details["max_retries"] != 10 {
+	if lastEvent.Message != openaiweb.PublicCredentialInvalidMessage || len(lastEvent.Details) != 0 {
 		t.Fatalf("last retry event=%#v", lastEvent)
 	}
 	remaining := store.List()

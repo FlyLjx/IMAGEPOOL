@@ -14,19 +14,16 @@ func TestMarshalForOpenAIRedactsUpstreamAttemptDiagnostics(t *testing.T) {
 		StatusCode: 401,
 		Body:       `{"error":{"code":"token_revoked","message":"invalidated oauth token"}}`,
 	}).Error()
-	payload := (Response{Attempts: []openaiweb.AttemptLog{{Attempt: 1, Status: "failed", Error: raw}}}).MarshalForOpenAI()
+	payload := (Response{AccountEmail: "private@example.test", Attempts: []openaiweb.AttemptLog{{Attempt: 1, AccountEmail: "private@example.test", Status: "failed", Error: raw}}}).MarshalForOpenAI()
 	body, err := json.Marshal(payload)
 	if err != nil {
 		t.Fatal(err)
 	}
 	text := strings.ToLower(string(body))
-	for _, leaked := range []string{"/backend-api/", "token_revoked", "invalidated oauth token", "body="} {
+	for _, leaked := range []string{"/backend-api/", "token_revoked", "invalidated oauth token", "body=", "private@example.test", "account_email", "attempts"} {
 		if strings.Contains(text, leaked) {
 			t.Fatalf("payload leaked %q: %s", leaked, body)
 		}
-	}
-	if !strings.Contains(string(body), openaiweb.PublicCredentialInvalidMessage) {
-		t.Fatalf("payload=%s", body)
 	}
 }
 
@@ -41,7 +38,7 @@ func TestMarshalForOpenAIHidesPollTimeoutDetails(t *testing.T) {
 	if strings.Contains(strings.ToLower(text), "image poll timeout") || strings.Contains(text, "生图任务已等待") {
 		t.Fatalf("payload leaked poll timeout: %s", body)
 	}
-	if !strings.Contains(text, openaiweb.PublicImagePollTimeoutMessage) {
+	if strings.Contains(text, "attempts") {
 		t.Fatalf("payload=%s", body)
 	}
 }

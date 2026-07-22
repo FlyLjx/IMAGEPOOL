@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"imagepool/internal/errorinfo"
 	"imagepool/internal/images"
 	"imagepool/internal/openaiweb"
 	"imagepool/internal/persistence"
@@ -80,12 +81,19 @@ type Task struct {
 	Result                 *images.Response `json:"-"`
 	Data                   []images.Data    `json:"data,omitempty"`
 	ConversationID         string           `json:"conversation_id,omitempty"`
-	UsedAccountCount       int              `json:"used_account_count"`
-	FailedAccountCount     int              `json:"failed_account_count"`
-	ImageRouteAttemptCount int              `json:"image_route_attempt_count"`
+	UsedAccountCount       int              `json:"used_account_count,omitempty"`
+	FailedAccountCount     int              `json:"failed_account_count,omitempty"`
+	ImageRouteAttemptCount int              `json:"image_route_attempt_count,omitempty"`
 	DurationMS             int64            `json:"duration_ms,omitempty"`
 	ElapsedSecs            float64          `json:"elapsed_secs,omitempty"`
 	Error                  string           `json:"error,omitempty"`
+	ErrorCode              string           `json:"error_code,omitempty"`
+	ErrorTitle             string           `json:"error_title,omitempty"`
+	ErrorCategory          string           `json:"error_category,omitempty"`
+	ErrorCategoryLabel     string           `json:"error_category_label,omitempty"`
+	ErrorRetryable         bool             `json:"error_retryable,omitempty"`
+	ErrorAction            string           `json:"error_action,omitempty"`
+	ErrorHint              string           `json:"error_hint,omitempty"`
 	StatusLogCount         int              `json:"status_log_count"`
 	StatusLogs             []LogEntry       `json:"status_logs,omitempty"`
 }
@@ -263,14 +271,14 @@ func (m *Manager) rejectQueuedTask(id, message string) {
 	m.mu.Lock()
 	if task := m.tasks[id]; task != nil && task.Status == StatusQueued {
 		now := time.Now()
+		classified := errorinfo.ClassifyText(message, 0)
 		task.Status = StatusFailed
 		task.Progress = "failed"
 		task.ProgressPercent = 100
-		task.RealtimeStatus = message
-		task.Error = message
+		applyTaskError(task, classified)
 		task.FinishedAt = &now
 		task.UpdatedAt = now
-		appendLog(task, LogEntry{Time: now, Level: "error", Event: "rejected", Progress: "failed", Message: message})
+		appendLog(task, LogEntry{Time: now, Level: "error", Event: "rejected", Progress: "failed", Message: classified.Message})
 		compactCompletedTask(task)
 		m.markDirtyLocked(id)
 		m.pruneCompletedLocked(now)
@@ -337,7 +345,7 @@ func (m *Manager) runWith(ctx context.Context, id string, req images.Request, ge
 			if task.Status != StatusRunning {
 				task.Status = StatusRunning
 				task.StartedAt = &now
-				appendLog(task, LogEntry{Time: now, Level: "processing", Event: "started", Progress: "running", Message: "账号已分配，任务开始处理"})
+				appendLog(task, LogEntry{Time: now, Level: "processing", Event: "started", Progress: "running", Message: "任务开始处理"})
 			}
 			task.Progress = event.Progress
 			task.ProgressPercent = progressPercent(event.Progress)
@@ -347,6 +355,7 @@ func (m *Manager) runWith(ctx context.Context, id string, req images.Request, ge
 		})
 	}
 	result, err := generate(ctx, req)
+	internalResult := result
 	result = publicImageResponse(result)
 
 	m.mu.Lock()
@@ -375,23 +384,22 @@ func (m *Manager) runWith(ctx context.Context, id string, req images.Request, ge
 		err = fmt.Errorf("%w: task deadline exceeded", openaiweb.ErrPollTimeout)
 	}
 	if ctx.Err() != nil && !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		classified := errorinfo.Classify(ctx.Err(), 0)
 		task.Status = StatusCanceled
 		task.Progress = "canceled"
 		task.ProgressPercent = 100
-		task.RealtimeStatus = "任务已取消"
-		task.Error = openaiweb.PublicErrorMessage(ctx.Err())
-		appendLog(task, LogEntry{Time: now, Level: "warning", Event: "canceled", Progress: "canceled", Message: "任务已取消"})
+		applyTaskError(task, classified)
+		appendLog(task, LogEntry{Time: now, Level: "warning", Event: "canceled", Progress: "canceled", Message: classified.Message})
 		return result, ctx.Err()
 	}
 	if err != nil {
-		message := openaiweb.PublicErrorMessage(err)
-		applyAttemptStats(task, result)
+		classified := errorinfo.Classify(err, 0)
+		applyAttemptStats(task, internalResult)
 		task.Status = StatusFailed
 		task.Progress = "failed"
 		task.ProgressPercent = 100
-		task.RealtimeStatus = message
-		task.Error = message
-		appendLog(task, LogEntry{Time: now, Level: "error", Event: "failed", Progress: "failed", Message: message})
+		applyTaskError(task, classified)
+		appendLog(task, LogEntry{Time: now, Level: "error", Event: "failed", Progress: "failed", Message: classified.Message})
 		return result, err
 	}
 	task.Status = StatusSucceeded
@@ -400,9 +408,24 @@ func (m *Manager) runWith(ctx context.Context, id string, req images.Request, ge
 	task.RealtimeStatus = "任务处理完成"
 	task.Result = &result
 	task.Data = append([]images.Data(nil), result.Data...)
-	applyAttemptStats(task, result)
+	applyAttemptStats(task, internalResult)
 	appendLog(task, LogEntry{Time: now, Level: "success", Event: "completed", Progress: "succeeded", Message: "任务处理完成"})
 	return result, nil
+}
+
+func applyTaskError(task *Task, classified errorinfo.Info) {
+	if task == nil {
+		return
+	}
+	task.RealtimeStatus = classified.Message
+	task.Error = classified.Message
+	task.ErrorCode = classified.Code
+	task.ErrorTitle = classified.Title
+	task.ErrorCategory = classified.Category
+	task.ErrorCategoryLabel = errorinfo.CategoryLabel(classified.Category)
+	task.ErrorRetryable = classified.Retryable
+	task.ErrorAction = classified.Action
+	task.ErrorHint = classified.Hint
 }
 
 // publicImageResponse is the task-manager output boundary. Image services keep
@@ -676,14 +699,14 @@ func (m *Manager) loadTasks(stored []Task) {
 	for i := range stored {
 		task := stored[i]
 		if task.Status == StatusQueued || task.Status == StatusRunning {
+			classified := errorinfo.ClassifyText("服务重启，未完成任务已终止", 0)
 			task.Status = StatusFailed
 			task.Progress = "failed"
 			task.ProgressPercent = 100
-			task.RealtimeStatus = "服务重启，未完成任务已终止"
-			task.Error = task.RealtimeStatus
+			applyTaskError(&task, classified)
 			task.FinishedAt = &now
 			task.UpdatedAt = now
-			appendLog(&task, LogEntry{Time: now, Level: "error", Event: "interrupted", Progress: "failed", Message: task.RealtimeStatus})
+			appendLog(&task, LogEntry{Time: now, Level: "error", Event: "interrupted", Progress: "failed", Message: classified.Message})
 			m.dirty[task.ID] = struct{}{}
 		}
 		if compactCompletedTask(&task) {

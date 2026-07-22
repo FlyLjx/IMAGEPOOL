@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"mime/multipart"
 	"net/http"
 	"net/url"
@@ -21,6 +22,7 @@ import (
 	"imagepool/internal/auth"
 	"imagepool/internal/browsertransport"
 	"imagepool/internal/config"
+	"imagepool/internal/errorinfo"
 	"imagepool/internal/images"
 	"imagepool/internal/imagetags"
 	"imagepool/internal/metrics"
@@ -128,8 +130,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		r = r.WithContext(metrics.WithCallMeta(r.Context(), metrics.NewCallMeta(r.URL.Path)))
 		defer func() {
 			endpoint, model := metrics.MetaValues(r.Context())
-			errorMessage := recorder.ErrorMessage()
-			s.metrics.Record(metrics.Call{Time: startedAt, Endpoint: endpoint, Model: model, Status: metricCallStatus(recorder.status, errorMessage), StatusCode: recorder.status, DurationMS: time.Since(startedAt).Milliseconds(), Error: errorMessage})
+			recorded := recorder.ErrorInfo()
+			s.metrics.Record(metrics.Call{
+				Time: startedAt, Endpoint: endpoint, Model: model, Status: metricCallStatus(recorder.status, recorded.Message, recorded.Code),
+				StatusCode: recorder.status, DurationMS: time.Since(startedAt).Milliseconds(), Error: recorded.Message,
+				ErrorCode: recorded.Code, ErrorTitle: recorded.Title, ErrorCategory: recorded.Category,
+				ErrorRetryable: recorded.Retryable, ErrorAction: recorded.Action, ErrorHint: recorded.Hint,
+			})
 		}()
 	}
 	if r.URL.Path == "/health" {
@@ -592,7 +599,7 @@ func (s *Server) handleImageEdit(w http.ResponseWriter, r *http.Request, asTask 
 	if asTask {
 		identity, _ := auth.IdentityFromContext(r.Context())
 		task := s.tasks.SubmitEditForOwner(identity.ID, clientTaskID, req)
-		writeJSON(w, http.StatusAccepted, task)
+		writeJSON(w, http.StatusAccepted, publicTask(task))
 		return
 	}
 	identity, _ := auth.IdentityFromContext(r.Context())
@@ -874,7 +881,7 @@ func (s *Server) handleTaskGeneration(w http.ResponseWriter, r *http.Request) {
 	}
 	identity, _ := auth.IdentityFromContext(r.Context())
 	task := s.tasks.SubmitGenerationForOwner(identity.ID, body.ClientTaskID, req)
-	writeJSON(w, http.StatusAccepted, task)
+	writeJSON(w, http.StatusAccepted, publicTask(task))
 }
 func (s *Server) handleTaskEdit(w http.ResponseWriter, r *http.Request) {
 	s.handleImageEdit(w, r, true)
@@ -889,6 +896,7 @@ func (s *Server) handleTaskList(w http.ResponseWriter, r *http.Request) {
 	}
 	identity, _ := auth.IdentityFromContext(r.Context())
 	items := s.tasks.ListForOwner(ids, identity.ID, identity.IsAdmin())
+	items = publicTasks(items)
 	compact := strings.TrimSpace(r.URL.Query().Get("compact")) == "1"
 	if compact {
 		items = compactTaskList(items)
@@ -923,6 +931,8 @@ func (s *Server) handleTaskHistory(w http.ResponseWriter, r *http.Request) {
 	}
 	if strings.TrimSpace(r.URL.Query().Get("include_logs")) != "1" {
 		history.Items = compactTaskList(history.Items)
+	} else {
+		history.Items = publicTasks(history.Items)
 	}
 	writeJSON(w, http.StatusOK, history)
 }
@@ -937,7 +947,7 @@ func (s *Server) handleTaskItem(w http.ResponseWriter, r *http.Request) {
 	identity, _ := auth.IdentityFromContext(r.Context())
 	if action == "status" && r.Method == http.MethodGet {
 		if task, ok := s.tasks.StatusForOwner(id, identity.ID, identity.IsAdmin()); ok {
-			writeJSON(w, http.StatusOK, task)
+			writeJSON(w, http.StatusOK, publicTask(task))
 			return
 		}
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": "task not found"})
@@ -945,7 +955,7 @@ func (s *Server) handleTaskItem(w http.ResponseWriter, r *http.Request) {
 	}
 	if action == "cancel" && r.Method == http.MethodPost {
 		if task, ok := s.tasks.CancelForOwner(id, identity.ID, identity.IsAdmin()); ok {
-			writeJSON(w, http.StatusOK, task)
+			writeJSON(w, http.StatusOK, publicTask(task))
 			return
 		}
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": "task not found"})
@@ -960,7 +970,7 @@ func (s *Server) handleTaskItem(w http.ResponseWriter, r *http.Request) {
 			body.ExtraTimeoutSecs = 30
 		}
 		if task, ok := s.tasks.ResumePollForOwner(id, identity.ID, identity.IsAdmin(), body.ExtraTimeoutSecs); ok {
-			writeJSON(w, http.StatusOK, task)
+			writeJSON(w, http.StatusOK, publicTask(task))
 			return
 		}
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": "task not found"})
@@ -1456,6 +1466,12 @@ func callLogItem(call metrics.Call) map[string]any {
 			"endpoint":           call.Endpoint,
 			"model":              call.Model,
 			"error":              call.Error,
+			"error_code":         call.ErrorCode,
+			"error_title":        call.ErrorTitle,
+			"error_category":     call.ErrorCategory,
+			"error_retryable":    call.ErrorRetryable,
+			"error_action":       call.ErrorAction,
+			"error_hint":         call.ErrorHint,
 			"final_result_label": resultLabel,
 		},
 	}
@@ -2304,9 +2320,44 @@ func compactTaskList(items []tasks.Task) []tasks.Task {
 	}
 	out := append([]tasks.Task(nil), items...)
 	for i := range out {
+		out[i] = publicTask(out[i])
 		out[i].StatusLogs = nil
 	}
 	return out
+}
+
+func publicTasks(items []tasks.Task) []tasks.Task {
+	if len(items) == 0 {
+		return items
+	}
+	out := append([]tasks.Task(nil), items...)
+	for index := range out {
+		out[index] = publicTask(out[index])
+	}
+	return out
+}
+
+func publicTask(task tasks.Task) tasks.Task {
+	task.UsedAccountCount = 0
+	task.FailedAccountCount = 0
+	task.ImageRouteAttemptCount = 0
+	if task.Error != "" && task.ErrorCode == "" {
+		classified := errorinfo.ClassifyText(task.Error, 0)
+		task.Error = classified.Message
+		task.RealtimeStatus = classified.Message
+		task.ErrorCode = classified.Code
+		task.ErrorTitle = classified.Title
+		task.ErrorCategory = classified.Category
+		task.ErrorCategoryLabel = errorinfo.CategoryLabel(classified.Category)
+		task.ErrorRetryable = classified.Retryable
+		task.ErrorAction = classified.Action
+		task.ErrorHint = classified.Hint
+	}
+	for index := range task.StatusLogs {
+		task.StatusLogs[index].Message = openaiweb.PublicErrorText(task.StatusLogs[index].Message)
+		task.StatusLogs[index].Details = openaiweb.PublicDetails(task.StatusLogs[index].Details)
+	}
+	return task
 }
 
 func writeJSON(w http.ResponseWriter, status int, payload any) {
@@ -2315,69 +2366,36 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 	_ = json.NewEncoder(w).Encode(payload)
 }
 func writeError(w http.ResponseWriter, status int, err error) {
-	errType, code := "server_error", "upstream_error"
-	switch {
-	case errors.Is(err, context.Canceled):
-		errType, code = "request_canceled", "request_canceled"
-	case errors.Is(err, openaiweb.ErrContentPolicy):
-		errType, code = "invalid_request_error", "content_policy_violation"
-	case isImagePollTimeoutError(err):
-		errType, code = "timeout_error", "oai_image_generation_timeout"
-	case isImageTimeoutError(err):
-		errType, code = "timeout_error", "upstream_timeout"
-	case openaiweb.IsAuthenticationError(err):
-		errType, code = "authentication_error", "account_credential_invalid"
+	classified := errorinfo.Classify(err, status)
+	if status <= 0 {
+		status = classified.HTTPStatus
 	}
-	writeJSON(w, status, map[string]any{"error": map[string]any{"message": openaiweb.PublicErrorMessage(err), "type": errType, "code": code}})
+	requestID := responseID("err")
+	log.Printf("request failed: request_id=%s code=%s status=%d error=%v", requestID, classified.Code, status, err)
+	writeJSON(w, status, map[string]any{"error": map[string]any{
+		"message": classified.Message, "title": classified.Title, "type": classified.Type,
+		"code": classified.Code, "category": classified.Category, "retryable": classified.Retryable,
+		"action": classified.Action, "hint": classified.Hint, "request_id": requestID,
+	}})
 }
 func statusFromError(err error) int {
-	if errors.Is(err, context.Canceled) {
-		return statusClientClosedRequest
-	}
-	if isImagePollTimeoutError(err) {
-		return http.StatusTooManyRequests
-	}
-	if isImageTimeoutError(err) {
-		return http.StatusGatewayTimeout
-	}
-	if errors.Is(err, openaiweb.ErrContentPolicy) {
-		return http.StatusBadRequest
-	}
-	var quota *auth.QuotaError
-	if errors.As(err, &quota) {
-		return quota.StatusCode
-	}
-	if errors.Is(err, accounts.ErrNoAvailableAccount) || openaiweb.IsNoFreeImageQuotaError(err) {
-		return http.StatusTooManyRequests
-	}
-	if openaiweb.IsAuthenticationError(err) {
-		return http.StatusUnauthorized
-	}
-	if openaiweb.IsInteractiveChallengeError(err) {
-		return http.StatusPreconditionRequired
-	}
-	return http.StatusBadGateway
+	return errorinfo.Classify(err, 0).HTTPStatus
 }
 
-// Image generation converts lower-level context deadlines into stable
-// user-facing sentinels so the account dispatcher can classify them. Poll
-// timeouts are handled separately because they are exposed as a retryable
-// quota-reservation failure to API consumers.
-func isImageTimeoutError(err error) bool {
-	return errors.Is(err, context.DeadlineExceeded) ||
-		errors.Is(err, openaiweb.ErrImagePreparationTimeout)
-}
-
-func isImagePollTimeoutError(err error) bool {
-	return errors.Is(err, openaiweb.ErrPollTimeout)
-}
-
-func metricCallStatus(statusCode int, errorMessage string) string {
-	if statusCode == statusClientClosedRequest || strings.Contains(strings.ToLower(errorMessage), "context canceled") {
+func metricCallStatus(statusCode int, errorMessage, errorCode string) string {
+	errorCode = strings.TrimSpace(errorCode)
+	if statusCode == statusClientClosedRequest || errorCode == "request_canceled" || strings.Contains(strings.ToLower(errorMessage), "context canceled") {
 		return "canceled"
 	}
-	if isContentPolicyErrorMessage(errorMessage) {
+	if errorCode == "content_policy_violation" || isContentPolicyErrorMessage(errorMessage) {
 		return "rejected"
+	}
+	switch errorCode {
+	case "invalid_request", "invalid_output_format", "prompt_required", "reference_image_invalid", "api_key_invalid", "request_not_allowed", "endpoint_not_allowed", "model_not_allowed", "client_quota_exhausted":
+		return "rejected"
+	}
+	if errorCode != "" && statusCode >= http.StatusBadRequest {
+		return "failed"
 	}
 	if statusCode >= http.StatusBadRequest && statusCode < http.StatusInternalServerError {
 		return "rejected"

@@ -38,7 +38,7 @@ type ProgressEvent struct {
 }
 
 type AttemptLog struct {
-	Attempt        int    `json:"attempt"`
+	Attempt        int    `json:"attempt,omitempty"`
 	AccountEmail   string `json:"account_email,omitempty"`
 	BackendModel   string `json:"backend_model,omitempty"`
 	ConversationID string `json:"conversation_id,omitempty"`
@@ -122,7 +122,7 @@ const (
 	// PublicCredentialInvalidMessage is intentionally independent of the
 	// upstream response. Upstream OAuth bodies can contain endpoint and token
 	// details which must never reach API consumers or persisted task history.
-	PublicCredentialInvalidMessage = "账号凭证已失效，已自动删除并切换账号重试"
+	PublicCredentialInvalidMessage = "上游认证状态异常，系统正在自动恢复"
 	PublicImagePollTimeoutMessage  = "OAI侧出图超出300s，请重新提交任务。"
 	PublicUpstreamFailureMessage   = "上游服务请求失败，请稍后重试"
 )
@@ -164,6 +164,9 @@ func PublicErrorText(message string) string {
 	if IsAuthenticationError(errors.New(message)) {
 		return PublicCredentialInvalidMessage
 	}
+	if strings.Contains(message, "账号凭证失效") || strings.Contains(message, "切换账号重试") || strings.Contains(message, "删除账号") {
+		return PublicCredentialInvalidMessage
+	}
 	lower := strings.ToLower(message)
 	if strings.Contains(lower, "image poll timeout") ||
 		strings.Contains(message, "ChatGPT 生图任务已等待") ||
@@ -192,6 +195,9 @@ func PublicAttemptLogs(attempts []AttemptLog) []AttemptLog {
 	out := make([]AttemptLog, len(attempts))
 	copy(out, attempts)
 	for i := range out {
+		out[i].Attempt = 0
+		out[i].AccountEmail = ""
+		out[i].RemovedAccount = false
 		out[i].Error = PublicErrorText(out[i].Error)
 	}
 	return out
@@ -214,9 +220,21 @@ func PublicDetails(details map[string]any) map[string]any {
 	}
 	out := make(map[string]any, len(details))
 	for key, value := range details {
+		if !publicDetailKeyAllowed(key) {
+			continue
+		}
 		out[key] = publicDetailValue(value)
 	}
 	return out
+}
+
+func publicDetailKeyAllowed(key string) bool {
+	switch strings.ToLower(strings.TrimSpace(key)) {
+	case "account_email", "account", "email", "attempt", "attempts", "retry", "max_retries", "removed_account", "used_account_count", "failed_account_count", "image_route_attempt_count":
+		return false
+	default:
+		return true
+	}
 }
 
 func publicDetailValue(value any) any {

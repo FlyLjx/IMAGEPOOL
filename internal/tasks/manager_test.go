@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"imagepool/internal/errorinfo"
 	"imagepool/internal/images"
 	"imagepool/internal/openaiweb"
 	"imagepool/internal/persistence"
@@ -410,10 +411,11 @@ func TestFailedTaskRedactsUpstreamCredentialDetails(t *testing.T) {
 	if !errors.As(err, &upstream) || upstream != raw {
 		t.Fatalf("raw error must be preserved for internal handling: %v", err)
 	}
-	if task.Error != openaiweb.PublicCredentialInvalidMessage || task.RealtimeStatus != openaiweb.PublicCredentialInvalidMessage {
+	classified := errorinfo.Classify(raw, 0)
+	if task.Error != classified.Message || task.RealtimeStatus != classified.Message || task.ErrorCode != classified.Code {
 		t.Fatalf("task=%#v", task)
 	}
-	if len(result.Attempts) != 1 || result.Attempts[0].Error != openaiweb.PublicCredentialInvalidMessage {
+	if len(result.Attempts) != 0 || result.AccountEmail != "" {
 		t.Fatalf("result attempts=%#v", result.Attempts)
 	}
 	for _, entry := range task.StatusLogs {
@@ -435,10 +437,11 @@ func TestFailedTaskHidesImagePollTimeoutDetails(t *testing.T) {
 	if !errors.Is(err, openaiweb.ErrPollTimeout) {
 		t.Fatalf("raw error must be preserved for internal handling: %v", err)
 	}
-	if task.Error != openaiweb.PublicImagePollTimeoutMessage || task.RealtimeStatus != openaiweb.PublicImagePollTimeoutMessage {
+	classified := errorinfo.Classify(raw, 0)
+	if task.Error != classified.Message || task.RealtimeStatus != classified.Message || task.ErrorCode != classified.Code {
 		t.Fatalf("task=%#v", task)
 	}
-	if len(result.Attempts) != 1 || result.Attempts[0].Error != openaiweb.PublicImagePollTimeoutMessage {
+	if len(result.Attempts) != 0 {
 		t.Fatalf("result attempts=%#v", result.Attempts)
 	}
 	for _, entry := range task.StatusLogs {
@@ -463,7 +466,8 @@ func TestTaskDeadlineIsReportedAsImageTimeout(t *testing.T) {
 	if !errors.Is(err, openaiweb.ErrPollTimeout) {
 		t.Fatalf("err=%v", err)
 	}
-	if task.Status != StatusFailed || task.Progress != "failed" || task.Error != openaiweb.PublicImagePollTimeoutMessage {
+	classified := errorinfo.Classify(openaiweb.ErrPollTimeout, 0)
+	if task.Status != StatusFailed || task.Progress != "failed" || task.Error != classified.Message || task.ErrorCode != classified.Code {
 		t.Fatalf("task=%#v", task)
 	}
 	for _, entry := range task.StatusLogs {
@@ -481,8 +485,8 @@ func TestCompletedTasksAreCompacted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(result.Attempts) != 2 {
-		t.Fatalf("sync result attempts should remain available: %#v", result.Attempts)
+	if len(result.Attempts) != 0 {
+		t.Fatalf("sync result exposed account attempts: %#v", result.Attempts)
 	}
 	stored, ok := m.Status(task.ID)
 	if !ok || stored.Status != StatusSucceeded {
@@ -732,7 +736,7 @@ func TestAsyncDispatcherRejectsFullQueueWithoutBlocking(t *testing.T) {
 	if elapsed := time.Since(started); elapsed > time.Second {
 		t.Fatalf("queue admission blocked for %s", elapsed)
 	}
-	if last.Status != StatusFailed || last.Error != "任务队列已满，请稍后重试" {
+	if last.Status != StatusFailed || last.ErrorCode != "task_queue_full" || last.Error != "当前请求较多，任务队列已满，请稍后重新提交。" {
 		t.Fatalf("last task should be rejected when full: %#v", last)
 	}
 }

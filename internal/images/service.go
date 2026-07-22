@@ -512,7 +512,7 @@ func (s *Service) prepareAccountForDispatch(account accounts.Account, req Reques
 	if strings.TrimSpace(account.AccessToken) == "" {
 		return account, fmt.Errorf("access token is required")
 	}
-	reportAccountProgress(req, "account_ready", "账号已分配，开始生图", account)
+	reportAccountProgress(req, "account_ready", "开始生图", account)
 	return account, nil
 }
 
@@ -520,29 +520,20 @@ func reportAccountProgress(req Request, progress, message string, account accoun
 	if req.Progress == nil {
 		return
 	}
-	details := map[string]any{}
-	if account.Email != "" {
-		details["account_email"] = account.Email
-	}
-	req.Progress(openaiweb.ProgressEvent{Progress: progress, Message: message, Details: details})
+	req.Progress(openaiweb.ProgressEvent{Progress: progress, Message: message})
 }
 
 func reportAccountWait(req Request, account accounts.Account) {
-	reportAccountProgress(req, "waiting_account", "暂无空闲账号，任务排队等待", account)
+	reportAccountProgress(req, "waiting_account", "当前处理资源繁忙，任务排队等待", account)
 }
 
 func reportAuthenticationRetry(req Request, account accounts.Account, err error, retry int) {
 	if req.Progress == nil {
 		return
 	}
-	details := map[string]any{"retry": retry, "max_retries": maxAuthenticationRetries, "error": openaiweb.PublicErrorMessage(err)}
-	if account.Email != "" {
-		details["account_email"] = account.Email
-	}
 	req.Progress(openaiweb.ProgressEvent{
 		Progress: "retrying_account",
-		Message:  fmt.Sprintf("账号凭证失效，已删除账号并切换账号重试（%d/%d）", retry, maxAuthenticationRetries),
-		Details:  details,
+		Message:  "上游认证状态异常，系统正在自动恢复",
 	})
 }
 
@@ -833,19 +824,15 @@ func responseFromResult(result openaiweb.ImageResult) Response {
 		resp.Data = append(resp.Data, Data{B64JSON: b64, MimeType: mimeType, Format: imageFormatFromMIMEType(mimeType)})
 	}
 	resp.ImageRoute = map[string]any{"backend_model": result.BackendModel, "image_route": "free_image2_fallback"}
-	return resp.Public()
+	return resp
 }
 
 // Public removes account-specific upstream model slugs from an image response.
 // It also normalizes persisted legacy responses when they are read back.
 func (r Response) Public() Response {
+	r.AccountEmail = ""
 	r.BackendModel = PublicImageModel
-	r.Attempts = openaiweb.PublicAttemptLogs(r.Attempts)
-	for index := range r.Attempts {
-		if r.Attempts[index].BackendModel != "" {
-			r.Attempts[index].BackendModel = PublicImageModel
-		}
-	}
+	r.Attempts = nil
 	if r.ImageRoute != nil {
 		route := make(map[string]any, len(r.ImageRoute))
 		for key, value := range r.ImageRoute {

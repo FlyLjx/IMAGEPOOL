@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Button, Card, Empty, Modal, Progress, Space, Table, Tag, Typography } from "antd";
+import { Alert, Button, Card, Empty, Modal, Progress, Space, Table, Tag, Typography } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { Activity, Ban, LoaderCircle, RefreshCw, TimerReset } from "lucide-react";
 import { toast } from "sonner";
@@ -228,8 +228,6 @@ function TasksContent() {
             </Typography.Text>
             <Typography.Text type="secondary" className="block text-xs">
               日志 {item.status_log_count ?? 0} 条
-              {typeof item.used_account_count === "number" ? ` · 账号 ${item.used_account_count}` : ""}
-              {typeof item.failed_account_count === "number" ? ` · 失败 ${item.failed_account_count}` : ""}
             </Typography.Text>
           </div>
         ),
@@ -350,9 +348,28 @@ function TasksContent() {
               <div>更新时间：<Typography.Text>{formatShanghaiDateTime(statusTask?.updated_at)}</Typography.Text></div>
               <div>会话：<Typography.Text copyable={Boolean(statusTask?.conversation_id)}>{statusTask?.conversation_id || "-"}</Typography.Text></div>
               <div>进度：<Typography.Text>{statusTask?.progress_percent ?? 0}%</Typography.Text></div>
-              <div>账号：<Typography.Text>{statusTask?.used_account_count ?? 0} 个 / 失败 {statusTask?.failed_account_count ?? 0}</Typography.Text></div>
             </div>
           </div>
+          {statusTask?.status === "error" ? (
+            <Alert
+              type="error"
+              showIcon
+              message={statusTask.error_title || "任务处理失败"}
+              description={
+                <div className="space-y-2">
+                  <div>{statusTask.error || statusTask.realtime_status || "本次任务未能完成。"}</div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    {statusTask.error_code ? <Tag className="m-0 font-mono">{statusTask.error_code}</Tag> : null}
+                    {statusTask.error_category_label ? <Tag color="blue" className="m-0">{statusTask.error_category_label}</Tag> : null}
+                    <Tag color={statusTask.error_retryable ? "green" : "default"} className="m-0">
+                      {statusTask.error_retryable ? "可重试" : "需检查请求"}
+                    </Tag>
+                  </div>
+                  {statusTask.error_hint ? <div className="text-sm text-slate-600">建议：{statusTask.error_hint}</div> : null}
+                </div>
+              }
+            />
+          ) : null}
           {statusLogList(statusTask?.status_logs)}
         </div>
       </Modal>

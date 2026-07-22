@@ -23,6 +23,7 @@ import (
 
 	"imagepool/internal/accounts"
 	"imagepool/internal/config"
+	"imagepool/internal/errorinfo"
 	"imagepool/internal/images"
 	"imagepool/internal/metrics"
 	"imagepool/internal/openaiweb"
@@ -176,19 +177,23 @@ func TestErrorClassificationDoesNotTreatCanceledOrRejectedRequestsAsFailures(t *
 	if got := statusFromError(openaiweb.ErrContentPolicy); got != http.StatusBadRequest {
 		t.Fatalf("policy status=%d", got)
 	}
-	if got := metricCallStatus(statusClientClosedRequest, "context canceled"); got != "canceled" {
+	if got := metricCallStatus(statusClientClosedRequest, "context canceled", "request_canceled"); got != "canceled" {
 		t.Fatalf("canceled metric status=%q", got)
 	}
-	if got := metricCallStatus(http.StatusBadRequest, "content policy violation"); got != "rejected" {
+	if got := metricCallStatus(http.StatusBadRequest, "content policy violation", "content_policy_violation"); got != "rejected" {
 		t.Fatalf("rejected metric status=%q", got)
 	}
-	if got := metricCallStatus(http.StatusBadGateway, "content policy violation: 非常抱歉，生成的图片可能违反了关于裸露、色情或情色内容的防护限制。"); got != "rejected" {
+	if got := metricCallStatus(http.StatusBadGateway, "content policy violation: 非常抱歉，生成的图片可能违反了关于裸露、色情或情色内容的防护限制。", "content_policy_violation"); got != "rejected" {
 		t.Fatalf("content policy metric status=%q", got)
+	}
+	if got := metricCallStatus(http.StatusTooManyRequests, "OAI 生图超时", "oai_image_generation_timeout"); got != "failed" {
+		t.Fatalf("upstream timeout metric status=%q", got)
 	}
 }
 
 func TestImagePollTimeoutReturnsPublicOAITimeoutError(t *testing.T) {
 	err := fmt.Errorf("generation: %w: ChatGPT 生图任务已等待 300 秒", openaiweb.ErrPollTimeout)
+	classified := errorinfo.Classify(err, 0)
 	if status := statusFromError(err); status != http.StatusTooManyRequests {
 		t.Fatalf("status=%d", status)
 	}
@@ -196,15 +201,21 @@ func TestImagePollTimeoutReturnsPublicOAITimeoutError(t *testing.T) {
 	writeError(recorder, statusFromError(err), err)
 	var body struct {
 		Error struct {
-			Message string `json:"message"`
-			Type    string `json:"type"`
-			Code    string `json:"code"`
+			Message   string `json:"message"`
+			Type      string `json:"type"`
+			Code      string `json:"code"`
+			Title     string `json:"title"`
+			Category  string `json:"category"`
+			Retryable bool   `json:"retryable"`
+			Action    string `json:"action"`
+			Hint      string `json:"hint"`
+			RequestID string `json:"request_id"`
 		} `json:"error"`
 	}
 	if decodeErr := json.NewDecoder(recorder.Body).Decode(&body); decodeErr != nil {
 		t.Fatal(decodeErr)
 	}
-	if recorder.Code != http.StatusTooManyRequests || body.Error.Message != openaiweb.PublicImagePollTimeoutMessage || body.Error.Type != "timeout_error" || body.Error.Code != "oai_image_generation_timeout" {
+	if recorder.Code != http.StatusTooManyRequests || body.Error.Message != classified.Message || body.Error.Type != "timeout_error" || body.Error.Code != "oai_image_generation_timeout" || body.Error.Title == "" || body.Error.Category != "upstream" || !body.Error.Retryable || body.Error.Action == "" || body.Error.Hint == "" || body.Error.RequestID == "" {
 		t.Fatalf("status=%d body=%#v", recorder.Code, body)
 	}
 }
@@ -225,13 +236,14 @@ func TestImagePreparationTimeoutReturnsGatewayTimeout(t *testing.T) {
 	if decodeErr := json.NewDecoder(recorder.Body).Decode(&body); decodeErr != nil {
 		t.Fatal(decodeErr)
 	}
-	if recorder.Code != http.StatusGatewayTimeout || body.Error.Type != "timeout_error" || body.Error.Code != "upstream_timeout" {
+	if recorder.Code != http.StatusGatewayTimeout || body.Error.Type != "timeout_error" || body.Error.Code != "image_preparation_timeout" {
 		t.Fatalf("status=%d body=%#v", recorder.Code, body)
 	}
 }
 
 func TestImageGenerationEndpointReturnsPublicPollTimeoutError(t *testing.T) {
 	err := fmt.Errorf("%w: ChatGPT 生图任务已等待 300 秒", openaiweb.ErrPollTimeout)
+	classified := errorinfo.Classify(err, 0)
 	srv := httptest.NewServer(testServerWithGenerateError(t, err))
 	defer srv.Close()
 	req, err := http.NewRequest(http.MethodPost, srv.URL+"/v1/images/generations", strings.NewReader(`{"prompt":"draw"}`))
@@ -254,13 +266,14 @@ func TestImageGenerationEndpointReturnsPublicPollTimeoutError(t *testing.T) {
 	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
 		t.Fatal(err)
 	}
-	if response.StatusCode != http.StatusTooManyRequests || body.Error.Message != openaiweb.PublicImagePollTimeoutMessage || body.Error.Type != "timeout_error" || body.Error.Code != "oai_image_generation_timeout" {
+	if response.StatusCode != http.StatusTooManyRequests || body.Error.Message != classified.Message || body.Error.Type != "timeout_error" || body.Error.Code != "oai_image_generation_timeout" {
 		t.Fatalf("status=%d body=%#v", response.StatusCode, body)
 	}
 }
 
 func TestStreamingImageGenerationEndpointReturnsPublicPollTimeoutError(t *testing.T) {
 	err := fmt.Errorf("%w: ChatGPT 生图任务已等待 300 秒", openaiweb.ErrPollTimeout)
+	classified := errorinfo.Classify(err, 0)
 	srv := httptest.NewServer(testServerWithGenerateError(t, err))
 	defer srv.Close()
 	req, err := http.NewRequest(http.MethodPost, srv.URL+"/v1/images/generations", strings.NewReader(`{"prompt":"draw","stream":true}`))
@@ -278,7 +291,7 @@ func TestStreamingImageGenerationEndpointReturnsPublicPollTimeoutError(t *testin
 		t.Fatalf("status=%d body=%s", response.StatusCode, body)
 	}
 	text := string(body)
-	if !strings.Contains(text, openaiweb.PublicImagePollTimeoutMessage) || strings.Contains(strings.ToLower(text), "image poll timeout") || strings.Contains(text, "生图任务已等待") {
+	if !strings.Contains(text, classified.Message) || strings.Contains(strings.ToLower(text), "image poll timeout") || strings.Contains(text, "生图任务已等待") {
 		t.Fatalf("body=%s", body)
 	}
 }
@@ -363,6 +376,11 @@ func TestImageGenerationEndpoint(t *testing.T) {
 	if len(data) != 1 || payload["backend_model"] != images.PublicImageModel {
 		t.Fatalf("payload=%#v", payload)
 	}
+	for _, hidden := range []string{"account_email", "attempts"} {
+		if _, found := payload[hidden]; found {
+			t.Fatalf("response exposed %s: %#v", hidden, payload)
+		}
+	}
 	tasksRequest, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/image-tasks", nil)
 	tasksRequest.Header.Set("Authorization", "Bearer k")
 	tasksResponse, err := http.DefaultClient.Do(tasksRequest)
@@ -394,7 +412,7 @@ func TestCredentialFailureNeverLeaksUpstreamDiagnostics(t *testing.T) {
 	}
 	assertPublicMessage := func(t *testing.T, body []byte) {
 		t.Helper()
-		if !strings.Contains(string(body), openaiweb.PublicCredentialInvalidMessage) {
+		if !strings.Contains(string(body), errorinfo.Classify(raw, 0).Message) {
 			t.Fatalf("missing public credential message: %s", body)
 		}
 	}
@@ -410,7 +428,7 @@ func TestCredentialFailureNeverLeaksUpstreamDiagnostics(t *testing.T) {
 		}
 		defer resp.Body.Close()
 		body, _ := io.ReadAll(resp.Body)
-		if resp.StatusCode != http.StatusUnauthorized {
+		if resp.StatusCode != http.StatusTooManyRequests {
 			t.Fatalf("status=%d body=%s", resp.StatusCode, body)
 		}
 		var payload struct {
@@ -422,7 +440,7 @@ func TestCredentialFailureNeverLeaksUpstreamDiagnostics(t *testing.T) {
 		if err := json.Unmarshal(body, &payload); err != nil {
 			t.Fatal(err)
 		}
-		if payload.Error.Type != "authentication_error" || payload.Error.Code != "account_credential_invalid" {
+		if payload.Error.Type != "rate_limit_error" || payload.Error.Code != "account_pool_unavailable" {
 			t.Fatalf("payload=%s", body)
 		}
 		assertRedacted(t, body)
@@ -440,7 +458,7 @@ func TestCredentialFailureNeverLeaksUpstreamDiagnostics(t *testing.T) {
 		}
 		defer resp.Body.Close()
 		body, _ := io.ReadAll(resp.Body)
-		if resp.StatusCode != http.StatusUnauthorized {
+		if resp.StatusCode != http.StatusTooManyRequests {
 			t.Fatalf("status=%d body=%s", resp.StatusCode, body)
 		}
 		assertRedacted(t, body)
@@ -482,7 +500,8 @@ func TestCredentialFailureNeverLeaksUpstreamDiagnostics(t *testing.T) {
 				t.Fatal(err)
 			}
 			if task.Status == tasks.StatusFailed {
-				if task.Error != openaiweb.PublicCredentialInvalidMessage || task.RealtimeStatus != openaiweb.PublicCredentialInvalidMessage {
+				classified := errorinfo.Classify(raw, 0)
+				if task.Error != classified.Message || task.RealtimeStatus != classified.Message || task.ErrorCode != classified.Code {
 					t.Fatalf("task=%#v", task)
 				}
 				return
@@ -511,11 +530,20 @@ func TestCompactTaskListOmitsLogsAndLegacyAlias(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer compactResponse.Body.Close()
+	compactBody, err := io.ReadAll(compactResponse.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, hidden := range []string{"account_email", "used_account_count", "failed_account_count", "image_route_attempt_count", `"attempts"`} {
+		if strings.Contains(string(compactBody), hidden) {
+			t.Fatalf("compact response exposed %q: %s", hidden, compactBody)
+		}
+	}
 	var compactPayload struct {
 		Items []tasks.Task    `json:"items"`
 		Tasks json.RawMessage `json:"tasks"`
 	}
-	if err := json.NewDecoder(compactResponse.Body).Decode(&compactPayload); err != nil {
+	if err := json.Unmarshal(compactBody, &compactPayload); err != nil {
 		t.Fatal(err)
 	}
 	if compactResponse.StatusCode != http.StatusOK || len(compactPayload.Items) != 1 {
@@ -532,11 +560,20 @@ func TestCompactTaskListOmitsLogsAndLegacyAlias(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer legacyResponse.Body.Close()
+	legacyBody, err := io.ReadAll(legacyResponse.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, hidden := range []string{"account_email", "used_account_count", "failed_account_count", "image_route_attempt_count", `"attempts"`} {
+		if strings.Contains(string(legacyBody), hidden) {
+			t.Fatalf("task response exposed %q: %s", hidden, legacyBody)
+		}
+	}
 	var legacyPayload struct {
 		Items []tasks.Task    `json:"items"`
 		Tasks json.RawMessage `json:"tasks"`
 	}
-	if err := json.NewDecoder(legacyResponse.Body).Decode(&legacyPayload); err != nil {
+	if err := json.Unmarshal(legacyBody, &legacyPayload); err != nil {
 		t.Fatal(err)
 	}
 	if legacyResponse.StatusCode != http.StatusOK || len(legacyPayload.Items) != 1 || len(legacyPayload.Tasks) == 0 || len(legacyPayload.Items[0].StatusLogs) == 0 {

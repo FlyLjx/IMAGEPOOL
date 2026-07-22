@@ -621,8 +621,11 @@ function RuntimeHealth({
             <div className="mb-2 text-xs font-medium text-slate-400">主要错误原因</div>
             <div className="max-h-32 space-y-2 overflow-y-auto pr-1">
               {runtime.error_reasons.map((item) => (
-                <div key={item.label} className="flex items-center justify-between gap-3 text-sm">
-                  <span className="min-w-0 truncate text-slate-600" title={item.label}>{item.label}</span>
+                <div key={item.code || item.label} className="flex items-center justify-between gap-3 text-sm">
+                  <div className="min-w-0">
+                    <div className="truncate text-slate-600" title={item.label}>{item.label}</div>
+                    {item.code ? <div className="truncate font-mono text-[11px] text-slate-400">{item.code}</div> : null}
+                  </div>
                   <span className="font-mono font-semibold text-rose-600">{item.value}</span>
                 </div>
               ))}
@@ -647,10 +650,9 @@ function RecentFailures({ items }: { items: DashboardSummary["calls"]["recent_fa
     <div className="divide-y divide-slate-100">
       {items.map((record) => {
         const time = formatShanghaiDateTimeParts(record.time);
-        const summary = String(record.summary || "调用失败");
+        const title = String(record.error_title || "调用失败");
         const model = String(record.model || "-");
         const endpoint = String(record.endpoint || "").trim();
-        const accountEmail = String(record.account_email || "").trim();
         const error = String(record.error || "-");
 
         return (
@@ -668,27 +670,26 @@ function RecentFailures({ items }: { items: DashboardSummary["calls"]["recent_fa
                 <span className="flex size-7 shrink-0 items-center justify-center rounded-md bg-rose-50 text-rose-600">
                   <AlertCircle className="size-4" />
                 </span>
-                <span className="min-w-0 truncate font-medium text-slate-900" title={summary}>
-                  {summary}
+                <span className="min-w-0 truncate font-medium text-slate-900" title={title}>
+                  {title}
                 </span>
               </div>
               <div className="mt-2 flex flex-wrap items-center gap-2">
                 <Tag color="red" className="m-0">失败</Tag>
+                {record.error_code ? <Tag className="m-0 font-mono">{record.error_code}</Tag> : null}
+                {record.error_category_label ? <Tag color="blue" className="m-0">{record.error_category_label}</Tag> : null}
+                <Tag color={record.retryable ? "green" : "default"} className="m-0">{record.retryable ? "可重试" : "需检查"}</Tag>
                 <Tag className="m-0 font-mono">{model}</Tag>
                 {endpoint ? <Tag color="blue" className="m-0 font-mono">{endpoint}</Tag> : null}
-                {accountEmail ? (
-                  <span className="max-w-full truncate rounded-md bg-slate-100 px-2 py-0.5 font-mono text-xs text-slate-500" title={accountEmail}>
-                    {accountEmail}
-                  </span>
-                ) : null}
               </div>
             </div>
 
             <div className="min-w-0 rounded-md border border-rose-100 bg-rose-50 px-3 py-2">
-              <div className="text-xs font-medium text-rose-500">错误</div>
-              <div className="mt-1 truncate font-mono text-sm text-rose-700" title={error}>
+              <div className="text-xs font-medium text-rose-500">错误信息</div>
+              <div className="mt-1 line-clamp-2 text-sm text-rose-700" title={error}>
                 {error}
               </div>
+              {record.hint ? <div className="mt-1 text-xs text-rose-500">建议：{record.hint}</div> : null}
             </div>
           </div>
         );

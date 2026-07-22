@@ -15,6 +15,16 @@ type responseRecorder struct {
 	body   bytes.Buffer
 }
 
+type recordedError struct {
+	Message   string
+	Code      string
+	Title     string
+	Category  string
+	Retryable bool
+	Action    string
+	Hint      string
+}
+
 func newResponseRecorder(w http.ResponseWriter) *responseRecorder {
 	return &responseRecorder{ResponseWriter: w, status: http.StatusOK}
 }
@@ -40,19 +50,29 @@ func (w *responseRecorder) Flush() {
 
 func (w *responseRecorder) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
-func (w *responseRecorder) ErrorMessage() string {
+func (w *responseRecorder) ErrorInfo() recordedError {
 	if w.status < http.StatusBadRequest || w.body.Len() == 0 {
-		return ""
+		return recordedError{}
 	}
 	var payload struct {
 		Error struct {
-			Message string `json:"message"`
+			Message   string `json:"message"`
+			Code      string `json:"code"`
+			Title     string `json:"title"`
+			Category  string `json:"category"`
+			Retryable bool   `json:"retryable"`
+			Action    string `json:"action"`
+			Hint      string `json:"hint"`
 		} `json:"error"`
 	}
 	if json.Unmarshal(w.body.Bytes(), &payload) == nil && strings.TrimSpace(payload.Error.Message) != "" {
-		return strings.TrimSpace(payload.Error.Message)
+		return recordedError{
+			Message: strings.TrimSpace(payload.Error.Message), Code: strings.TrimSpace(payload.Error.Code),
+			Title: strings.TrimSpace(payload.Error.Title), Category: strings.TrimSpace(payload.Error.Category),
+			Retryable: payload.Error.Retryable, Action: strings.TrimSpace(payload.Error.Action), Hint: strings.TrimSpace(payload.Error.Hint),
+		}
 	}
-	return strings.TrimSpace(w.body.String())
+	return recordedError{Message: strings.TrimSpace(w.body.String())}
 }
 
 func min(a, b int) int {

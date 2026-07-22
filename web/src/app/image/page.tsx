@@ -117,7 +117,6 @@ function TaskStatusModal({ task, onClose }: { task: ImageTask | null; onClose: (
             </div>
             <div className="mt-3 grid gap-2 sm:grid-cols-2">
               <span>当前状态：{task.realtime_status || task.progress || "-"}</span>
-              <span>调用账号：{task.used_account_count ?? 0} 个</span>
               <span>模型：{task.model || "gpt-image-2"}</span>
               <span>耗时：{elapsedLabel(task)}</span>
             </div>
