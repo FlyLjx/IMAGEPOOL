@@ -9,6 +9,11 @@ import (
 	"time"
 )
 
+const (
+	scheduledRefreshConcurrencyLimit = 6
+	scheduledRefreshTimeout          = 75 * time.Second
+)
+
 type AccountChecker interface {
 	CheckAccount(ctx context.Context, token string) (AccountCheckResult, error)
 }
@@ -168,6 +173,9 @@ func (m *RefreshManager) refreshResults(tokens []string, lightweight bool) <-cha
 	m.mu.RLock()
 	workers := m.concurrency
 	m.mu.RUnlock()
+	if lightweight && workers > scheduledRefreshConcurrencyLimit {
+		workers = scheduledRefreshConcurrencyLimit
+	}
 	if workers > len(tokens) {
 		workers = len(tokens)
 	}
@@ -205,16 +213,22 @@ func normalizeRefreshConcurrency(concurrency int) int {
 func (m *RefreshManager) refreshOne(token string, lightweight bool) RefreshItem {
 	account, _ := m.store.Get(token)
 	item := RefreshItem{Token: token, Email: account.Email}
+	ctx := context.Background()
+	cancel := func() {}
+	if lightweight {
+		ctx, cancel = context.WithTimeout(ctx, scheduledRefreshTimeout)
+	}
+	defer cancel()
 	var check AccountCheckResult
 	var err error
 	if lightweight {
 		if checker, ok := m.checker.(LightweightAccountChecker); ok {
-			check, err = checker.CheckAccountLight(context.Background(), token)
+			check, err = checker.CheckAccountLight(ctx, token)
 		} else {
-			check, err = m.checker.CheckAccount(context.Background(), token)
+			check, err = m.checker.CheckAccount(ctx, token)
 		}
 	} else {
-		check, err = m.checker.CheckAccount(context.Background(), token)
+		check, err = m.checker.CheckAccount(ctx, token)
 	}
 	if err != nil {
 		if isAuthenticationFailureMessage(err.Error()) {

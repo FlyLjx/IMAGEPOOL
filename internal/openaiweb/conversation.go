@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
+	"math/rand"
 	"net"
 	"net/http"
 	"net/url"
@@ -22,19 +24,33 @@ const (
 	maxSSEDataLineSize                = 16 * 1024 * 1024
 	maxImageStartAttempts             = 3
 	maxImageResumeAttempts            = 10
+	maxImageUploadStageAttempts       = 3
 	maxAdaptiveImagePollInterval      = 10 * time.Second
 	defaultImageStreamOpenTimeout     = 60 * time.Second
 	legacyImageStreamIdleWindow       = 8 * time.Second
 	defaultImageStreamIdleWindow      = 60 * time.Second
 	defaultImageStreamReferenceWindow = 75 * time.Second
-	// The upstream stream can emit a resume token and keep the connection
-	// alive with heartbeats. Give a final image event a short grace period,
-	// then hand control to /conversation/resume instead of waiting for the
-	// long stream timers.
-	imageResumeHandoffWindow = 2 * time.Second
+	defaultImageUploadCreateTimeout   = 60 * time.Second
+	defaultImageUploadBlobTimeout     = 60 * time.Second
+	defaultImageUploadConfirmTimeout  = 60 * time.Second
+	imageUploadRetryBaseDelay         = 250 * time.Millisecond
 )
 
-var errImageStreamOpenTimeout = errors.New("image stream open timeout")
+var (
+	errImageStreamOpenTimeout     = errors.New("image stream open timeout")
+	errInvalidImageUploadResponse = errors.New("invalid image upload response")
+)
+
+type imageUploadStageError struct {
+	Stage string
+	Err   error
+}
+
+func (e *imageUploadStageError) Error() string {
+	return fmt.Sprintf("image upload %s: %v", e.Stage, e.Err)
+}
+
+func (e *imageUploadStageError) Unwrap() error { return e.Err }
 
 type imageStreamState struct {
 	conversationID string
@@ -162,12 +178,6 @@ func (c *Client) startImageGenerationWithinBudgetWithState(ctx context.Context, 
 	for attempt := 0; attempt < maxImageResumeAttempts && ctx.Err() == nil; attempt++ {
 		resumeBody, resumeErr := c.resumeImageGeneration(ctx, account, turnTraceID, state)
 		if resumeErr != nil {
-			// A resumed conversation is account-scoped, but a pool can recover
-			// faster by cooling this account and submitting a new conversation on
-			// another account than by holding the lease through ten 429 retries.
-			if isImageStartRateLimited(resumeErr) {
-				return state.conversationID, state.fileIDs, state.sedimentIDs, resumeErr
-			}
 			if isResumePollingFallback(resumeErr) {
 				break
 			}
@@ -178,7 +188,7 @@ func (c *Client) startImageGenerationWithinBudgetWithState(ctx context.Context, 
 			if attempt+1 >= maxImageResumeAttempts {
 				break
 			}
-			if err := c.sleep(ctx, imageResumeRetryDelay(attempt)); err != nil {
+			if err := c.sleep(ctx, imageResumeRetryDelayForError(attempt, resumeErr)); err != nil {
 				return state.conversationID, state.fileIDs, state.sedimentIDs, imageGenerationErrorForConversation(ctx, err, state.conversationID)
 			}
 			continue
@@ -397,22 +407,6 @@ func (c *Client) consumeImageStream(ctx context.Context, body io.ReadCloser, ref
 	}
 	referenceTimer := time.NewTimer(referenceTimeout)
 	defer referenceTimer.Stop()
-	var resumeTimer *time.Timer
-	var resumeTimerC <-chan time.Time
-	stopResumeTimer := func() {
-		if resumeTimer == nil {
-			return
-		}
-		if !resumeTimer.Stop() {
-			select {
-			case <-resumeTimer.C:
-			default:
-			}
-		}
-		resumeTimer = nil
-		resumeTimerC = nil
-	}
-	defer stopResumeTimer()
 	resetIdleTimer := func() {
 		if !idleTimer.Stop() {
 			select {
@@ -449,10 +443,6 @@ func (c *Client) consumeImageStream(ctx context.Context, body io.ReadCloser, ref
 					state.conversationID = conversationID
 				}
 				state.offset++
-				if resumeTimer == nil {
-					resumeTimer = time.NewTimer(imageResumeHandoffWindow)
-					resumeTimerC = resumeTimer.C
-				}
 				continue
 			}
 			if state.conversationID == "" {
@@ -484,8 +474,6 @@ func (c *Client) consumeImageStream(ctx context.Context, body io.ReadCloser, ref
 				return false, true, nil
 			}
 			return false, false, fmt.Errorf("%w: ChatGPT 生图提交后 %.0f 秒未返回任务信息", ErrPollTimeout, referenceTimeout.Seconds())
-		case <-resumeTimerC:
-			return false, false, nil
 		case <-ctx.Done():
 			cancel()
 			_ = body.Close()
@@ -557,6 +545,21 @@ func imageResumeRetryDelay(attempt int) time.Duration {
 	delay := 300 * time.Millisecond
 	for index := 0; index < attempt && delay < 5*time.Second; index++ {
 		delay = time.Duration(float64(delay) * 1.5)
+	}
+	if delay > 5*time.Second {
+		return 5 * time.Second
+	}
+	return delay
+}
+
+func imageResumeRetryDelayForError(attempt int, err error) time.Duration {
+	delay := imageResumeRetryDelay(attempt)
+	var upstream *UpstreamError
+	if errors.As(err, &upstream) && upstream.RetryAfter > 0 {
+		retryAfter := time.Duration(upstream.RetryAfter) * time.Second
+		if retryAfter > delay {
+			delay = retryAfter
+		}
 	}
 	if delay > 5*time.Second {
 		return 5 * time.Second
@@ -999,37 +1002,141 @@ func (c *Client) uploadImage(ctx context.Context, account accounts.Account, imag
 		FileID    string `json:"file_id"`
 		UploadURL string `json:"upload_url"`
 	}
-	body := map[string]any{"file_name": image.FileName, "file_size": len(image.Data), "use_case": "multimodal", "width": image.Width, "height": image.Height}
-	if err := c.doJSON(ctx, account, http.MethodPost, path, path, body, map[string]string{"Content-Type": "application/json", "Accept": "application/json"}, &created); err != nil {
+	body := map[string]any{
+		"file_name":                       image.FileName,
+		"file_size":                       len(image.Data),
+		"use_case":                        "multimodal",
+		"timezone_offset_min":             -480,
+		"reset_rate_limits":               false,
+		"supports_direct_azure_multipart": true,
+		"mime_type":                       image.MIMEType,
+	}
+	if err := c.runImageUploadStage(ctx, account, image, index, total, "create", defaultImageUploadCreateTimeout, func(stageCtx context.Context) error {
+		created.FileID = ""
+		created.UploadURL = ""
+		if err := c.doJSON(stageCtx, account, http.MethodPost, path, path, body, map[string]string{"Content-Type": "application/json", "Accept": "application/json"}, &created); err != nil {
+			return err
+		}
+		if created.FileID == "" || created.UploadURL == "" {
+			return errInvalidImageUploadResponse
+		}
+		return nil
+	}); err != nil {
 		return uploadMeta{}, err
 	}
-	if created.FileID == "" || created.UploadURL == "" {
-		return uploadMeta{}, fmt.Errorf("invalid upload response")
-	}
-	putReq, err := http.NewRequestWithContext(ctx, http.MethodPut, created.UploadURL, bytes.NewReader(image.Data))
-	if err != nil {
-		return uploadMeta{}, err
-	}
-	putReq.Header.Set("Content-Type", image.MIMEType)
-	putReq.Header.Set("x-ms-blob-type", "BlockBlob")
-	putReq.Header.Set("x-ms-version", "2020-04-08")
-	putReq.Header.Set("Origin", c.baseURL)
-	putReq.Header.Set("Referer", c.baseURL+"/")
-	putReq.Header.Set("User-Agent", c.userAgent(account))
-	resp, err := c.clientFor(account, true).Do(putReq)
-	if err != nil {
-		return uploadMeta{}, err
-	}
-	io.Copy(io.Discard, resp.Body)
-	resp.Body.Close()
-	if err := ensureOK(resp, "image_upload"); err != nil {
+	if err := c.runImageUploadStage(ctx, account, image, index, total, "blob_put", defaultImageUploadBlobTimeout, func(stageCtx context.Context) error {
+		putReq, err := http.NewRequestWithContext(stageCtx, http.MethodPut, created.UploadURL, bytes.NewReader(image.Data))
+		if err != nil {
+			return err
+		}
+		putReq.Header.Set("Content-Type", image.MIMEType)
+		putReq.Header.Set("x-ms-blob-type", "BlockBlob")
+		putReq.Header.Set("x-ms-version", "2020-04-08")
+		putReq.Header.Set("Origin", c.baseURL)
+		putReq.Header.Set("Referer", c.baseURL+"/")
+		putReq.Header.Set("User-Agent", c.userAgent(account))
+		putReq.Header.Set("Accept", "application/json, text/plain, */*")
+		putReq.Header.Set("Accept-Language", "en-US,en;q=0.8")
+		resp, err := c.clientFor(account, true).Do(putReq)
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		if err := ensureOK(resp, "image_upload"); err != nil {
+			return err
+		}
+		_, err = io.Copy(io.Discard, resp.Body)
+		return err
+	}); err != nil {
 		return uploadMeta{}, err
 	}
 	confirmPath := "/backend-api/files/" + created.FileID + "/uploaded"
-	if err := c.doJSON(ctx, account, http.MethodPost, confirmPath, confirmPath, map[string]any{}, map[string]string{"Content-Type": "application/json", "Accept": "application/json"}, nil); err != nil {
+	if err := c.runImageUploadStage(ctx, account, image, index, total, "confirm", defaultImageUploadConfirmTimeout, func(stageCtx context.Context) error {
+		return c.doJSON(stageCtx, account, http.MethodPost, confirmPath, confirmPath, map[string]any{}, map[string]string{"Content-Type": "application/json", "Accept": "application/json"}, nil)
+	}); err != nil {
 		return uploadMeta{}, err
 	}
 	return uploadMeta{FileID: created.FileID, FileName: image.FileName, FileSize: len(image.Data), MIMEType: image.MIMEType, Width: image.Width, Height: image.Height}, nil
+}
+
+func (c *Client) runImageUploadStage(ctx context.Context, account accounts.Account, image ImageInput, index, total int, stage string, timeout time.Duration, operation func(context.Context) error) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	for attempt := 1; attempt <= maxImageUploadStageAttempts; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return &imageUploadStageError{Stage: stage, Err: err}
+		}
+		stageCtx, cancel := context.WithTimeout(ctx, timeout)
+		started := time.Now()
+		err := operation(stageCtx)
+		cancel()
+		if err == nil {
+			if attempt > 1 {
+				log.Printf("image upload stage recovered: stage=%s attempt=%d/%d duration_ms=%d account=%q image=%d/%d file_size=%d mime_type=%q", stage, attempt, maxImageUploadStageAttempts, time.Since(started).Milliseconds(), account.Email, index, total, len(image.Data), image.MIMEType)
+			}
+			return nil
+		}
+		retryable := isRetryableImageUploadError(err) && ctx.Err() == nil && !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled)
+		log.Printf("image upload stage failed: stage=%s attempt=%d/%d duration_ms=%d status=%d retryable=%t account=%q image=%d/%d file_size=%d mime_type=%q error=%s", stage, attempt, maxImageUploadStageAttempts, time.Since(started).Milliseconds(), imageUploadStatusCode(err), retryable, account.Email, index, total, len(image.Data), image.MIMEType, compactImageUploadDiagnostic(err))
+		if !retryable || attempt == maxImageUploadStageAttempts {
+			return &imageUploadStageError{Stage: stage, Err: err}
+		}
+		if err := c.sleep(ctx, imageUploadRetryDelay(attempt)); err != nil {
+			return &imageUploadStageError{Stage: stage, Err: err}
+		}
+	}
+	return &imageUploadStageError{Stage: stage, Err: errInvalidImageUploadResponse}
+}
+
+func isRetryableImageUploadError(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	if errors.Is(err, errInvalidImageUploadResponse) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	var upstream *UpstreamError
+	if errors.As(err, &upstream) {
+		switch upstream.StatusCode {
+		case http.StatusRequestTimeout, http.StatusConflict, http.StatusTooEarly, http.StatusTooManyRequests:
+			return true
+		default:
+			return upstream.StatusCode >= http.StatusInternalServerError
+		}
+	}
+	var networkError net.Error
+	return errors.As(err, &networkError)
+}
+
+func imageUploadRetryDelay(attempt int) time.Duration {
+	if attempt < 1 {
+		attempt = 1
+	}
+	delay := time.Duration(attempt) * imageUploadRetryBaseDelay
+	delay += time.Duration(rand.Int63n(int64(imageUploadRetryBaseDelay) + 1))
+	if delay > time.Second {
+		return time.Second
+	}
+	return delay
+}
+
+func imageUploadStatusCode(err error) int {
+	var upstream *UpstreamError
+	if errors.As(err, &upstream) {
+		return upstream.StatusCode
+	}
+	return 0
+}
+
+func compactImageUploadDiagnostic(err error) string {
+	message := strings.TrimSpace(fmt.Sprint(err))
+	message = strings.ReplaceAll(message, "\r", " ")
+	message = strings.ReplaceAll(message, "\n", " ")
+	if len(message) > 2000 {
+		return message[:2000] + "..."
+	}
+	return message
 }
 
 func (c *Client) headers(account accounts.Account, path, route string, extra map[string]string) map[string]string {

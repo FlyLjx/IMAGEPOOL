@@ -29,6 +29,11 @@ const (
 	defaultClientBuildNumber = "8160987"
 	bootstrapResourcesTTL    = 5 * time.Minute
 	imagePrepareRetryDelay   = 350 * time.Millisecond
+	// Reference uploads use a separate budget from bootstrap/Sentinel setup.
+	// The previous shared 30-second deadline regularly canceled healthy Azure
+	// uploads during short upstream congestion bursts.
+	defaultImageUploadTimeout     = 60 * time.Second
+	defaultImageUploadConcurrency = 12
 	// Keep setup failures from consuming the full image-generation window. A
 	// submitted image still receives the complete poll timeout below.
 	defaultImagePreparationTimeout = 30 * time.Second
@@ -62,6 +67,8 @@ type Client struct {
 	pollInitialWait             time.Duration
 	pollHeartbeatInterval       time.Duration
 	pollRequestTimeout          time.Duration
+	imageUploadTimeout          time.Duration
+	imageUploadSlots            chan struct{}
 	imagePreparationTimeout     time.Duration
 	imageStreamOpenTimeout      time.Duration
 	imageStreamIdleTimeout      time.Duration
@@ -121,7 +128,7 @@ func NewClient(cfg config.Config, opts ...ClientOption) *Client {
 	}
 	c := &Client{
 		baseURL: strings.TrimRight(cfg.ChatGPTBaseURL, "/"), imageModelSlug: cfg.ImageWebModelSlug,
-		pollTimeout: seconds(cfg.ImagePollTimeoutSecs), pollInterval: seconds(cfg.ImagePollIntervalSecs), pollInitialWait: seconds(cfg.ImagePollInitialWaitSecs), pollHeartbeatInterval: 15 * time.Second, pollRequestTimeout: 20 * time.Second, imagePreparationTimeout: defaultImagePreparationTimeout, imageStreamOpenTimeout: defaultImageStreamOpenTimeout, imageStreamIdleTimeout: defaultImageStreamIdleWindow, imageStreamReferenceTimeout: defaultImageStreamReferenceWindow, settle: seconds(cfg.ImageSettleSecs),
+		pollTimeout: seconds(cfg.ImagePollTimeoutSecs), pollInterval: seconds(cfg.ImagePollIntervalSecs), pollInitialWait: seconds(cfg.ImagePollInitialWaitSecs), pollHeartbeatInterval: 15 * time.Second, pollRequestTimeout: 20 * time.Second, imageUploadTimeout: defaultImageUploadTimeout, imageUploadSlots: make(chan struct{}, defaultImageUploadConcurrency), imagePreparationTimeout: defaultImagePreparationTimeout, imageStreamOpenTimeout: defaultImageStreamOpenTimeout, imageStreamIdleTimeout: defaultImageStreamIdleWindow, imageStreamReferenceTimeout: defaultImageStreamReferenceWindow, settle: seconds(cfg.ImageSettleSecs),
 		checkBeforeHit: cfg.ImageCheckBeforeHitEnabled, settleEnabled: cfg.ImageSettleEnabled,
 		httpClient: httpClient, resourceClient: resourceClient, proxyRuntime: cfg.ProxyRuntime, transport: cfg.UpstreamTransport, timeout: seconds(cfg.RequestTimeoutSecs), tlsClients: map[string]*http.Client{}, tlsResources: map[string]*http.Client{}, tlsStreamClients: map[string]*http.Client{}, bootstrapResources: map[bootstrapResourcesCacheKey]bootstrapResourcesCacheEntry{}, bootstrapFlights: map[bootstrapResourcesCacheKey]*bootstrapResourcesFlight{}, now: time.Now, newID: newUUID,
 		sleep: func(ctx context.Context, d time.Duration) error {
@@ -320,18 +327,14 @@ func (c *Client) GenerateImage(ctx context.Context, account accounts.Account, re
 	backendModel := c.imageSlug(req.Model)
 	attemptCtx, cancelAttempt := c.imageAttemptContext(ctx)
 	defer cancelAttempt()
-	preparationCtx, cancelPreparation := c.imagePreparationContext(attemptCtx)
-	defer cancelPreparation()
 
 	progress(ProgressEvent{Progress: "uploading", Message: "上传参考图"})
-	refs := make([]uploadMeta, 0, len(req.References))
-	for i, image := range req.References {
-		meta, err := c.uploadImage(preparationCtx, account, image, i+1, len(req.References))
-		if err != nil {
-			return ImageResult{}, c.imagePreparationError(ctx, err)
-		}
-		refs = append(refs, meta)
+	refs, err := c.uploadReferences(attemptCtx, account, req.References)
+	if err != nil {
+		return ImageResult{}, c.imageUploadError(ctx, err)
 	}
+	preparationCtx, cancelPreparation := c.imagePreparationContext(attemptCtx)
+	defer cancelPreparation()
 	effectivePrompt := imagePromptForWeb(req.Prompt, len(refs) > 0, req.Size, req.Quality)
 	progress(ProgressEvent{Progress: "bootstrapping", Message: "初始化 ChatGPT Web 会话"})
 	scripts, dataBuild, err := c.bootstrapWithResources(preparationCtx, account)
@@ -395,14 +398,66 @@ func imagePromptForWeb(prompt string, edit bool, size, quality string) string {
 	return strings.TrimSpace(prompt)
 }
 
-// imageAttemptContext contains every network phase for one account. Setup is
-// separately capped so a hung bootstrap or upload cannot consume the full
-// generation window, while the outer task context limits account switching.
+func (c *Client) uploadReferences(ctx context.Context, account accounts.Account, images []ImageInput) ([]uploadMeta, error) {
+	if len(images) == 0 {
+		return nil, nil
+	}
+	release, err := c.acquireImageUploadSlot(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	refs := make([]uploadMeta, 0, len(images))
+	for index, image := range images {
+		uploadCtx, cancelUpload := c.imageUploadContext(ctx)
+		meta, err := c.uploadImage(uploadCtx, account, image, index+1, len(images))
+		cancelUpload()
+		if err != nil {
+			return nil, err
+		}
+		refs = append(refs, meta)
+	}
+	return refs, nil
+}
+
+func (c *Client) acquireImageUploadSlot(ctx context.Context) (func(), error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if c.imageUploadSlots == nil {
+		return func() {}, nil
+	}
+	select {
+	case c.imageUploadSlots <- struct{}{}:
+		return func() { <-c.imageUploadSlots }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// imageAttemptContext contains every network phase for one account. Upload,
+// setup, and generation retain independent limits while the outer service task
+// context still caps account switching across the whole request.
 func (c *Client) imageAttemptContext(ctx context.Context) (context.Context, context.CancelFunc) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	return context.WithTimeout(ctx, c.imagePreparationBudget()+c.imageGenerationBudget())
+	return context.WithTimeout(ctx, c.imageUploadBudget()+c.imagePreparationBudget()+c.imageGenerationBudget())
+}
+
+func (c *Client) imageUploadContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithTimeout(ctx, c.imageUploadBudget())
+}
+
+func (c *Client) imageUploadBudget() time.Duration {
+	timeout := c.imageUploadTimeout
+	if timeout <= 0 {
+		return defaultImageUploadTimeout
+	}
+	return timeout
 }
 
 func (c *Client) imagePreparationContext(ctx context.Context) (context.Context, context.CancelFunc) {
@@ -426,6 +481,13 @@ func (c *Client) imageGenerationBudget() time.Duration {
 		return 300 * time.Second
 	}
 	return timeout
+}
+
+func (c *Client) imageUploadError(parent context.Context, err error) error {
+	if errors.Is(err, context.DeadlineExceeded) && (parent == nil || parent.Err() == nil) {
+		return fmt.Errorf("%w: ChatGPT 参考图上传超时（已等待 %.0f 秒）", ErrImagePreparationTimeout, c.imageUploadBudget().Seconds())
+	}
+	return err
 }
 
 func (c *Client) imagePreparationError(parent context.Context, err error) error {

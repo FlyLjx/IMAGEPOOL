@@ -347,7 +347,7 @@ func TestRegisterEventStreamAcceptsEventSourceToken(t *testing.T) {
 func TestImageGenerationEndpoint(t *testing.T) {
 	srv := httptest.NewServer(testServer(t))
 	defer srv.Close()
-	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/v1/images/generations", strings.NewReader(`{"prompt":"draw","model":"gpt-image-2"}`))
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/v1/images/generations", strings.NewReader(`{"prompt":"draw","model":"codex-gpt-image-2"}`))
 	req.Header.Set("Authorization", "Bearer k")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -360,7 +360,7 @@ func TestImageGenerationEndpoint(t *testing.T) {
 	var payload map[string]any
 	json.NewDecoder(resp.Body).Decode(&payload)
 	data, _ := payload["data"].([]any)
-	if len(data) != 1 {
+	if len(data) != 1 || payload["backend_model"] != images.PublicImageModel {
 		t.Fatalf("payload=%#v", payload)
 	}
 	tasksRequest, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/image-tasks", nil)
@@ -376,7 +376,7 @@ func TestImageGenerationEndpoint(t *testing.T) {
 	if err := json.NewDecoder(tasksResponse.Body).Decode(&taskPayload); err != nil {
 		t.Fatal(err)
 	}
-	if tasksResponse.StatusCode != http.StatusOK || len(taskPayload.Items) != 1 || taskPayload.Items[0].Status != tasks.StatusSucceeded {
+	if tasksResponse.StatusCode != http.StatusOK || len(taskPayload.Items) != 1 || taskPayload.Items[0].Status != tasks.StatusSucceeded || taskPayload.Items[0].Model != images.PublicImageModel {
 		t.Fatalf("task status=%d payload=%#v", tasksResponse.StatusCode, taskPayload)
 	}
 }

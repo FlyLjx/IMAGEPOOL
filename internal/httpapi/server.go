@@ -551,7 +551,7 @@ func (s *Server) handleImageGeneration(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.OutputBaseURL = baseURL(r)
-	metrics.SetModel(r.Context(), req.Model)
+	metrics.SetModel(r.Context(), images.PublicImageModel)
 	if err := s.consumeQuota(r, "/v1/images/generations", req.Model, 1, normalizedImageCount(req.N)); err != nil {
 		writeError(w, statusFromError(err), err)
 		return
@@ -580,7 +580,7 @@ func (s *Server) handleImageEdit(w http.ResponseWriter, r *http.Request, asTask 
 		return
 	}
 	req.OutputBaseURL = baseURL(r)
-	metrics.SetModel(r.Context(), req.Model)
+	metrics.SetModel(r.Context(), images.PublicImageModel)
 	endpoint := "/v1/images/edits"
 	if asTask {
 		endpoint = "/api/image-tasks/edits"
@@ -867,7 +867,7 @@ func (s *Server) handleTaskGeneration(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	metrics.SetModel(r.Context(), body.Model)
+	metrics.SetModel(r.Context(), images.PublicImageModel)
 	if err := s.consumeQuota(r, "/api/image-tasks/generations", body.Model, 1, normalizedImageCount(body.N)); err != nil {
 		writeError(w, statusFromError(err), err)
 		return
@@ -1172,7 +1172,7 @@ func (s *Server) handleAccountImageTest(w http.ResponseWriter, r *http.Request) 
 	if strings.TrimSpace(body.Prompt) == "" {
 		body.Prompt = "Generate a simple small blue circle on a white background."
 	}
-	metrics.SetModel(r.Context(), body.Model)
+	metrics.SetModel(r.Context(), images.PublicImageModel)
 	identity, _ := auth.IdentityFromContext(r.Context())
 	task, response, err := s.tasks.RunGenerationWithAccountForOwner(r.Context(), identity.ID, body.AccessToken, images.Request{Prompt: body.Prompt, Model: body.Model, Size: body.Size, Quality: body.Quality, N: 1, OutputBaseURL: baseURL(r)})
 	if err != nil {

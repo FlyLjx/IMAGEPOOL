@@ -30,6 +30,10 @@ import (
 
 const maxAuthenticationRetries = 10
 
+// PublicImageModel is the stable model name exposed by IMAGE POOL. Upstream
+// Web slugs remain internal routing details and can vary by account type.
+const PublicImageModel = "gpt-image-2"
+
 type Service struct {
 	cfgMu   sync.RWMutex
 	cfg     config.Config
@@ -829,7 +833,28 @@ func responseFromResult(result openaiweb.ImageResult) Response {
 		resp.Data = append(resp.Data, Data{B64JSON: b64, MimeType: mimeType, Format: imageFormatFromMIMEType(mimeType)})
 	}
 	resp.ImageRoute = map[string]any{"backend_model": result.BackendModel, "image_route": "free_image2_fallback"}
-	return resp
+	return resp.Public()
+}
+
+// Public removes account-specific upstream model slugs from an image response.
+// It also normalizes persisted legacy responses when they are read back.
+func (r Response) Public() Response {
+	r.BackendModel = PublicImageModel
+	r.Attempts = openaiweb.PublicAttemptLogs(r.Attempts)
+	for index := range r.Attempts {
+		if r.Attempts[index].BackendModel != "" {
+			r.Attempts[index].BackendModel = PublicImageModel
+		}
+	}
+	if r.ImageRoute != nil {
+		route := make(map[string]any, len(r.ImageRoute))
+		for key, value := range r.ImageRoute {
+			route[key] = value
+		}
+		route["backend_model"] = PublicImageModel
+		r.ImageRoute = route
+	}
+	return r
 }
 
 func imageMIMETypeFromBase64(encoded string) string {
@@ -890,7 +915,7 @@ func imageFormatFromMIMEType(mimeType string) string {
 }
 
 func (r Response) MarshalForOpenAI() map[string]any {
-	r.Attempts = openaiweb.PublicAttemptLogs(r.Attempts)
+	r = r.Public()
 	data, _ := json.Marshal(r)
 	var out map[string]any
 	_ = json.Unmarshal(data, &out)

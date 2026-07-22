@@ -87,9 +87,9 @@ func (s *AutoRefreshScheduler) waitDuration() time.Duration {
 }
 
 func (s *AutoRefreshScheduler) refreshAll() {
-	tokens := s.store.Tokens()
+	tokens := s.store.TokensForScheduledRefresh()
 	if len(tokens) == 0 {
-		log.Printf("automatic account refresh skipped: no accounts")
+		log.Printf("automatic account refresh skipped: no idle accounts")
 		return
 	}
 	progress, err := s.refresh.RefreshScheduled(tokens)

@@ -225,6 +225,24 @@ func TestGenerateRemovesInvalidTokenAndRetriesNextAccount(t *testing.T) {
 	}
 }
 
+func TestGenerateHidesUpstreamImageModelSlug(t *testing.T) {
+	store := accounts.NewStore([]accounts.Account{{Email: "user@example.test", AccessToken: "token"}}, "")
+	response, err := NewService(config.Default(), store, &fakeBackend{}).Generate(context.Background(), Request{Prompt: "draw", Model: "team-codex-gpt-image-2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.BackendModel != PublicImageModel || response.ImageRoute["backend_model"] != PublicImageModel {
+		t.Fatalf("response=%#v", response)
+	}
+	if len(response.Attempts) != 1 || response.Attempts[0].BackendModel != PublicImageModel {
+		t.Fatalf("attempts=%#v", response.Attempts)
+	}
+	payload := response.MarshalForOpenAI()
+	if payload["backend_model"] != PublicImageModel {
+		t.Fatalf("payload=%#v", payload)
+	}
+}
+
 func TestGenerateRemovesGeneric401Account(t *testing.T) {
 	store := accounts.NewStore([]accounts.Account{{Email: "old", AccessToken: "old", CreatedAt: 1}, {Email: "new", AccessToken: "new", CreatedAt: 2}}, "")
 	fb := &fakeBackend{errs: []error{errors.New("upstream /backend-api/me status=401 body=unauthorized")}}

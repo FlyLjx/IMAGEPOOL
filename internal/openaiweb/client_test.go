@@ -337,6 +337,46 @@ func TestImagePreparationErrorPreservesTurnstileVMCapacity(t *testing.T) {
 	}
 }
 
+func TestImageUploadSlotsBoundOnlyUploadAdmission(t *testing.T) {
+	client := NewClient(config.Default())
+	if capacity := cap(client.imageUploadSlots); capacity != defaultImageUploadConcurrency {
+		t.Fatalf("default upload concurrency=%d", capacity)
+	}
+	client.imageUploadSlots = make(chan struct{}, 2)
+	releaseFirst, err := client.acquireImageUploadSlot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	releaseSecond, err := client.acquireImageUploadSlot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	acquired := make(chan func(), 1)
+	go func() {
+		release, acquireErr := client.acquireImageUploadSlot(context.Background())
+		if acquireErr == nil {
+			acquired <- release
+		}
+	}()
+	select {
+	case release := <-acquired:
+		release()
+		releaseFirst()
+		releaseSecond()
+		t.Fatal("third upload bypassed the concurrency limit")
+	case <-time.After(25 * time.Millisecond):
+	}
+	releaseFirst()
+	select {
+	case release := <-acquired:
+		release()
+	case <-time.After(time.Second):
+		releaseSecond()
+		t.Fatal("waiting upload was not admitted after release")
+	}
+	releaseSecond()
+}
+
 func TestGenerateImagePreservesFullGenerationBudgetAfterPreparation(t *testing.T) {
 	generationStarted := make(chan time.Time, 1)
 	generationCanceled := make(chan time.Time, 1)

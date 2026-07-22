@@ -305,7 +305,7 @@ func (m *Manager) create(mode, ownerID, clientTaskID string, req images.Request,
 	m.seq++
 	id := fmt.Sprintf("img_%d_%d", time.Now().UnixNano(), m.seq)
 	now := time.Now()
-	task := &Task{ID: id, OwnerID: strings.TrimSpace(ownerID), ClientTaskID: clientTaskID, Mode: mode, Status: StatusQueued, Progress: "queued", ProgressPercent: 0, RealtimeStatus: "任务已提交", Prompt: req.Prompt, Model: req.Model, Size: req.Size, Quality: req.Quality, ResponseFormat: req.ResponseFormat, OutputFormat: req.OutputFormat, CreatedAt: now, UpdatedAt: now}
+	task := &Task{ID: id, OwnerID: strings.TrimSpace(ownerID), ClientTaskID: clientTaskID, Mode: mode, Status: StatusQueued, Progress: "queued", ProgressPercent: 0, RealtimeStatus: "任务已提交", Prompt: req.Prompt, Model: images.PublicImageModel, Size: req.Size, Quality: req.Quality, ResponseFormat: req.ResponseFormat, OutputFormat: req.OutputFormat, CreatedAt: now, UpdatedAt: now}
 	appendLog(task, LogEntry{Time: now, Level: "info", Event: "submitted", Progress: "queued", Message: "任务已提交"})
 	m.tasks[id] = task
 	m.markDirtyLocked(id)
@@ -409,8 +409,7 @@ func (m *Manager) runWith(ctx context.Context, id string, req images.Request, ge
 // original errors for account handling; task responses and persisted records
 // only retain their safe attempt projection.
 func publicImageResponse(result images.Response) images.Response {
-	result.Attempts = openaiweb.PublicAttemptLogs(result.Attempts)
-	return result
+	return result.Public()
 }
 
 func applyAttemptStats(task *Task, result images.Response) {
@@ -843,12 +842,12 @@ func (m *Manager) copyTask(task *Task) Task {
 		return Task{}
 	}
 	cp := *task
+	cp.Model = images.PublicImageModel
 	cp.Error = openaiweb.PublicErrorText(cp.Error)
 	cp.RealtimeStatus = openaiweb.PublicErrorText(cp.RealtimeStatus)
 	if task.Result != nil {
-		result := *task.Result
+		result := task.Result.Public()
 		result.Data = append([]images.Data(nil), task.Result.Data...)
-		result.Attempts = openaiweb.PublicAttemptLogs(task.Result.Attempts)
 		cp.Result = &result
 	}
 	cp.Data = append([]images.Data(nil), task.Data...)

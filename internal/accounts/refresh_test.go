@@ -3,7 +3,9 @@ package accounts
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -102,5 +104,75 @@ func TestRecordRefreshClearsStaleUnknownQuotaFlag(t *testing.T) {
 	}
 	if strings.Contains(string(data), "image_quota_unknown") {
 		t.Fatalf("stale unknown quota flag remained: %s", data)
+	}
+}
+
+type scheduledConcurrencyChecker struct {
+	active atomic.Int32
+	max    atomic.Int32
+	gate   <-chan struct{}
+}
+
+func (c *scheduledConcurrencyChecker) CheckAccount(ctx context.Context, token string) (AccountCheckResult, error) {
+	return c.CheckAccountLight(ctx, token)
+}
+
+func (c *scheduledConcurrencyChecker) CheckAccountLight(ctx context.Context, token string) (AccountCheckResult, error) {
+	active := c.active.Add(1)
+	for {
+		maximum := c.max.Load()
+		if active <= maximum || c.max.CompareAndSwap(maximum, active) {
+			break
+		}
+	}
+	defer c.active.Add(-1)
+	select {
+	case <-c.gate:
+		return AccountCheckResult{ImageQuotaUnknown: true}, nil
+	case <-ctx.Done():
+		return AccountCheckResult{}, ctx.Err()
+	}
+}
+
+func TestScheduledRefreshCapsBackgroundConcurrency(t *testing.T) {
+	accounts := make([]Account, 0, 20)
+	tokens := make([]string, 0, 20)
+	for index := 0; index < 20; index++ {
+		token := fmt.Sprintf("token-%d", index)
+		accounts = append(accounts, Account{AccessToken: token})
+		tokens = append(tokens, token)
+	}
+	gate := make(chan struct{})
+	checker := &scheduledConcurrencyChecker{gate: gate}
+	manager := NewRefreshManager(NewStore(accounts, ""), checker, 20)
+	done := make(chan error, 1)
+	go func() {
+		_, err := manager.RefreshScheduled(tokens)
+		done <- err
+	}()
+	deadline := time.Now().Add(time.Second)
+	for checker.max.Load() < scheduledRefreshConcurrencyLimit && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if maximum := checker.max.Load(); maximum != scheduledRefreshConcurrencyLimit {
+		close(gate)
+		t.Fatalf("scheduled concurrency=%d", maximum)
+	}
+	close(gate)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestScheduledRefreshTokensExcludeLeasedAccounts(t *testing.T) {
+	store := NewStore([]Account{{AccessToken: "leased", Status: "正常"}, {AccessToken: "idle", Status: "正常"}}, "")
+	account, err := store.AcquireAccountForImage(context.Background(), "leased", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.ReleaseImage(account.AccessToken)
+	tokens := store.TokensForScheduledRefresh()
+	if len(tokens) != 1 || tokens[0] != "idle" {
+		t.Fatalf("scheduled refresh tokens=%#v", tokens)
 	}
 }

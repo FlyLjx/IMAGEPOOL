@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -649,17 +650,22 @@ func TestStartImageGenerationReturnsInitialRateLimitWithoutSameAccountRetry(t *t
 	}
 }
 
-func TestStartImageGenerationReturnsResumeRateLimitWithoutSameAccountRetry(t *testing.T) {
+func TestStartImageGenerationRetriesAcceptedConversationAfterResumeRateLimit(t *testing.T) {
 	var resumeHits atomic.Int32
+	var retryDelay time.Duration
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/backend-api/f/conversation":
 			w.Header().Set("Content-Type", "text/event-stream")
 			_, _ = w.Write([]byte("data: {\"type\":\"resume_conversation_token\",\"token\":\"resume-token\",\"conversation_id\":\"conv-1\"}\n\n"))
 		case "/backend-api/f/conversation/resume":
-			resumeHits.Add(1)
-			w.Header().Set("Retry-After", "30")
-			http.Error(w, "rate limited", http.StatusTooManyRequests)
+			if resumeHits.Add(1) == 1 {
+				w.Header().Set("Retry-After", "30")
+				http.Error(w, "rate limited", http.StatusTooManyRequests)
+				return
+			}
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte("data: {\"conversation_id\":\"conv-1\",\"message\":{\"author\":{\"role\":\"tool\"},\"content\":{\"parts\":[{\"asset_pointer\":\"file-service://file_00000000aaaaaaaaaaaaaaaaaaaaaaaa\"}]}}}\n\n"))
 		default:
 			http.NotFound(w, r)
 		}
@@ -668,14 +674,16 @@ func TestStartImageGenerationReturnsResumeRateLimitWithoutSameAccountRetry(t *te
 
 	cfg := config.Default()
 	cfg.ChatGPTBaseURL = srv.URL
-	client := NewClient(cfg, WithHTTPClient(srv.Client()), WithSleep(func(context.Context, time.Duration) error { return nil }))
-	_, _, _, err := client.startImageGeneration(context.Background(), accounts.Account{AccessToken: "token"}, "draw", "auto", chatRequirements{}, "conduit", "trace", "parent", nil)
-	var upstream *UpstreamError
-	if !errors.As(err, &upstream) || upstream.StatusCode != http.StatusTooManyRequests {
-		t.Fatalf("err=%#v", err)
+	client := NewClient(cfg, WithHTTPClient(srv.Client()), WithSleep(func(_ context.Context, delay time.Duration) error {
+		retryDelay = delay
+		return nil
+	}))
+	conversationID, fileIDs, _, err := client.startImageGeneration(context.Background(), accounts.Account{AccessToken: "token"}, "draw", "auto", chatRequirements{}, "conduit", "trace", "parent", nil)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if resumeHits.Load() != 1 {
-		t.Fatalf("same account resume retries=%d", resumeHits.Load())
+	if resumeHits.Load() != 2 || retryDelay != 5*time.Second || conversationID != "conv-1" || len(fileIDs) != 1 {
+		t.Fatalf("resume_hits=%d retry_delay=%s conversation=%q files=%#v", resumeHits.Load(), retryDelay, conversationID, fileIDs)
 	}
 }
 
@@ -796,5 +804,197 @@ func TestResolveImageURLsReturnsReferenceDownloadError(t *testing.T) {
 	urls, err := client.resolveImageURLs(context.Background(), accounts.Account{AccessToken: "token"}, "conv-1", []string{"file_00000000aaaaaaaaaaaaaaaaaaaaaaaa"}, nil)
 	if len(urls) != 0 || err == nil || !strings.Contains(err.Error(), "resolve file") || !strings.Contains(err.Error(), "status=403") {
 		t.Fatalf("urls=%#v err=%v", urls, err)
+	}
+}
+
+func TestUploadImageUsesCurrentOfficialFields(t *testing.T) {
+	var createBody map[string]any
+	var blobHits atomic.Int32
+	var confirmHits atomic.Int32
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/backend-api/files":
+			if err := json.NewDecoder(r.Body).Decode(&createBody); err != nil {
+				t.Error(err)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"file_id": "file-test", "upload_url": srv.URL + "/blob"})
+		case r.Method == http.MethodPut && r.URL.Path == "/blob":
+			blobHits.Add(1)
+			data, _ := io.ReadAll(r.Body)
+			if string(data) != "PNGDATA" || r.Header.Get("Content-Type") != "image/png" || r.Header.Get("x-ms-blob-type") != "BlockBlob" {
+				t.Errorf("blob request headers=%v body=%q", r.Header, data)
+			}
+			w.WriteHeader(http.StatusCreated)
+		case r.Method == http.MethodPost && r.URL.Path == "/backend-api/files/file-test/uploaded":
+			confirmHits.Add(1)
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	cfg := config.Default()
+	cfg.ChatGPTBaseURL = srv.URL
+	client := NewClient(cfg, WithHTTPClient(srv.Client()))
+	input := ImageInput{Data: []byte("PNGDATA"), FileName: "reference.png", MIMEType: "image/png", Width: 32, Height: 24}
+	meta, err := client.uploadImage(context.Background(), accounts.Account{Email: "a@example.com", AccessToken: "token"}, input, 1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meta.FileID != "file-test" || blobHits.Load() != 1 || confirmHits.Load() != 1 {
+		t.Fatalf("meta=%#v blob_hits=%d confirm_hits=%d", meta, blobHits.Load(), confirmHits.Load())
+	}
+	if createBody["file_name"] != "reference.png" || createBody["file_size"] != float64(len(input.Data)) || createBody["use_case"] != "multimodal" || createBody["mime_type"] != "image/png" {
+		t.Fatalf("create body=%#v", createBody)
+	}
+	if createBody["supports_direct_azure_multipart"] != true || createBody["reset_rate_limits"] != false || createBody["timezone_offset_min"] != float64(-480) {
+		t.Fatalf("official upload fields=%#v", createBody)
+	}
+	if _, found := createBody["width"]; found {
+		t.Fatalf("legacy width leaked into create request: %#v", createBody)
+	}
+	if _, found := createBody["height"]; found {
+		t.Fatalf("legacy height leaked into create request: %#v", createBody)
+	}
+}
+
+func TestUploadImageRetriesTransientCreateFailureOnSameAccount(t *testing.T) {
+	var createHits atomic.Int32
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/backend-api/files":
+			if createHits.Add(1) < 3 {
+				http.Error(w, "server busy", http.StatusServiceUnavailable)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"file_id": "file-retry", "upload_url": srv.URL + "/blob"})
+		case r.Method == http.MethodPut && r.URL.Path == "/blob":
+			w.WriteHeader(http.StatusCreated)
+		case r.Method == http.MethodPost && r.URL.Path == "/backend-api/files/file-retry/uploaded":
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	cfg := config.Default()
+	cfg.ChatGPTBaseURL = srv.URL
+	client := NewClient(cfg, WithHTTPClient(srv.Client()), WithSleep(func(context.Context, time.Duration) error { return nil }))
+	_, err := client.uploadImage(context.Background(), accounts.Account{Email: "a@example.com", AccessToken: "token"}, ImageInput{Data: []byte("PNGDATA"), FileName: "reference.png", MIMEType: "image/png", Width: 32, Height: 24}, 1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if createHits.Load() != maxImageUploadStageAttempts {
+		t.Fatalf("create attempts=%d", createHits.Load())
+	}
+}
+
+func TestGenerateImageGivesUploadAnIndependentBudget(t *testing.T) {
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/backend-api/files":
+			time.Sleep(45 * time.Millisecond)
+			_ = json.NewEncoder(w).Encode(map[string]any{"file_id": "file-input", "upload_url": srv.URL + "/blob"})
+		case r.Method == http.MethodPut && r.URL.Path == "/blob":
+			w.WriteHeader(http.StatusCreated)
+		case r.Method == http.MethodPost && r.URL.Path == "/backend-api/files/file-input/uploaded":
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodGet && r.URL.Path == "/":
+			_, _ = w.Write([]byte(`<html data-build="build" data-seq="1234567"></html>`))
+		case r.Method == http.MethodPost && r.URL.Path == "/backend-api/sentinel/chat-requirements/prepare":
+			_ = json.NewEncoder(w).Encode(map[string]any{"prepare_token": "prep", "proofofwork": map[string]any{"required": false}})
+		case r.Method == http.MethodPost && r.URL.Path == "/backend-api/sentinel/chat-requirements/finalize":
+			_ = json.NewEncoder(w).Encode(map[string]any{"token": "sentinel"})
+		case r.Method == http.MethodPost && r.URL.Path == "/backend-api/f/conversation/prepare":
+			_ = json.NewEncoder(w).Encode(map[string]any{"conduit_token": "conduit"})
+		case r.Method == http.MethodPost && r.URL.Path == "/backend-api/f/conversation":
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte("data: {\"conversation_id\":\"conv-upload\",\"message\":{\"author\":{\"role\":\"tool\"},\"content\":{\"parts\":[{\"asset_pointer\":\"file-service://file-output\"}]}}}\n\n"))
+		case r.Method == http.MethodGet && r.URL.Path == "/backend-api/files/download/file-output":
+			_ = json.NewEncoder(w).Encode(map[string]any{"download_url": srv.URL + "/result.png"})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	cfg := config.Default()
+	cfg.ChatGPTBaseURL = srv.URL
+	client := NewClient(cfg, WithHTTPClient(srv.Client()))
+	client.imageUploadTimeout = 100 * time.Millisecond
+	client.imagePreparationTimeout = 30 * time.Millisecond
+	client.pollTimeout = 200 * time.Millisecond
+	result, err := client.GenerateImage(context.Background(), accounts.Account{Email: "a@example.com", AccessToken: "token"}, ImageRequest{Prompt: "edit", References: []ImageInput{{Data: []byte("PNGDATA"), FileName: "reference.png", MIMEType: "image/png", Width: 32, Height: 24}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ConversationID != "conv-upload" || len(result.URLs) != 1 || result.URLs[0] != srv.URL+"/result.png" {
+		t.Fatalf("result=%#v", result)
+	}
+}
+
+func TestConcurrentImageUploadsRecoverFromTransientCreateFailures(t *testing.T) {
+	const concurrency = 20
+	var mu sync.Mutex
+	createHits := map[string]int{}
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/backend-api/files":
+			mu.Lock()
+			createHits[token]++
+			hits := createHits[token]
+			mu.Unlock()
+			if hits == 1 {
+				http.Error(w, "server busy", http.StatusServiceUnavailable)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"file_id": "file-" + token, "upload_url": srv.URL + "/blob"})
+		case r.Method == http.MethodPut && r.URL.Path == "/blob":
+			w.WriteHeader(http.StatusCreated)
+		case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/backend-api/files/file-") && strings.HasSuffix(r.URL.Path, "/uploaded"):
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	cfg := config.Default()
+	cfg.ChatGPTBaseURL = srv.URL
+	client := NewClient(cfg, WithHTTPClient(srv.Client()), WithSleep(func(context.Context, time.Duration) error { return nil }))
+	errorsByWorker := make(chan error, concurrency)
+	var workers sync.WaitGroup
+	for index := 0; index < concurrency; index++ {
+		workers.Add(1)
+		go func(index int) {
+			defer workers.Done()
+			token := fmt.Sprintf("token-%d", index)
+			_, err := client.uploadImage(context.Background(), accounts.Account{Email: token + "@example.com", AccessToken: token}, ImageInput{Data: []byte("PNGDATA"), FileName: "reference.png", MIMEType: "image/png", Width: 32, Height: 24}, 1, 1)
+			errorsByWorker <- err
+		}(index)
+	}
+	workers.Wait()
+	close(errorsByWorker)
+	for err := range errorsByWorker {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(createHits) != concurrency {
+		t.Fatalf("accounts=%d", len(createHits))
+	}
+	for token, hits := range createHits {
+		if hits != 2 {
+			t.Fatalf("token=%s create_hits=%d", token, hits)
+		}
 	}
 }

@@ -375,12 +375,15 @@ func TestTaskRemainsQueuedWhileWaitingForAnAccount(t *testing.T) {
 
 func TestRunGenerationCreatesTrackedTask(t *testing.T) {
 	m := NewManager(taskSvc{})
-	task, result, err := m.RunGenerationForOwner(context.Background(), "user-a", images.Request{Prompt: "a"})
+	task, result, err := m.RunGenerationForOwner(context.Background(), "user-a", images.Request{Prompt: "a", Model: "codex-gpt-image-2"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if task.Status != StatusSucceeded || task.OwnerID != "user-a" || len(task.Data) != 1 || len(result.Data) != 1 {
 		t.Fatalf("task=%#v result=%#v", task, result)
+	}
+	if task.Model != images.PublicImageModel || result.BackendModel != images.PublicImageModel {
+		t.Fatalf("public models were not normalized: task=%q backend=%q", task.Model, result.BackendModel)
 	}
 	stored, ok := m.StatusForOwner(task.ID, "user-a", false)
 	if !ok || stored.Status != StatusSucceeded || stored.StatusLogCount == 0 {

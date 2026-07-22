@@ -729,6 +729,26 @@ func (s *Store) Tokens() []string {
 	return tokens
 }
 
+// TokensForScheduledRefresh excludes accounts that are actively generating an
+// image. Background metadata checks share the account's cookie jar and should
+// never race a customer request through the same browser identity.
+func (s *Store) TokensForScheduledRefresh() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	tokens := make([]string, 0, len(s.accounts))
+	for _, account := range s.accounts {
+		token := strings.TrimSpace(account.AccessToken)
+		if token == "" {
+			continue
+		}
+		if _, leased := s.imageLeases[token]; leased {
+			continue
+		}
+		tokens = append(tokens, token)
+	}
+	return tokens
+}
+
 // EnsureBrowserIdentities persists one browser-shaped identity per account so
 // upstream requests do not rotate device or session IDs on every call.
 func (s *Store) EnsureBrowserIdentities() (int, error) {
