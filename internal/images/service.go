@@ -75,6 +75,7 @@ type Data struct {
 type Response struct {
 	Created        int64                  `json:"created"`
 	Data           []Data                 `json:"data"`
+	Usage          *Usage                 `json:"usage,omitempty"`
 	AccountEmail   string                 `json:"account_email,omitempty"`
 	ConversationID string                 `json:"conversation_id,omitempty"`
 	BackendModel   string                 `json:"backend_model,omitempty"`
@@ -136,7 +137,7 @@ func (s *Service) Generate(ctx context.Context, req Request) (Response, error) {
 		if err != nil {
 			return responseFromResult(result), err
 		}
-		return responseFromResult(result), nil
+		return withEstimatedUsage(responseFromResult(result), req), nil
 	}
 	var wg sync.WaitGroup
 	results := make([]openaiweb.ImageResult, req.N)
@@ -169,7 +170,7 @@ func (s *Service) Generate(ctx context.Context, req Request) (Response, error) {
 			combined.BackendModel = part.BackendModel
 		}
 	}
-	return combined, nil
+	return withEstimatedUsage(combined, req), nil
 }
 
 func (s *Service) CheckAccount(ctx context.Context, token string) (accounts.AccountCheckResult, error) {
@@ -335,7 +336,7 @@ func (s *Service) GenerateWithAccount(ctx context.Context, token string, req Req
 	if err != nil {
 		return responseFromResult(result), err
 	}
-	return responseFromResult(result), nil
+	return withEstimatedUsage(responseFromResult(result), req), nil
 }
 
 func (s *Service) taskContext(parent context.Context) (context.Context, context.CancelFunc) {
