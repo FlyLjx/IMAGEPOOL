@@ -1,23 +1,25 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Alert, Button, Card, Empty, Progress, Select, Skeleton, Tag, Typography } from "antd";
+import { Alert, Button, Card, DatePicker, Empty, Progress, Segmented, Skeleton, Tag, Typography } from "antd";
 import {
   Activity,
   AlertCircle,
+  Boxes,
+  CalendarDays,
   Cpu,
-  Gauge,
   HardDrive,
   LoaderCircle,
   MemoryStick,
   Network,
   RefreshCw,
-  TimerReset,
   UsersRound,
+  Webhook,
+  WandSparkles,
 } from "lucide-react";
 import { toast } from "sonner";
 
-import { fetchDashboard, fetchSystemLoad, type DashboardSummary, type SystemLoad } from "@/lib/api";
+import { fetchDashboard, fetchSchedulerDiagnostics, fetchSystemLoad, type DashboardSummary, type SchedulerDiagnostics, type SystemLoad } from "@/lib/api";
 import { formatShanghaiDateTime, formatShanghaiDateTimeParts } from "@/lib/datetime";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 import { cn } from "@/lib/utils";
@@ -95,10 +97,10 @@ function newerSystemLoad(current: SystemLoad | null, next: SystemLoad) {
 }
 
 const RUNTIME_WINDOW_OPTIONS = [
-  { value: 60, label: "最近 60 分钟" },
-  { value: 24 * 60, label: "最近 24 小时" },
-  { value: 7 * 24 * 60, label: "最近 7 天" },
-  { value: 30 * 24 * 60, label: "最近 30 天" },
+  { value: 7 * 24 * 60, label: "7天" },
+  { value: 15 * 24 * 60, label: "15天" },
+  { value: 30 * 24 * 60, label: "30天" },
+  { value: "custom" as const, label: <span className="inline-flex items-center gap-1"><CalendarDays className="size-3" />自定义</span> },
 ];
 
 function runtimeWindowText(minutes: number) {
@@ -114,48 +116,218 @@ function runtimeWindowText(minutes: number) {
   return `${minutes} 分钟`;
 }
 
+type OperationsSummary = {
+  accounts: {
+    active: number;
+    total: number;
+    quota: string;
+    limited: number;
+  };
+  calls: {
+    total: number;
+    failed: number;
+    successPercent: number;
+  };
+  taskHistory: number;
+};
+
+function OperationsOverview({ scheduler, system, summary }: { scheduler: SchedulerDiagnostics; system: SystemLoad; summary: OperationsSummary }) {
+  const queuePercent = percent(scheduler.tasks.queue_depth, scheduler.tasks.queue_capacity);
+  const workerPercent = percent(scheduler.tasks.active_workers, scheduler.tasks.worker_limit);
+  const postprocessPercent = percent(scheduler.postprocess.queue_depth, scheduler.postprocess.queue_capacity);
+  const cpuPercent = loadPercent(system.cpu.usage_percent);
+  const memoryPercent = loadPercent(system.memory.usage_percent);
+  const diskPercent = loadPercent(system.disk.usage_percent);
+  const schedulerSections = [
+    {
+      key: "gpt",
+      title: "GPT账号",
+      icon: UsersRound,
+      iconClass: "bg-emerald-50 text-emerald-600",
+      value: `${summary.accounts.active}/${summary.accounts.total}`,
+      detail: `可调度 ${scheduler.gpt.dispatchable} · 额度 ${summary.accounts.quota} · 限流 ${summary.accounts.limited}`,
+      progress: percent(summary.accounts.active, Math.max(1, summary.accounts.total)),
+      color: "#10b981",
+    },
+    {
+      key: "calls",
+      title: "今日调用",
+      icon: Activity,
+      iconClass: summary.calls.failed > 0 ? "bg-amber-50 text-amber-600" : "bg-emerald-50 text-emerald-600",
+      value: numberText(summary.calls.total),
+      detail: `失败 ${summary.calls.failed} · 成功率 ${summary.calls.successPercent}%`,
+      progress: summary.calls.successPercent,
+      color: summary.calls.failed > 0 ? "#f59e0b" : "#10b981",
+    },
+    {
+      key: "tasks",
+      title: "任务队列",
+      icon: Boxes,
+      iconClass: "bg-sky-50 text-sky-600",
+      value: `${scheduler.tasks.queue_depth}/${scheduler.tasks.queue_capacity}`,
+      detail: `Worker ${scheduler.tasks.active_workers}/${scheduler.tasks.worker_limit} · 历史 ${summary.taskHistory}`,
+      progress: Math.max(queuePercent, workerPercent),
+      color: "#0ea5e9",
+    },
+    {
+      key: "postprocess",
+      title: "高清队列",
+      icon: WandSparkles,
+      iconClass: "bg-violet-50 text-violet-600",
+      value: scheduler.postprocess.enabled ? `${scheduler.postprocess.queue_depth}/${scheduler.postprocess.queue_capacity}` : "关闭",
+      detail: `已处理 ${scheduler.postprocess.processed}，失败 ${scheduler.postprocess.failed}`,
+      progress: postprocessPercent,
+      color: "#8b5cf6",
+    },
+    {
+      key: "callbacks",
+      title: "任务回调",
+      icon: Webhook,
+      iconClass: "bg-rose-50 text-rose-600",
+      value: String(scheduler.callbacks.delivered),
+      detail: `失败 ${scheduler.callbacks.failed}，尝试 ${scheduler.callbacks.attempts}`,
+      progress: percent(scheduler.callbacks.failed, Math.max(1, scheduler.callbacks.delivered + scheduler.callbacks.failed)),
+      color: "#ef4444",
+    },
+  ];
+  const resourceSections = [
+    {
+      key: "cpu",
+      label: "CPU",
+      icon: Cpu,
+      iconClass: "bg-blue-50 text-blue-600",
+      value: `${rateText(cpuPercent)}%`,
+      detail: `${finiteNumber(system.cpu.cores)} 核 · Load ${rateText(system.cpu.load_1)}`,
+      progress: cpuPercent,
+      color: "#3b82f6",
+    },
+    {
+      key: "memory",
+      label: "内存",
+      icon: MemoryStick,
+      iconClass: "bg-emerald-50 text-emerald-600",
+      value: `${rateText(memoryPercent)}%`,
+      detail: `${formatBytes(system.memory.used_bytes)} / ${formatBytes(system.memory.total_bytes)}`,
+      progress: memoryPercent,
+      color: "#10b981",
+    },
+    {
+      key: "disk",
+      label: "硬盘",
+      icon: HardDrive,
+      iconClass: "bg-amber-50 text-amber-600",
+      value: `${rateText(diskPercent)}%`,
+      detail: `${formatBytes(system.disk.used_bytes)} / ${formatBytes(system.disk.total_bytes)}`,
+      progress: diskPercent,
+      color: "#f59e0b",
+    },
+  ];
+  const sampledAt = system.sampled_at || scheduler.generated_at;
+
+  return (
+    <Card
+      title={
+        <div className="flex items-center gap-2">
+          <Activity className="size-4 text-slate-500" />
+          <span>运行状态</span>
+          <Tag color="green" className="m-0 font-normal">实时</Tag>
+        </div>
+      }
+      extra={<span className="font-mono text-xs text-slate-400">{formatShanghaiDateTime(sampledAt)}</span>}
+      styles={{ body: { padding: 0 } }}
+    >
+      <div className="grid min-w-0 xl:grid-cols-[1.2fr_0.8fr]">
+        <section className="min-w-0 p-5 xl:border-r xl:border-slate-100 xl:p-6">
+          <div className="mb-5">
+            <div className="text-sm font-semibold text-slate-800">业务与调度</div>
+            <div className="mt-1 text-xs text-slate-400">账号、调用、任务与后台处理</div>
+          </div>
+          <div className="grid min-w-0 md:grid-cols-6">
+            {schedulerSections.map((section, index) => {
+              const Icon = section.icon;
+              return (
+                <div
+                  key={section.key}
+                  className={cn(
+                    "min-w-0 py-4 md:min-h-[112px] md:px-5",
+                    index > 0 && "border-t border-slate-100",
+                    index < 3 && "md:col-span-2 md:border-t-0 md:pb-5 md:pt-0",
+                    index >= 3 && "md:col-span-3 md:pt-5",
+                    (index === 1 || index === 2 || index === 4) && "md:border-l md:border-slate-100",
+                    (index === 0 || index === 3) && "md:pl-0",
+                    (index === 2 || index === 4) && "md:pr-0",
+                    index === schedulerSections.length - 1 && "pb-0",
+                  )}
+                >
+                  <div className="flex min-w-0 items-center gap-2.5">
+                    <span className={cn("flex size-8 shrink-0 items-center justify-center rounded-md", section.iconClass)}>
+                      <Icon className="size-4" />
+                    </span>
+                    <span className="min-w-0 flex-1 truncate text-sm font-medium text-slate-600">{section.title}</span>
+                    <span className="shrink-0 font-mono text-lg font-semibold text-slate-950 tabular-nums">{section.value}</span>
+                  </div>
+                  <div className="mt-3 truncate text-xs text-slate-400" title={section.detail}>{section.detail}</div>
+                  <Progress className="!mb-0 !mt-3" percent={section.progress} showInfo={false} strokeColor={section.color} trailColor="#f1f5f9" size="small" />
+                </div>
+              );
+            })}
+          </div>
+        </section>
+
+        <section className="min-w-0 border-t border-slate-100 p-5 xl:border-t-0">
+          <div className="mb-5">
+            <div className="text-sm font-semibold text-slate-800">服务器资源</div>
+            <div className="mt-1 text-xs text-slate-400">计算、存储与实时网络吞吐</div>
+          </div>
+          <div className="grid min-w-0 divide-y divide-slate-100 sm:grid-cols-3 sm:divide-x sm:divide-y-0">
+            {resourceSections.map((section) => {
+              const Icon = section.icon;
+              return (
+                <div key={section.key} className="min-w-0 py-3 first:pt-0 last:pb-0 sm:px-4 sm:py-0 sm:first:pl-0 sm:last:pr-0">
+                  <div className="flex items-center gap-2">
+                    <span className={cn("flex size-7 shrink-0 items-center justify-center rounded-md", section.iconClass)}><Icon className="size-3.5" /></span>
+                    <span className="text-xs font-medium text-slate-500">{section.label}</span>
+                  </div>
+                  <div className="mt-2 font-mono text-xl font-semibold text-slate-950 tabular-nums">{section.value}</div>
+                  <div className="mt-1 truncate text-[11px] text-slate-400" title={section.detail}>{section.detail}</div>
+                  <Progress className="!mb-0 !mt-2" percent={section.progress} showInfo={false} strokeColor={section.color} trailColor="#f1f5f9" size="small" />
+                </div>
+              );
+            })}
+          </div>
+
+          <div className="mt-5 flex min-w-0 flex-col gap-3 border-t border-slate-100 pt-4 sm:flex-row sm:items-center">
+            <div className="flex min-w-0 flex-1 items-center gap-3">
+              <span className="flex size-8 shrink-0 items-center justify-center rounded-md bg-cyan-50 text-cyan-600"><Network className="size-4" /></span>
+              <div className="min-w-0">
+                <div className="text-sm font-medium text-slate-600">网络吞吐</div>
+                <div className="mt-0.5 truncate text-[11px] text-slate-400" title={`累计接收 ${formatBytes(system.network.received_bytes)}，发送 ${formatBytes(system.network.sent_bytes)}`}>
+                  累计 ↓ {formatBytes(system.network.received_bytes)} · ↑ {formatBytes(system.network.sent_bytes)}
+                </div>
+              </div>
+            </div>
+            <div className="grid shrink-0 grid-cols-2 gap-5 sm:min-w-[210px]">
+              <div>
+                <div className="text-[11px] text-slate-400">下载</div>
+                <div className="mt-1 truncate font-mono text-sm font-semibold text-slate-900 tabular-nums">{formatRate(system.network.receive_bytes_per_second)}</div>
+              </div>
+              <div>
+                <div className="text-[11px] text-slate-400">上传</div>
+                <div className="mt-1 truncate font-mono text-sm font-semibold text-slate-900 tabular-nums">{formatRate(system.network.send_bytes_per_second)}</div>
+              </div>
+            </div>
+          </div>
+        </section>
+      </div>
+    </Card>
+  );
+}
+
 function sortedEntries(source?: Record<string, number>, limit = 5) {
   return Object.entries(source || {})
     .filter(([, value]) => Number(value) > 0)
     .sort((left, right) => right[1] - left[1])
     .slice(0, limit);
-}
-
-function MetricCard({
-  title,
-  value,
-  helper,
-  icon: Icon,
-  tone = "blue",
-}: {
-  title: string;
-  value: string | number;
-  helper: string;
-  icon: typeof Activity;
-  tone?: "blue" | "green" | "amber" | "rose" | "slate";
-}) {
-  const toneClass = {
-    blue: "bg-blue-50 text-blue-600",
-    green: "bg-emerald-50 text-emerald-600",
-    amber: "bg-amber-50 text-amber-600",
-    rose: "bg-rose-50 text-rose-600",
-    slate: "bg-slate-100 text-slate-600",
-  }[tone];
-
-  return (
-    <Card className="h-full">
-      <div className="flex items-start justify-between gap-4">
-        <div className="min-w-0">
-          <div className="text-sm font-medium text-slate-500">{title}</div>
-          <div className="mt-3 text-3xl font-semibold tracking-normal text-slate-950">{value}</div>
-          <div className="mt-2 text-sm text-slate-400">{helper}</div>
-        </div>
-        <div className={cn("flex size-10 shrink-0 items-center justify-center rounded-lg", toneClass)}>
-          <Icon className="size-5" />
-        </div>
-      </div>
-    </Card>
-  );
 }
 
 function EntryBars({ items, emptyText = "暂无数据" }: { items: Array<[string, number]>; emptyText?: string }) {
@@ -181,18 +353,31 @@ function EntryBars({ items, emptyText = "暂无数据" }: { items: Array<[string
 }
 
 type RuntimeHealthData = NonNullable<DashboardSummary["calls"]["runtime"]>;
-
-function runtimeStatusColor(status: string) {
-  return {
-    success: "#10b981",
-    failed: "#f43f5e",
-    running: "#3b82f6",
-    other: "#94a3b8",
-  }[status] || "#94a3b8";
-}
+type RuntimeRange = { start: string; end: string };
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
+}
+
+function smoothRuntimeValues(values: number[]) {
+  if (values.length < 3) {
+    return values;
+  }
+  const radius = values.length <= 15 ? 1 : 2;
+  return values.map((_, index) => {
+    let weightedTotal = 0;
+    let weightTotal = 0;
+    for (let offset = -radius; offset <= radius; offset += 1) {
+      const sourceIndex = index + offset;
+      if (sourceIndex < 0 || sourceIndex >= values.length) {
+        continue;
+      }
+      const weight = radius + 1 - Math.abs(offset);
+      weightedTotal += values[sourceIndex] * weight;
+      weightTotal += weight;
+    }
+    return weightTotal > 0 ? weightedTotal / weightTotal : values[index];
+  });
 }
 
 function smoothLinePath(points: Array<{ x: number; y: number }>, minY: number, maxY: number) {
@@ -213,56 +398,64 @@ function smoothLinePath(points: Array<{ x: number; y: number }>, minY: number, m
   return path;
 }
 
-function smoothAreaPath(points: Array<{ x: number; y: number }>, baselineY: number, minY: number, maxY: number) {
-  if (points.length === 0) return "";
-  if (points.length === 1) {
-    return `M ${points[0].x} ${baselineY} L ${points[0].x} ${points[0].y} L ${points[0].x} ${baselineY} Z`;
-  }
-  const line = smoothLinePath(points, minY, maxY);
-  const first = points[0];
-  const last = points[points.length - 1];
-  return `${line} L ${last.x} ${baselineY} L ${first.x} ${baselineY} Z`;
-}
-
-function RuntimeTrendChart({ series, windowMinutes }: { series: RuntimeHealthData["series"]; windowMinutes: number }) {
-  const points = series || [];
-  const total = points.reduce((sum, item) => sum + Number(item.success || 0) + Number(item.failed || 0), 0);
+function RuntimeTrendChart({ runtime }: { runtime: RuntimeHealthData }) {
+  const points = runtime.series || [];
+  const windowMinutes = runtime.window_minutes;
+  const total = points.reduce((sum, item) => sum + Number(item.total ?? (Number(item.success || 0) + Number(item.failed || 0))), 0);
+  const totalSuccess = points.reduce((sum, item) => sum + Number(item.success || 0), 0);
+  const totalFailed = points.reduce((sum, item) => sum + Number(item.failed || 0), 0);
   const chartContainerRef = useRef<HTMLDivElement>(null);
   const [chartContainerWidth, setChartContainerWidth] = useState(720);
+  const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
   const height = 240;
-  const width = Math.max(720, chartContainerWidth);
-  const paddingX = 38;
+  const width = Math.max(360, chartContainerWidth);
+  const paddingX = 48;
   const paddingTop = 18;
   const paddingBottom = 52;
   const plotWidth = width - paddingX * 2;
   const plotHeight = height - paddingTop - paddingBottom;
-  const maxValue = Math.max(1, ...points.flatMap((item) => [Number(item.success || 0), Number(item.failed || 0)]));
+  const smoothedTotal = smoothRuntimeValues(points.map((item) => Number(item.total ?? (Number(item.success || 0) + Number(item.failed || 0)))));
+  const smoothedSuccess = smoothRuntimeValues(points.map((item) => Number(item.success || 0)));
+  const smoothedFailed = smoothRuntimeValues(points.map((item) => Number(item.failed || 0)));
+  const peakValue = Math.max(1, Math.ceil(Math.max(...smoothedTotal, ...smoothedSuccess, ...smoothedFailed)));
+  const tickStep = Math.max(1, Math.ceil(peakValue / 4));
+  const maxValue = tickStep * 4;
+  const yTicks = Array.from({ length: 5 }, (_, index) => maxValue - index * tickStep);
   const bottomY = paddingTop + plotHeight;
   const xFor = (index: number) => paddingX + (points.length <= 1 ? plotWidth / 2 : (index / (points.length - 1)) * plotWidth);
   const yFor = (value: number) => paddingTop + (1 - value / maxValue) * plotHeight;
-  const labelIndexes = Array.from(new Set([0, Math.floor((points.length - 1) / 2), points.length - 1])).filter((index) => index >= 0);
-  const nonZeroBucketCount = points.filter((item) => Number(item.success || 0) > 0 || Number(item.failed || 0) > 0).length;
-  const showValueLabels = points.length <= 60 && nonZeroBucketCount <= 14;
-  const showPointMarkers = points.length <= 360;
+  const maxLabelCount = Math.max(3, Math.min(7, Math.floor(plotWidth / 64)));
+  const labelStep = Math.max(1, Math.ceil(Math.max(0, points.length - 1) / Math.max(1, maxLabelCount - 1)));
+  const labelIndexes = points.map((_, index) => index).filter((index) => index % labelStep === 0 || index === points.length - 1);
   const chartPoints = points.map((item, index) => {
+    const pointTotal = Number(item.total ?? (Number(item.success || 0) + Number(item.failed || 0)));
     const success = Number(item.success || 0);
     const failed = Number(item.failed || 0);
     return {
       item,
       index,
       x: xFor(index),
+      total: pointTotal,
       success,
       failed,
-      successY: yFor(success),
-      failedY: yFor(failed),
+      totalY: yFor(smoothedTotal[index]),
+      successY: yFor(smoothedSuccess[index]),
+      failedY: yFor(smoothedFailed[index]),
     };
   });
+  const totalLinePoints = chartPoints.map((item) => ({ x: item.x, y: item.totalY }));
   const successLinePoints = chartPoints.map((item) => ({ x: item.x, y: item.successY }));
   const failedLinePoints = chartPoints.map((item) => ({ x: item.x, y: item.failedY }));
+  const totalPath = smoothLinePath(totalLinePoints, paddingTop, bottomY);
   const successPath = smoothLinePath(successLinePoints, paddingTop, bottomY);
   const failedPath = smoothLinePath(failedLinePoints, paddingTop, bottomY);
-  const successAreaPath = smoothAreaPath(successLinePoints, bottomY, paddingTop, bottomY);
-  const failedAreaPath = smoothAreaPath(failedLinePoints, bottomY, paddingTop, bottomY);
+  const hoveredPoint = hoveredIndex === null ? null : chartPoints[hoveredIndex];
+  const tooltipWidth = 166;
+  const tooltipHeight = 78;
+  const tooltipX = hoveredPoint ? clamp(hoveredPoint.x - tooltipWidth / 2, paddingX + 6, width - paddingX - tooltipWidth - 6) : 0;
+  const tooltipY = hoveredPoint
+    ? clamp(Math.min(hoveredPoint.totalY, hoveredPoint.successY, hoveredPoint.failedY) - tooltipHeight - 12, paddingTop + 6, bottomY - tooltipHeight - 8)
+    : 0;
 
   useEffect(() => {
     const element = chartContainerRef.current;
@@ -283,72 +476,83 @@ function RuntimeTrendChart({ series, windowMinutes }: { series: RuntimeHealthDat
 
   if (!points.length || total <= 0) {
     return (
-      <div className="flex min-h-[290px] items-center justify-center rounded-lg bg-slate-50">
+      <div className="flex min-h-[278px] items-center justify-center bg-slate-50/60">
         <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={`最近 ${runtimeWindowText(windowMinutes)} 暂无调用`} />
       </div>
     );
   }
 
   return (
-    <div className="min-h-[290px] rounded-xl border border-slate-100 bg-white px-3 pb-3 pt-3 shadow-sm">
-      <div className="mb-2 flex flex-wrap items-center gap-4 text-xs">
-        <span className="inline-flex items-center gap-1.5 text-slate-600"><i className="size-2 rounded-full bg-emerald-500" />成功 / 分钟</span>
-        <span className="inline-flex items-center gap-1.5 text-slate-600"><i className="size-2 rounded-full bg-rose-500" />失败 / 分钟</span>
-        <span className="rounded-full bg-slate-100 px-2 py-0.5 font-medium text-slate-500">曲线视图</span>
-        <span className="ml-auto font-mono text-slate-400">max {maxValue}</span>
+    <div className="min-h-[278px] bg-white">
+      <div className="flex min-h-12 flex-wrap items-center gap-x-6 gap-y-2 border-b border-slate-100 bg-slate-50/40 px-5 py-2.5 text-xs">
+        <span className="inline-flex items-center gap-2 text-slate-500">
+          <i className="h-4 w-1 rounded-full bg-blue-500" />
+          调用量
+          <strong className="font-mono text-sm font-semibold text-slate-900 tabular-nums">{numberText(total)}</strong>
+        </span>
+        <span className="inline-flex items-center gap-2 text-slate-500">
+          <i className="h-4 w-1 rounded-full bg-green-500" />
+          成功
+          <strong className="font-mono text-sm font-semibold text-green-600 tabular-nums">{numberText(totalSuccess)}</strong>
+        </span>
+        <span className="inline-flex items-center gap-2 text-slate-500">
+          <i className="h-4 w-1 rounded-full bg-rose-500" />
+          失败
+          <strong className="font-mono text-sm font-semibold text-rose-600 tabular-nums">{numberText(totalFailed)}</strong>
+        </span>
+        <span
+          className="inline-flex items-center gap-2 rounded-md bg-rose-50 px-2.5 py-1 text-rose-600"
+          title={runtime.error_reasons[0]?.label || "暂无错误原因"}
+        >
+          <AlertCircle className="size-3.5" />
+          错误率
+          <strong className="font-mono text-sm font-semibold tabular-nums">{rateText(runtime.error_rate)}%</strong>
+        </span>
       </div>
-      <div ref={chartContainerRef} className="w-full">
-        <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label="每分钟成功和失败调用曲线图" className="h-[255px] w-full overflow-visible">
+      <div
+        ref={chartContainerRef}
+        className="w-full px-2 pb-2 pt-1 sm:px-4"
+        onMouseLeave={() => setHoveredIndex(null)}
+        onMouseMove={(event) => {
+          const bounds = event.currentTarget.getBoundingClientRect();
+          const svgX = ((event.clientX - bounds.left) / bounds.width) * width;
+          const ratio = clamp((svgX - paddingX) / plotWidth, 0, 1);
+          setHoveredIndex(Math.round(ratio * Math.max(0, points.length - 1)));
+        }}
+      >
+        <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label="调用量、成功和失败趋势图" className="h-[238px] w-full overflow-visible">
         <defs>
-          <linearGradient id="runtime-success-area" x1="0" x2="0" y1="0" y2="1">
-            <stop offset="0%" stopColor="#10b981" stopOpacity="0.2" />
-            <stop offset="100%" stopColor="#10b981" stopOpacity="0.02" />
-          </linearGradient>
-          <linearGradient id="runtime-failed-area" x1="0" x2="0" y1="0" y2="1">
-            <stop offset="0%" stopColor="#f43f5e" stopOpacity="0.18" />
-            <stop offset="100%" stopColor="#f43f5e" stopOpacity="0.015" />
-          </linearGradient>
           <filter id="runtime-line-soft-shadow" x="-20%" y="-20%" width="140%" height="150%">
             <feDropShadow dx="0" dy="5" stdDeviation="4" floodColor="#0f172a" floodOpacity="0.08" />
           </filter>
         </defs>
         <rect x={paddingX} y={paddingTop} width={plotWidth} height={plotHeight} rx="12" fill="#f8fafc" />
-        {[0, 0.25, 0.5, 0.75, 1].map((ratio) => {
+        {yTicks.map((value, index) => {
+          const ratio = index / (yTicks.length - 1);
           const y = paddingTop + ratio * plotHeight;
-          const value = Math.round((1 - ratio) * maxValue);
           return (
-            <g key={ratio}>
+            <g key={value}>
               <line x1={paddingX} x2={width - paddingX} y1={y} y2={y} stroke="#e2e8f0" strokeDasharray={ratio === 1 ? "0" : "4 8"} />
-              <text x={10} y={y + 4} className="fill-slate-400 text-[10px]">{value}</text>
+              <text x={paddingX - 10} y={y + 4} textAnchor="end" fill="#64748b" fontSize="11" fontWeight="600">{numberText(value)}</text>
             </g>
           );
         })}
-        <path d={successAreaPath} fill="url(#runtime-success-area)" />
-        <path d={failedAreaPath} fill="url(#runtime-failed-area)" />
-        <path d={successPath} fill="none" stroke="#10b981" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" filter="url(#runtime-line-soft-shadow)" />
-        <path d={failedPath} fill="none" stroke="#f43f5e" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" filter="url(#runtime-line-soft-shadow)" />
-        {showPointMarkers ? chartPoints.map((point) => {
-          const hasBoth = Boolean(point.success && point.failed && Math.abs(point.successY - point.failedY) < 14);
-          const failedLabelY = hasBoth && point.failedY + 16 < bottomY ? point.failedY + 16 : point.failedY - 8;
-          if (!point.success && !point.failed) return null;
-          return (
-            <g key={`${point.item.time}-${point.index}`}>
-              <title>{`${point.item.label || point.item.time}：成功 ${point.success}，失败 ${point.failed}`}</title>
-              {point.success ? (
-                <>
-                  <circle cx={point.x} cy={point.successY} r="4" fill="#10b981" stroke="#ffffff" strokeWidth="2" />
-                  {showValueLabels ? <text x={point.x} y={point.successY - 8} textAnchor="middle" className="fill-emerald-600 text-[10px] font-semibold">{point.success}</text> : null}
-                </>
-              ) : null}
-              {point.failed ? (
-                <>
-                  <circle cx={point.x} cy={point.failedY} r="4" fill="#f43f5e" stroke="#ffffff" strokeWidth="2" />
-                  {showValueLabels ? <text x={point.x} y={failedLabelY} textAnchor="middle" className="fill-rose-500 text-[10px] font-semibold">{point.failed}</text> : null}
-                </>
-              ) : null}
-            </g>
-          );
-        }) : null}
+        <path d={totalPath} fill="none" stroke="#3b82f6" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" filter="url(#runtime-line-soft-shadow)" />
+        <path d={successPath} fill="none" stroke="#22c55e" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
+        <path d={failedPath} fill="none" stroke="#f43f5e" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" strokeDasharray="6 5" />
+        {hoveredPoint ? (
+          <g pointerEvents="none">
+            <line x1={hoveredPoint.x} x2={hoveredPoint.x} y1={paddingTop} y2={bottomY} stroke="#94a3b8" strokeDasharray="3 5" />
+            <circle cx={hoveredPoint.x} cy={hoveredPoint.totalY} r="4" fill="#ffffff" stroke="#3b82f6" strokeWidth="2.5" />
+            <circle cx={hoveredPoint.x} cy={hoveredPoint.successY} r="4" fill="#ffffff" stroke="#22c55e" strokeWidth="2.5" />
+            <circle cx={hoveredPoint.x} cy={hoveredPoint.failedY} r="4" fill="#ffffff" stroke="#f43f5e" strokeWidth="2.5" />
+            <rect x={tooltipX} y={tooltipY} width={tooltipWidth} height={tooltipHeight} rx="6" fill="#ffffff" stroke="#cbd5e1" />
+            <text x={tooltipX + 10} y={tooltipY + 16} fill="#475569" fontSize="11" fontWeight="600">{hoveredPoint.item.label || "当前时段"}</text>
+            <text x={tooltipX + 10} y={tooltipY + 35} fill="#3b82f6" fontSize="11">调用量 {numberText(hoveredPoint.total)}</text>
+            <text x={tooltipX + 10} y={tooltipY + 53} fill="#22c55e" fontSize="11">成功 {numberText(hoveredPoint.success)}</text>
+            <text x={tooltipX + 88} y={tooltipY + 53} fill="#f43f5e" fontSize="11">失败 {numberText(hoveredPoint.failed)}</text>
+          </g>
+        ) : null}
         {labelIndexes.map((index) => (
           <text key={index} x={xFor(index)} y={height - 16} textAnchor={index === 0 ? "start" : index === points.length - 1 ? "end" : "middle"} className="fill-slate-400 text-[11px]">
             {points[index]?.label || ""}
@@ -360,278 +564,79 @@ function RuntimeTrendChart({ series, windowMinutes }: { series: RuntimeHealthDat
   );
 }
 
-function ServerLoadCard({ system }: { system: SystemLoad }) {
-  const cpuPercent = loadPercent(system.cpu.usage_percent);
-  const memoryPercent = loadPercent(system.memory.usage_percent);
-  const diskPercent = loadPercent(system.disk.usage_percent);
-
-  const sections = [
-    {
-      key: "cpu",
-      label: "CPU",
-      icon: Cpu,
-      iconClass: "bg-blue-50 text-blue-600",
-      value: `${rateText(cpuPercent)}%`,
-      detail: `${finiteNumber(system.cpu.cores)} 核 · Load 1m ${rateText(system.cpu.load_1)}`,
-      progress: cpuPercent,
-      progressColor: "#3b82f6",
-    },
-    {
-      key: "memory",
-      label: "内存",
-      icon: MemoryStick,
-      iconClass: "bg-emerald-50 text-emerald-600",
-      value: `${rateText(memoryPercent)}%`,
-      detail: `${formatBytes(system.memory.used_bytes)} / ${formatBytes(system.memory.total_bytes)}`,
-      progress: memoryPercent,
-      progressColor: "#10b981",
-    },
-    {
-      key: "network",
-      label: "网络",
-      icon: Network,
-      iconClass: "bg-cyan-50 text-cyan-600",
-      receiveRate: formatRate(system.network.receive_bytes_per_second),
-      sendRate: formatRate(system.network.send_bytes_per_second),
-      received: formatBytes(system.network.received_bytes),
-      sent: formatBytes(system.network.sent_bytes),
-    },
-    {
-      key: "disk",
-      label: "硬盘",
-      icon: HardDrive,
-      iconClass: "bg-amber-50 text-amber-600",
-      value: `${rateText(diskPercent)}%`,
-      detail: `${formatBytes(system.disk.used_bytes)} / ${formatBytes(system.disk.total_bytes)}`,
-      progress: diskPercent,
-      progressColor: "#f59e0b",
-    },
-  ] as const;
-
-  return (
-    <Card
-      title="服务器负载"
-      extra={<span className="font-mono text-xs text-slate-400">{formatShanghaiDateTime(system.sampled_at)}</span>}
-    >
-      <div className="grid min-w-0 grid-cols-1 gap-y-5 sm:grid-cols-2 xl:grid-cols-4 xl:gap-y-0">
-        {sections.map((section, index) => {
-          const Icon = section.icon;
-          const isNetwork = section.key === "network";
-          return (
-            <div
-              key={section.key}
-              className={cn(
-                "min-w-0 px-0 sm:px-5",
-                index % 2 === 1 && "sm:border-l sm:border-slate-100",
-                index === 0 && "sm:pl-0",
-                index === 2 && "sm:pl-0 xl:border-l xl:border-slate-100 xl:pl-5",
-                index === 3 && "xl:pr-0",
-              )}
-            >
-              <div className="flex min-w-0 items-center gap-3">
-                <span className={cn("flex size-9 shrink-0 items-center justify-center rounded-lg", section.iconClass)}>
-                  <Icon className="size-[18px]" />
-                </span>
-                <span className="truncate text-sm font-medium text-slate-500">{section.label}</span>
-              </div>
-
-              {isNetwork ? (
-                <div className="mt-4 min-w-0 space-y-2.5">
-                  <div className="flex min-w-0 items-baseline justify-between gap-3">
-                    <span className="shrink-0 text-xs text-slate-400">下载</span>
-                    <span className="min-w-0 truncate font-mono text-lg font-semibold text-slate-950 tabular-nums" title={section.receiveRate}>{section.receiveRate}</span>
-                  </div>
-                  <div className="flex min-w-0 items-baseline justify-between gap-3">
-                    <span className="shrink-0 text-xs text-slate-400">上传</span>
-                    <span className="min-w-0 truncate font-mono text-lg font-semibold text-slate-950 tabular-nums" title={section.sendRate}>{section.sendRate}</span>
-                  </div>
-                  <div className="truncate text-xs text-slate-400" title={`累计接收 ${section.received}，发送 ${section.sent}`}>
-                    累计 ↓ {section.received} · ↑ {section.sent}
-                  </div>
-                </div>
-              ) : (
-                <div className="mt-4 min-w-0">
-                  <div className="font-mono text-2xl font-semibold text-slate-950 tabular-nums">{section.value}</div>
-                  <div className="mt-2 truncate text-xs text-slate-400" title={section.detail}>{section.detail}</div>
-                  <Progress
-                    className="!mt-3 !mb-0"
-                    percent={section.progress}
-                    showInfo={false}
-                    strokeColor={section.progressColor}
-                    trailColor="#f1f5f9"
-                    size="small"
-                  />
-                </div>
-              )}
-            </div>
-          );
-        })}
-      </div>
-    </Card>
-  );
-}
-
-function ErrorRateDonut({ runtime }: { runtime: RuntimeHealthData }) {
-  const segments = (runtime.status_pie || []).filter((item) => Number(item.value || 0) > 0);
-  const total = segments.reduce((sum, item) => sum + Number(item.value || 0), 0);
-  const totalCalls = runtime.total || total;
-  const failedCount = Number(runtime.totals.failed || 0);
-  const successCount = Number(runtime.totals.success || 0);
-  const errorRateText = rateText(runtime.error_rate);
-  const successRateText = rateText(runtime.success_rate);
-  const radius = 54;
-  const circumference = 2 * Math.PI * radius;
-
-  if (total <= 0) {
-    return (
-      <div className="flex min-h-[290px] items-center justify-center rounded-xl bg-slate-50">
-        <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无错误率数据" />
-      </div>
-    );
-  }
-
-  return (
-    <div className="min-h-[290px] rounded-xl border border-slate-100 bg-gradient-to-b from-white to-slate-50/60 p-4">
-      <div className="grid gap-4 md:grid-cols-[170px_1fr] xl:grid-cols-1 2xl:grid-cols-[170px_1fr]">
-        <div className="relative mx-auto flex size-[170px] items-center justify-center rounded-full bg-white shadow-sm ring-1 ring-slate-100">
-          <svg viewBox="0 0 160 160" className="size-[158px] -rotate-90">
-            <circle cx="80" cy="80" r={radius} fill="none" stroke="#eef2f7" strokeWidth="16" />
-            {segments.map((segment, index) => {
-              const length = (Number(segment.value || 0) / total) * circumference;
-              const currentOffset = segments.slice(0, index).reduce(
-                (sum, item) => sum + (Number(item.value || 0) / total) * circumference,
-                0,
-              );
-              return (
-                <circle
-                  key={segment.status}
-                  cx="80"
-                  cy="80"
-                  r={radius}
-                  fill="none"
-                  stroke={runtimeStatusColor(segment.status)}
-                  strokeWidth="16"
-                  strokeLinecap="round"
-                  strokeDasharray={`${length} ${circumference - length}`}
-                  strokeDashoffset={-currentOffset}
-                />
-              );
-            })}
-          </svg>
-          <div className="absolute text-center">
-            <div className="font-mono text-[28px] font-bold leading-none tracking-tight text-slate-950 tabular-nums">
-              {errorRateText}<span className="ml-0.5 text-sm font-semibold text-slate-500">%</span>
-            </div>
-            <div className="mt-1 text-xs font-medium text-slate-400">错误率</div>
-          </div>
-        </div>
-
-        <div className="flex min-w-0 flex-col justify-center gap-3">
-          <div className="grid grid-cols-3 gap-2">
-            <div className="rounded-xl bg-emerald-50 px-3 py-2">
-              <div className="text-[11px] text-emerald-600">成功率</div>
-              <div className="mt-1 font-mono text-lg font-bold text-emerald-700 tabular-nums">{successRateText}%</div>
-            </div>
-            <div className="rounded-xl bg-rose-50 px-3 py-2">
-              <div className="text-[11px] text-rose-500">失败</div>
-              <div className="mt-1 font-mono text-lg font-bold text-rose-600 tabular-nums">{numberText(failedCount)}</div>
-            </div>
-            <div className="rounded-xl bg-slate-100 px-3 py-2">
-              <div className="text-[11px] text-slate-500">总调用</div>
-              <div className="mt-1 font-mono text-lg font-bold text-slate-700 tabular-nums">{numberText(totalCalls)}</div>
-            </div>
-          </div>
-
-          <div className="space-y-2">
-            {segments.map((segment) => {
-              const value = Number(segment.value || 0);
-              const ratio = total > 0 ? (value / total) * 100 : 0;
-              return (
-                <div key={segment.status} className="rounded-lg bg-white px-3 py-2 shadow-sm ring-1 ring-slate-100">
-                  <div className="mb-1 flex items-center justify-between gap-3 text-xs">
-                    <span className="inline-flex min-w-0 items-center gap-2 font-medium text-slate-600">
-                      <i className="size-2.5 shrink-0 rounded-full" style={{ backgroundColor: runtimeStatusColor(segment.status) }} />
-                      <span className="truncate">{segment.label}</span>
-                    </span>
-                    <span className="font-mono font-semibold text-slate-900 tabular-nums">{numberText(value)}</span>
-                  </div>
-                  <div className="h-1.5 overflow-hidden rounded-full bg-slate-100">
-                    <div className="h-full rounded-full" style={{ width: `${ratio}%`, backgroundColor: runtimeStatusColor(segment.status) }} />
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-
-          <div className="rounded-lg border border-dashed border-slate-200 bg-white/70 px-3 py-2 text-xs text-slate-500">
-            最近 {runtimeWindowText(runtime.window_minutes)}：成功 {numberText(successCount)} 次，失败 {numberText(failedCount)} 次
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 function RuntimeHealth({
   runtime,
-  selectedWindowMinutes,
+  selectedWindow,
   isUpdating,
   onWindowChange,
+  onCustomRangeChange,
 }: {
   runtime: RuntimeHealthData;
-  selectedWindowMinutes: number;
+  selectedWindow: number | "custom";
   isUpdating: boolean;
-  onWindowChange: (minutes: number) => void;
+  onWindowChange: (value: number | "custom") => void;
+  onCustomRangeChange: (range: RuntimeRange) => void;
 }) {
+  const [pendingCustomRange, setPendingCustomRange] = useState<RuntimeRange | null>(null);
+  const firstPointTime = runtime.series[0]?.time || runtime.start_time;
+  const lastPointTime = runtime.series[runtime.series.length - 1]?.time || runtime.end_time;
+
   return (
-    <section className="grid items-stretch gap-4 xl:grid-cols-[1.45fr_0.9fr]">
+    <section className="space-y-4">
       <Card
-        className="h-full"
+        className="h-full [&_.ant-card-head-wrapper]:gap-3 max-sm:[&_.ant-card-extra]:ml-0 max-sm:[&_.ant-card-extra]:w-full max-sm:[&_.ant-card-head-title]:w-full max-sm:[&_.ant-card-head-title]:flex-none max-sm:[&_.ant-card-head-title]:text-left max-sm:[&_.ant-card-head-wrapper]:flex-col max-sm:[&_.ant-card-head-wrapper]:items-stretch"
+        styles={{ header: { paddingTop: 12, paddingBottom: 12 }, body: { padding: 0 } }}
         title={
-          <div className="flex flex-wrap items-center gap-2">
-            <span>运行状况</span>
-            <Select
-              aria-label="运行状况统计窗口"
-              className="w-[132px]"
-              loading={isUpdating}
-              options={RUNTIME_WINDOW_OPTIONS}
-              popupMatchSelectWidth={false}
-              size="small"
-              value={selectedWindowMinutes}
-              onChange={(value) => onWindowChange(Number(value))}
-            />
-          </div>
-        }
-        extra={<span className="font-mono text-xs text-slate-400">{formatShanghaiDateTime(runtime.start_time)} → {formatShanghaiDateTime(runtime.end_time)}</span>}
-      >
-        <RuntimeTrendChart series={runtime.series} windowMinutes={runtime.window_minutes} />
-      </Card>
-      <Card
-        className="h-full"
-        title={
-          <div className="flex items-center gap-2">
-            <span>错误率</span>
-            <Tag color={runtime.error_rate > 0 ? "red" : "green"} className="m-0">{rateText(runtime.error_rate)}%</Tag>
-          </div>
-        }
-      >
-        <ErrorRateDonut runtime={runtime} />
-        {runtime.error_reasons.length ? (
-          <div className="mt-4 min-w-0 overflow-hidden border-t border-slate-100 pt-4">
-            <div className="mb-2 text-xs font-medium text-slate-400">主要错误原因</div>
-            <div className="max-h-32 space-y-2 overflow-y-auto pr-1">
-              {runtime.error_reasons.map((item) => (
-                <div key={item.code || item.label} className="flex items-center justify-between gap-3 text-sm">
-                  <div className="min-w-0">
-                    <div className="truncate text-slate-600" title={item.label}>{item.label}</div>
-                    {item.code ? <div className="truncate font-mono text-[11px] text-slate-400">{item.code}</div> : null}
-                  </div>
-                  <span className="font-mono font-semibold text-rose-600">{item.value}</span>
-                </div>
-              ))}
+          <div>
+            <div className="flex items-center gap-2">
+              <span className="flex size-8 items-center justify-center rounded-md bg-blue-50 text-blue-600"><Activity className="size-4" /></span>
+              <span>调用趋势</span>
+            </div>
+            <div className="mt-1 font-mono text-xs font-normal text-slate-400">
+              {formatShanghaiDateTime(firstPointTime).slice(0, 10)} 至 {formatShanghaiDateTime(lastPointTime).slice(0, 10)}
             </div>
           </div>
-        ) : null}
+        }
+        extra={
+          <div className="flex flex-wrap items-center justify-start gap-2 sm:justify-end">
+            <Segmented
+              aria-label="调用趋势统计范围"
+              disabled={isUpdating}
+              options={RUNTIME_WINDOW_OPTIONS}
+              size="small"
+              value={selectedWindow}
+              onChange={(value) => onWindowChange(value === "custom" ? "custom" : Number(value))}
+            />
+            {selectedWindow === "custom" ? (
+              <DatePicker.RangePicker
+                aria-label="自定义调用趋势日期"
+                allowClear={false}
+                className="w-full sm:w-auto"
+                disabled={isUpdating}
+                format="YYYY-MM-DD"
+                size="small"
+                onCalendarChange={(dates) => {
+                  if (!dates?.[0] || !dates[1]) return;
+                  setPendingCustomRange({ start: dates[0].startOf("day").toISOString(), end: dates[1].endOf("day").toISOString() });
+                }}
+                onChange={(dates) => {
+                  if (!dates?.[0] || !dates[1]) {
+                    setPendingCustomRange(null);
+                    return;
+                  }
+                  setPendingCustomRange({ start: dates[0].startOf("day").toISOString(), end: dates[1].endOf("day").toISOString() });
+                }}
+              />
+            ) : null}
+            {selectedWindow === "custom" ? (
+              <Button size="small" type="primary" disabled={!pendingCustomRange || isUpdating} onClick={() => pendingCustomRange && onCustomRangeChange(pendingCustomRange)}>
+                查询
+              </Button>
+            ) : null}
+          </div>
+        }
+      >
+        <RuntimeTrendChart runtime={runtime} />
       </Card>
     </section>
   );
@@ -701,18 +706,20 @@ function RecentFailures({ items }: { items: DashboardSummary["calls"]["recent_fa
 function DashboardContent() {
   const [data, setData] = useState<DashboardSummary | null>(null);
   const [systemLoad, setSystemLoad] = useState<SystemLoad | null>(null);
+	const [scheduler, setScheduler] = useState<SchedulerDiagnostics | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
-  const [runtimeWindowMinutes, setRuntimeWindowMinutes] = useState(60);
+  const [runtimeWindow, setRuntimeWindow] = useState<number | "custom">(7 * 24 * 60);
+  const [customRuntimeRange, setCustomRuntimeRange] = useState<RuntimeRange | null>(null);
 
-  const loadDashboard = async (silent = false, windowMinutes = runtimeWindowMinutes) => {
+  const loadDashboard = async (silent = false, window = runtimeWindow, range = customRuntimeRange) => {
     if (silent) {
       setIsRefreshing(true);
     } else {
       setIsLoading(true);
     }
     try {
-      const dashboard = await fetchDashboard(windowMinutes);
+      const dashboard = await fetchDashboard(typeof window === "number" ? window : 7 * 24 * 60, window === "custom" ? range : null);
       setData(dashboard);
       if (dashboard.system) {
         setSystemLoad((current) => newerSystemLoad(current, dashboard.system));
@@ -727,6 +734,7 @@ function DashboardContent() {
 
   useEffect(() => {
     void loadDashboard();
+		void fetchSchedulerDiagnostics().then(setScheduler).catch(() => undefined);
   }, []);
 
   useEffect(() => {
@@ -742,9 +750,13 @@ function DashboardContent() {
       }
       inFlight = true;
       try {
-        const latest = await fetchSystemLoad();
+				const [latest, latestScheduler] = await Promise.all([
+					fetchSystemLoad(),
+					fetchSchedulerDiagnostics().catch(() => null),
+				]);
         if (active) {
           setSystemLoad((current) => newerSystemLoad(current, latest));
+					if (latestScheduler) setScheduler(latestScheduler);
         }
       } catch {
         // Keep the last successful sample when the lightweight poll fails.
@@ -760,9 +772,18 @@ function DashboardContent() {
     };
   }, [data]);
 
-  const handleRuntimeWindowChange = (windowMinutes: number) => {
-    setRuntimeWindowMinutes(windowMinutes);
-    void loadDashboard(true, windowMinutes);
+  const handleRuntimeWindowChange = (value: number | "custom") => {
+    setRuntimeWindow(value);
+    if (value === "custom") {
+      return;
+    }
+    setCustomRuntimeRange(null);
+    void loadDashboard(true, value, null);
+  };
+
+  const handleCustomRuntimeRangeChange = (range: RuntimeRange) => {
+    setCustomRuntimeRange(range);
+    void loadDashboard(true, "custom", range);
   };
 
   if (isLoading && !data) {
@@ -788,7 +809,6 @@ function DashboardContent() {
   const failedCalls = todayTotals?.failed ?? todayCalls?.by_status.failed ?? 0;
   const successCalls = todayTotals?.success ?? Math.max(0, totalCalls - failedCalls);
   const availabilityCalls = todayCalls?.availability_total ?? successCalls + failedCalls;
-  const runningTasks = (data.tasks.by_status.running || 0) + (data.tasks.by_status.queued || 0);
   const storageHealthy = data.storage.health.status === "healthy";
   const callSuccessPercent = availabilityCalls > 0 ? percent(successCalls, availabilityCalls) : 100;
   const todayEndpointEntries = todayCalls?.by_endpoint ?? {};
@@ -826,21 +846,34 @@ function DashboardContent() {
         />
       ) : null}
 
-      <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-        <MetricCard title="可用账号" value={`${numberText(data.accounts.active)}/${numberText(totalAccounts)}`} helper={`限流 ${data.accounts.limited}，异常 ${data.accounts.abnormal}`} icon={UsersRound} tone="green" />
-        <MetricCard title="剩余额度" value={data.accounts.unlimited_quota_count > 0 ? "不限" : numberText(data.accounts.total_quota)} helper={`调度冷却 ${data.accounts.cooling} 个账号`} icon={Gauge} tone="blue" />
-        <MetricCard title="今日调用" value={numberText(totalCalls)} helper={`失败 ${failedCalls}，成功率 ${callSuccessPercent}%`} icon={Activity} tone={failedCalls ? "amber" : "green"} />
-        <MetricCard title="队列任务" value={numberText(runningTasks)} helper={`历史任务 ${data.tasks.total} 条`} icon={TimerReset} tone={runningTasks ? "amber" : "slate"} />
-      </section>
-
-      {systemLoad ? <ServerLoadCard system={systemLoad} /> : null}
+      {scheduler && systemLoad ? (
+        <OperationsOverview
+          scheduler={scheduler}
+          system={systemLoad}
+          summary={{
+            accounts: {
+              active: data.accounts.active,
+              total: totalAccounts,
+              quota: data.accounts.unlimited_quota_count > 0 ? "不限" : numberText(data.accounts.total_quota),
+              limited: data.accounts.limited,
+            },
+            calls: {
+              total: totalCalls,
+              failed: failedCalls,
+              successPercent: callSuccessPercent,
+            },
+            taskHistory: data.tasks.total,
+          }}
+        />
+      ) : null}
 
       {data.calls.runtime ? (
         <RuntimeHealth
           runtime={data.calls.runtime}
-          selectedWindowMinutes={runtimeWindowMinutes}
+          selectedWindow={runtimeWindow}
           isUpdating={isRefreshing}
           onWindowChange={handleRuntimeWindowChange}
+          onCustomRangeChange={handleCustomRuntimeRangeChange}
         />
       ) : null}
 
@@ -851,7 +884,7 @@ function DashboardContent() {
         <Card title="今日模型使用">
           <EntryBars items={sortedEntries(todayModelEntries)} />
         </Card>
-        <Card title="账号类型">
+        <Card title="GPT账号类型">
           <EntryBars items={sortedEntries(data.accounts.by_type)} />
         </Card>
       </section>

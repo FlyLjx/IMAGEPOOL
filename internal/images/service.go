@@ -25,6 +25,7 @@ import (
 	"imagepool/internal/accounts"
 	"imagepool/internal/config"
 	"imagepool/internal/openaiweb"
+	"imagepool/internal/postprocess"
 	"imagepool/internal/storage"
 )
 
@@ -40,6 +41,7 @@ type Service struct {
 	store   *accounts.Store
 	backend openaiweb.Backend
 	storage *storage.Service
+	post    *postprocess.Service
 }
 
 type accountInfoBackend interface {
@@ -101,6 +103,13 @@ func (s *Service) UpdateConfig(cfg config.Config) {
 	s.cfgMu.Unlock()
 }
 
+func (s *Service) SetPostprocessor(service *postprocess.Service) {
+	if s == nil {
+		return
+	}
+	s.post = service
+}
+
 func (s *Service) currentConfig() config.Config {
 	s.cfgMu.RLock()
 	defer s.cfgMu.RUnlock()
@@ -111,6 +120,7 @@ func (s *Service) Generate(ctx context.Context, req Request) (Response, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	req, publicModel := PrepareModelRequest(req)
 	if req.N <= 0 {
 		req.N = 1
 	}
@@ -134,10 +144,11 @@ func (s *Service) Generate(ctx context.Context, req Request) (Response, error) {
 	req.OutputFormat, _ = normalizeOutputFormat(req.OutputFormat)
 	if req.N == 1 {
 		result, err := s.generateOne(ctx, req)
+		response := responseWithModel(responseFromResult(result), publicModel)
 		if err != nil {
-			return responseFromResult(result), err
+			return response, err
 		}
-		return withEstimatedUsage(responseFromResult(result), req), nil
+		return withEstimatedUsage(response, req), nil
 	}
 	var wg sync.WaitGroup
 	results := make([]openaiweb.ImageResult, req.N)
@@ -170,7 +181,7 @@ func (s *Service) Generate(ctx context.Context, req Request) (Response, error) {
 			combined.BackendModel = part.BackendModel
 		}
 	}
-	return withEstimatedUsage(combined, req), nil
+	return withEstimatedUsage(responseWithModel(combined, publicModel), req), nil
 }
 
 func (s *Service) CheckAccount(ctx context.Context, token string) (accounts.AccountCheckResult, error) {
@@ -274,6 +285,7 @@ func (s *Service) GenerateWithAccount(ctx context.Context, token string, req Req
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	req, publicModel := PrepareModelRequest(req)
 	account, ok := s.store.Get(token)
 	if !ok {
 		return Response{}, fmt.Errorf("account not found")
@@ -284,7 +296,7 @@ func (s *Service) GenerateWithAccount(ctx context.Context, token string, req Req
 	if err != nil {
 		return Response{}, err
 	}
-	taskCtx, cancel := s.taskContext(ctx)
+	taskCtx, cancel := s.taskContext(ctx, req)
 	defer cancel()
 	released := false
 	release := func() {
@@ -333,17 +345,22 @@ func (s *Service) GenerateWithAccount(ctx context.Context, token string, req Req
 	// populated.
 	release()
 	result, err = s.finalizeResult(taskCtx, account, result, req)
+	response := responseWithModel(responseFromResult(result), publicModel)
 	if err != nil {
-		return responseFromResult(result), err
+		return response, err
 	}
-	return withEstimatedUsage(responseFromResult(result), req), nil
+	return withEstimatedUsage(response, req), nil
 }
 
-func (s *Service) taskContext(parent context.Context) (context.Context, context.CancelFunc) {
+func (s *Service) taskContext(parent context.Context, req Request) (context.Context, context.CancelFunc) {
 	if parent == nil {
 		parent = context.Background()
 	}
-	timeout := time.Duration(s.currentConfig().ImageTaskTimeoutSecs * float64(time.Second))
+	cfg := s.currentConfig()
+	timeout := time.Duration(cfg.ImageTaskTimeoutSecs * float64(time.Second))
+	if cfg.ImageSuperResolutionEnabled || req.SuperResolution || (cfg.ImageRestorationEnabled && req.HDRepair) {
+		timeout += time.Duration(cfg.ImagePostprocessTimeoutSecs * float64(time.Second))
+	}
 	if timeout <= 0 {
 		return context.WithCancel(parent)
 	}
@@ -386,7 +403,7 @@ func (s *Service) generateOne(ctx context.Context, req Request) (openaiweb.Image
 		}
 		exclude[account.AccessToken] = true
 		if taskCtx == nil {
-			taskCtx, cancelTask = s.taskContext(ctx)
+			taskCtx, cancelTask = s.taskContext(ctx, req)
 		}
 		log := openaiweb.AttemptLog{Attempt: len(attempts) + 1, AccountEmail: account.Email, Status: "running"}
 		account, err = s.prepareAccountForDispatch(account, req)
@@ -545,7 +562,9 @@ type imageDownloader interface {
 func normalizeResponseFormat(value string) (string, error) {
 	format := strings.ToLower(strings.TrimSpace(value))
 	switch format {
-	case "", "url":
+	case "":
+		return "b64_json", nil
+	case "url":
 		return "url", nil
 	case "b64_json":
 		return "b64_json", nil
@@ -579,12 +598,12 @@ func (s *Service) finalizeResult(ctx context.Context, account accounts.Account, 
 		return result, err
 	}
 	if responseFormat == "b64_json" {
-		return s.resultAsBase64(ctx, account, result, outputFormat)
+		return s.resultAsBase64(ctx, account, result, req, outputFormat)
 	}
-	return s.cacheResult(ctx, account, result, req.OutputBaseURL, outputFormat)
+	return s.cacheResult(ctx, account, result, req, outputFormat)
 }
 
-func (s *Service) resultAsBase64(ctx context.Context, account accounts.Account, result openaiweb.ImageResult, outputFormat string) (openaiweb.ImageResult, error) {
+func (s *Service) resultAsBase64(ctx context.Context, account accounts.Account, result openaiweb.ImageResult, req Request, outputFormat string) (openaiweb.ImageResult, error) {
 	dataItems, err := s.resultImageBytes(ctx, account, result)
 	if err != nil {
 		return result, err
@@ -593,6 +612,7 @@ func (s *Service) resultAsBase64(ctx context.Context, account accounts.Account, 
 	out.URLs = nil
 	out.B64JSON = make([]string, 0, len(dataItems))
 	for _, data := range dataItems {
+		data = s.postprocessImage(ctx, data, req)
 		if outputFormat != "" {
 			var err error
 			data, err = convertImageDataFormat(data, outputFormat)
@@ -634,14 +654,14 @@ func (s *Service) resultImageBytes(ctx context.Context, account accounts.Account
 	return items, nil
 }
 
-func (s *Service) cacheResult(ctx context.Context, account accounts.Account, result openaiweb.ImageResult, baseURL string, outputFormat string) (openaiweb.ImageResult, error) {
+func (s *Service) cacheResult(ctx context.Context, account accounts.Account, result openaiweb.ImageResult, req Request, outputFormat string) (openaiweb.ImageResult, error) {
 	if s.storage == nil {
 		return result, nil
 	}
 	if len(result.URLs) == 0 && len(result.B64JSON) == 0 {
 		return result, nil
 	}
-	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	baseURL := strings.TrimRight(strings.TrimSpace(req.OutputBaseURL), "/")
 	urls := make([]string, 0, len(result.URLs)+len(result.B64JSON))
 	credentialInvalid := false
 	for _, encoded := range result.B64JSON {
@@ -650,6 +670,7 @@ func (s *Service) cacheResult(ctx context.Context, account accounts.Account, res
 			log.Printf("image cache decode b64_json failed: %v", err)
 			continue
 		}
+		data = s.postprocessImage(ctx, data, req)
 		if outputFormat != "" {
 			data, err = convertImageDataFormat(data, outputFormat)
 			if err != nil {
@@ -693,6 +714,7 @@ func (s *Service) cacheResult(ctx context.Context, account accounts.Account, res
 			urls = append(urls, remoteURL)
 			continue
 		}
+		data = s.postprocessImage(ctx, data, req)
 		if outputFormat != "" {
 			data, err = convertImageDataFormat(data, outputFormat)
 			if err != nil {
@@ -712,6 +734,29 @@ func (s *Service) cacheResult(ctx context.Context, account accounts.Account, res
 	result.URLs = urls
 	result.B64JSON = nil
 	return result, nil
+}
+
+func (s *Service) postprocessImage(ctx context.Context, data []byte, req Request) []byte {
+	if s == nil || s.post == nil || len(data) == 0 {
+		return data
+	}
+	result := s.post.Process(ctx, data, postprocess.Options{
+		ParentTaskID:    req.TaskID,
+		OwnerID:         req.OwnerID,
+		Model:           req.PublicModel,
+		RequestedSize:   req.Size,
+		HDRepair:        req.HDRepair,
+		SuperResolution: req.SuperResolution,
+		Progress: func(stage, message string, details map[string]any) {
+			if req.Progress != nil {
+				req.Progress(openaiweb.ProgressEvent{Progress: stage, Message: message, Details: details})
+			}
+		},
+	})
+	if result.Error != "" {
+		log.Printf("image postprocess fallback: %s", result.Error)
+	}
+	return result.Data
 }
 
 func imageURL(baseURL, rel string) string {
@@ -783,14 +828,14 @@ func isCacheDownloadAuthenticationFailure(err error) bool {
 }
 
 func (s *Service) ListModels(ctx context.Context) ([]string, error) {
-	base := append([]string(nil), s.currentConfig().Models...)
+	base := []string{PublicImageModel}
 	account, err := s.store.SelectForImage(nil)
 	if err != nil {
-		return base, nil
+		return ExpandSuperResolutionModels(base), nil
 	}
 	account, err = s.ensureBrowserIdentity(account)
 	if err != nil {
-		return base, nil
+		return ExpandSuperResolutionModels(base), nil
 	}
 	var upstream []string
 	if backend, ok := s.backend.(accountModelsForBackend); ok {
@@ -799,19 +844,33 @@ func (s *Service) ListModels(ctx context.Context) ([]string, error) {
 		upstream, err = s.backend.ListModels(ctx, account.AccessToken)
 	}
 	if err != nil {
-		return base, nil
+		return ExpandSuperResolutionModels(base), nil
 	}
 	seen := map[string]bool{}
 	out := []string{}
 	for _, list := range [][]string{upstream, base} {
 		for _, model := range list {
-			if model != "" && !seen[model] {
+			if model == PublicImageModel && !seen[model] {
 				seen[model] = true
 				out = append(out, model)
 			}
 		}
 	}
-	return out, nil
+	return ExpandSuperResolutionModels(out), nil
+}
+
+func responseWithModel(response Response, model string) Response {
+	model = PublicModelName(model)
+	response.BackendModel = model
+	if response.ImageRoute != nil {
+		route := make(map[string]any, len(response.ImageRoute))
+		for key, value := range response.ImageRoute {
+			route[key] = value
+		}
+		route["backend_model"] = model
+		response.ImageRoute = route
+	}
+	return response
 }
 
 func responseFromResult(result openaiweb.ImageResult) Response {
@@ -831,15 +890,16 @@ func responseFromResult(result openaiweb.ImageResult) Response {
 // Public removes account-specific upstream model slugs from an image response.
 // It also normalizes persisted legacy responses when they are read back.
 func (r Response) Public() Response {
+	publicModel := PublicModelName(r.BackendModel)
 	r.AccountEmail = ""
-	r.BackendModel = PublicImageModel
+	r.BackendModel = publicModel
 	r.Attempts = nil
 	if r.ImageRoute != nil {
 		route := make(map[string]any, len(r.ImageRoute))
 		for key, value := range r.ImageRoute {
 			route[key] = value
 		}
-		route["backend_model"] = PublicImageModel
+		route["backend_model"] = publicModel
 		r.ImageRoute = route
 	}
 	return r

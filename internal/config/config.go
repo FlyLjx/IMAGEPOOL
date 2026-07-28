@@ -10,65 +10,51 @@ import (
 )
 
 type Config struct {
-	AppName                             string        `json:"app_name"`
-	ListenAddr                          string        `json:"listen_addr"`
-	Timezone                            string        `json:"timezone"`
-	StorageBackend                      string        `json:"storage_backend"`
-	DatabaseURL                         string        `json:"database_url"`
-	APIKeys                             []string      `json:"api_keys"`
-	AuthKeyFile                         string        `json:"auth_key_file"`
-	AccountFile                         string        `json:"account_file"`
-	CallLogFile                         string        `json:"call_log_file"`
-	ImageTagsFile                       string        `json:"image_tags_file"`
-	RegisterFile                        string        `json:"register_file"`
-	WebDistDir                          string        `json:"web_dist_dir"`
-	ImageOutputDir                      string        `json:"image_output_dir"`
-	ImageRetentionDays                  int           `json:"image_retention_days"`
-	ChatGPTBaseURL                      string        `json:"chatgpt_base_url"`
-	UpstreamTransport                   string        `json:"upstream_transport"`
-	ImageWebModelSlug                   string        `json:"image_web_model_slug"`
-	ImagePollTimeoutSecs                float64       `json:"image_poll_timeout_secs"`
-	ImagePollIntervalSecs               float64       `json:"image_poll_interval_secs"`
-	ImagePollInitialWaitSecs            float64       `json:"image_poll_initial_wait_secs"`
-	ImageTaskTimeoutSecs                float64       `json:"image_task_timeout_secs"`
-	ImageSettleSecs                     float64       `json:"image_settle_secs"`
-	ImageCapacityBurstParallel          int           `json:"image_capacity_burst_parallel"`
-	ImageAccountPrecheckIntervalMinutes int           `json:"image_account_precheck_interval_minutes"`
-	ImageAccountPrecheckConcurrency     int           `json:"image_account_precheck_concurrency"`
-	ImageAccountPrecheckTimeoutSecs     float64       `json:"image_account_precheck_timeout_secs"`
-	ImageCheckBeforeHitEnabled          bool          `json:"image_check_before_hit_enabled"`
-	ImageSettleEnabled                  bool          `json:"image_settle_enabled"`
-	MaxImageAttempts                    int           `json:"max_image_attempts"`
-	RequestTimeoutSecs                  float64       `json:"request_timeout_secs"`
-	SearchModel                         string        `json:"search_model"`
-	SearchTimeoutSecs                   float64       `json:"search_timeout_secs"`
-	SearchPollIntervalSecs              float64       `json:"search_poll_interval_secs"`
-	RefreshAccountIntervalMinutes       int           `json:"refresh_account_interval_minute"`
-	RefreshAccountConcurrency           int           `json:"refresh_account_concurrency"`
-	Proxy                               string        `json:"proxy"`
-	ProxyRuntime                        ProxyRuntime  `json:"proxy_runtime"`
-	Notifications                       Notifications `json:"notifications"`
-	Models                              []string      `json:"models"`
+	AppName                             string       `json:"app_name"`
+	ListenAddr                          string       `json:"listen_addr"`
+	Timezone                            string       `json:"timezone"`
+	StorageBackend                      string       `json:"storage_backend"`
+	DatabaseURL                         string       `json:"database_url"`
+	APIKeys                             []string     `json:"api_keys"`
+	AuthKeyFile                         string       `json:"auth_key_file"`
+	AccountFile                         string       `json:"account_file"`
+	CallLogFile                         string       `json:"call_log_file"`
+	ImageTagsFile                       string       `json:"image_tags_file"`
+	RegisterFile                        string       `json:"register_file"`
+	WebDistDir                          string       `json:"web_dist_dir"`
+	ImageOutputDir                      string       `json:"image_output_dir"`
+	ImageRetentionDays                  int          `json:"image_retention_days"`
+	ChatGPTBaseURL                      string       `json:"chatgpt_base_url"`
+	UpstreamTransport                   string       `json:"upstream_transport"`
+	ImageWebModelSlug                   string       `json:"image_web_model_slug"`
+	ImagePollTimeoutSecs                float64      `json:"image_poll_timeout_secs"`
+	ImagePollIntervalSecs               float64      `json:"image_poll_interval_secs"`
+	ImagePollInitialWaitSecs            float64      `json:"image_poll_initial_wait_secs"`
+	ImageTaskTimeoutSecs                float64      `json:"image_task_timeout_secs"`
+	ImageSettleSecs                     float64      `json:"image_settle_secs"`
+	ImageCapacityBurstParallel          int          `json:"image_capacity_burst_parallel"`
+	ImageAccountPrecheckIntervalMinutes int          `json:"image_account_precheck_interval_minutes"`
+	ImageAccountPrecheckConcurrency     int          `json:"image_account_precheck_concurrency"`
+	ImageAccountPrecheckTimeoutSecs     float64      `json:"image_account_precheck_timeout_secs"`
+	ImageCheckBeforeHitEnabled          bool         `json:"image_check_before_hit_enabled"`
+	ImageSettleEnabled                  bool         `json:"image_settle_enabled"`
+	ImageSuperResolutionEnabled         bool         `json:"image_super_resolution_enabled"`
+	ImageRestorationEnabled             bool         `json:"image_restoration_enabled"`
+	ImagePostprocessWorker              string       `json:"image_postprocess_worker"`
+	ImageSuperResolutionModel           string       `json:"image_super_resolution_model"`
+	ImageRestorationModel               string       `json:"image_restoration_model"`
+	ImagePostprocessTimeoutSecs         float64      `json:"image_postprocess_timeout_secs"`
+	MaxImageAttempts                    int          `json:"max_image_attempts"`
+	RequestTimeoutSecs                  float64      `json:"request_timeout_secs"`
+	SearchModel                         string       `json:"search_model"`
+	SearchTimeoutSecs                   float64      `json:"search_timeout_secs"`
+	SearchPollIntervalSecs              float64      `json:"search_poll_interval_secs"`
+	RefreshAccountIntervalMinutes       int          `json:"refresh_account_interval_minute"`
+	RefreshAccountConcurrency           int          `json:"refresh_account_concurrency"`
+	Proxy                               string       `json:"proxy"`
+	ProxyRuntime                        ProxyRuntime `json:"proxy_runtime"`
+	Models                              []string     `json:"models"`
 	sourcePath                          string
-}
-
-type Notifications struct {
-	Bark BarkNotification `json:"bark"`
-}
-
-type BarkNotification struct {
-	Enabled                  bool   `json:"enabled"`
-	ServerURL                string `json:"server_url"`
-	DeviceKey                string `json:"device_key"`
-	TitlePrefix              string `json:"title_prefix"`
-	Group                    string `json:"group"`
-	Level                    string `json:"level"`
-	TimeoutSecs              int    `json:"timeout_secs"`
-	MinIntervalSeconds       int    `json:"min_interval_seconds"`
-	NotifyFailedCalls        bool   `json:"notify_failed_calls"`
-	NotifyRegister           bool   `json:"notify_register"`
-	NotifyRegisterErrorsOnly bool   `json:"notify_register_errors_only"`
-	NotifyAutoRefill         bool   `json:"notify_auto_refill"`
 }
 
 type ProxyRuntime struct {
@@ -124,6 +110,12 @@ func Default() Config {
 		ImageAccountPrecheckTimeoutSecs:     75,
 		ImageCheckBeforeHitEnabled:          true,
 		ImageSettleEnabled:                  true,
+		ImageSuperResolutionEnabled:         false,
+		ImageRestorationEnabled:             false,
+		ImagePostprocessWorker:              "../postprocess/worker.mjs",
+		ImageSuperResolutionModel:           "../postprocess/models/realesr-general-x4v3.onnx",
+		ImageRestorationModel:               "../postprocess/models/scunet-color-real-gan.onnx",
+		ImagePostprocessTimeoutSecs:         180,
 		MaxImageAttempts:                    3,
 		RequestTimeoutSecs:                  120,
 		SearchModel:                         "gpt-5-5",
@@ -131,9 +123,8 @@ func Default() Config {
 		SearchPollIntervalSecs:              3,
 		RefreshAccountIntervalMinutes:       60,
 		RefreshAccountConcurrency:           8,
-		Notifications:                       Notifications{Bark: BarkNotification{ServerURL: "https://api.day.app", TitlePrefix: "IMAGE POOL", Group: "image-pool", Level: "active", TimeoutSecs: 10, MinIntervalSeconds: 60, NotifyFailedCalls: true, NotifyRegister: true, NotifyAutoRefill: true}},
 		ProxyRuntime:                        ProxyRuntime{Enabled: true, EgressMode: "direct", ResetSessionStatusCodes: []int{403}, Clearance: ClearanceRuntime{Enabled: false, Mode: "none", Browser: "chrome", TimeoutSec: 60, RefreshInterval: 3600}},
-		Models:                              []string{"gpt-image-2", "codex-gpt-image-2", "plus-codex-gpt-image-2", "team-codex-gpt-image-2", "pro-codex-gpt-image-2"},
+		Models:                              []string{"gpt-image-2"},
 	}
 }
 
@@ -149,7 +140,10 @@ func Load(path string) (Config, error) {
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return cfg, fmt.Errorf("parse %s: %w", path, err)
 	}
-	base := filepath.Dir(path)
+	base, err := filepath.Abs(filepath.Dir(path))
+	if err != nil {
+		return cfg, fmt.Errorf("resolve config directory: %w", err)
+	}
 	if !filepath.IsAbs(cfg.AccountFile) {
 		cfg.AccountFile = filepath.Clean(filepath.Join(base, cfg.AccountFile))
 	}
@@ -171,9 +165,32 @@ func Load(path string) (Config, error) {
 	if !filepath.IsAbs(cfg.WebDistDir) {
 		cfg.WebDistDir = filepath.Clean(filepath.Join(base, cfg.WebDistDir))
 	}
+	if !filepath.IsAbs(cfg.ImagePostprocessWorker) {
+		cfg.ImagePostprocessWorker = resolveBundledPath(base, cfg.ImagePostprocessWorker)
+	}
+	if !filepath.IsAbs(cfg.ImageSuperResolutionModel) {
+		cfg.ImageSuperResolutionModel = resolveBundledPath(base, cfg.ImageSuperResolutionModel)
+	}
+	if !filepath.IsAbs(cfg.ImageRestorationModel) {
+		cfg.ImageRestorationModel = resolveBundledPath(base, cfg.ImageRestorationModel)
+	}
 	cfg = cfg.Normalize()
 	cfg.sourcePath = filepath.Clean(path)
 	return cfg, nil
+}
+
+func resolveBundledPath(configDir, value string) string {
+	configured := filepath.Clean(filepath.Join(configDir, value))
+	if _, err := os.Stat(configured); err == nil {
+		return configured
+	}
+	// Older settings saves persisted paths relative to the application root
+	// after they had already been resolved from the configs directory.
+	applicationRelative := filepath.Clean(filepath.Join(filepath.Dir(configDir), value))
+	if _, err := os.Stat(applicationRelative); err == nil {
+		return applicationRelative
+	}
+	return configured
 }
 
 func LoadIfExists(path string) (Config, error) {
@@ -324,6 +341,21 @@ func (c Config) Normalize() Config {
 	if c.ImageAccountPrecheckTimeoutSecs > 180 {
 		c.ImageAccountPrecheckTimeoutSecs = 180
 	}
+	if strings.TrimSpace(c.ImagePostprocessWorker) == "" {
+		c.ImagePostprocessWorker = d.ImagePostprocessWorker
+	}
+	if strings.TrimSpace(c.ImageSuperResolutionModel) == "" {
+		c.ImageSuperResolutionModel = d.ImageSuperResolutionModel
+	}
+	if strings.TrimSpace(c.ImageRestorationModel) == "" {
+		c.ImageRestorationModel = d.ImageRestorationModel
+	}
+	if c.ImagePostprocessTimeoutSecs <= 0 {
+		c.ImagePostprocessTimeoutSecs = d.ImagePostprocessTimeoutSecs
+	}
+	if c.ImagePostprocessTimeoutSecs > 1800 {
+		c.ImagePostprocessTimeoutSecs = 1800
+	}
 	if c.MaxImageAttempts <= 0 {
 		c.MaxImageAttempts = d.MaxImageAttempts
 	}
@@ -353,7 +385,6 @@ func (c Config) Normalize() Config {
 		c.ProxyRuntime = d.ProxyRuntime
 	}
 	c.ProxyRuntime = normalizeProxyRuntime(c.ProxyRuntime, c.Proxy)
-	c.Notifications = normalizeNotifications(c.Notifications)
 	if len(c.Models) == 0 {
 		c.Models = append([]string(nil), d.Models...)
 	}
@@ -372,43 +403,6 @@ func (c Config) Normalize() Config {
 	}
 	c.APIKeys = keys
 	return c
-}
-
-func normalizeNotifications(value Notifications) Notifications {
-	defaults := Default().Notifications.Bark
-	bark := value.Bark
-	bark.ServerURL = strings.TrimRight(strings.TrimSpace(bark.ServerURL), "/")
-	if bark.ServerURL == "" {
-		bark.ServerURL = defaults.ServerURL
-	}
-	bark.DeviceKey = strings.TrimSpace(bark.DeviceKey)
-	bark.TitlePrefix = strings.TrimSpace(bark.TitlePrefix)
-	if bark.TitlePrefix == "" {
-		bark.TitlePrefix = defaults.TitlePrefix
-	}
-	bark.Group = strings.TrimSpace(bark.Group)
-	if bark.Group == "" {
-		bark.Group = defaults.Group
-	}
-	bark.Level = strings.TrimSpace(bark.Level)
-	switch bark.Level {
-	case "active", "timeSensitive", "passive", "critical":
-	default:
-		bark.Level = defaults.Level
-	}
-	if bark.TimeoutSecs <= 0 {
-		bark.TimeoutSecs = defaults.TimeoutSecs
-	}
-	if bark.TimeoutSecs > 60 {
-		bark.TimeoutSecs = 60
-	}
-	if bark.MinIntervalSeconds < 0 {
-		bark.MinIntervalSeconds = defaults.MinIntervalSeconds
-	}
-	if bark.MinIntervalSeconds > 3600 {
-		bark.MinIntervalSeconds = 3600
-	}
-	return Notifications{Bark: bark}
 }
 
 func proxyRuntimeEmpty(value ProxyRuntime) bool {

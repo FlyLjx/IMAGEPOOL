@@ -344,6 +344,26 @@ func TestTaskLifecycle(t *testing.T) {
 	t.Fatalf("not succeeded: %#v", got)
 }
 
+func TestManagerStatsAndCompletionHook(t *testing.T) {
+	m := NewManager(taskSvc{})
+	defer m.Close()
+	completed := make(chan Task, 1)
+	m.SetCompletionHook(func(task Task) { completed <- task })
+	task := m.SubmitGeneration("hook", images.Request{Prompt: "draw"})
+	select {
+	case result := <-completed:
+		if result.ID != task.ID || result.Status != StatusSucceeded {
+			t.Fatalf("completed=%#v", result)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("completion hook was not invoked")
+	}
+	stats := m.Stats()
+	if stats.QueueCapacity != asyncTaskQueueLimit || stats.WorkerLimit != asyncTaskWorkerLimit || stats.ByStatus[StatusSucceeded] != 1 || !stats.Accepting {
+		t.Fatalf("stats=%#v", stats)
+	}
+}
+
 func TestTaskRemainsQueuedWhileWaitingForAnAccount(t *testing.T) {
 	svc := queuedTaskSvc{waiting: make(chan struct{}), release: make(chan struct{})}
 	m := NewManager(svc)
@@ -389,6 +409,24 @@ func TestRunGenerationCreatesTrackedTask(t *testing.T) {
 	stored, ok := m.StatusForOwner(task.ID, "user-a", false)
 	if !ok || stored.Status != StatusSucceeded || stored.StatusLogCount == 0 {
 		t.Fatalf("stored=%#v ok=%v", stored, ok)
+	}
+}
+
+func TestRunGenerationPreservesSuperResolutionModelVariant(t *testing.T) {
+	m := NewManager(taskSvc{})
+	task, result, err := m.RunGenerationForOwner(context.Background(), "user-a", images.Request{
+		Prompt: "a",
+		Model:  "gpt-image-2-2k",
+		Size:   "1024x1536",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task.Model != "gpt-image-2-2k" || result.BackendModel != "gpt-image-2-2k" {
+		t.Fatalf("2K model variant was not preserved: task=%q backend=%q", task.Model, result.BackendModel)
+	}
+	if task.Size != "1368x2048" || !task.SuperResolution {
+		t.Fatalf("task size=%q super_resolution=%t", task.Size, task.SuperResolution)
 	}
 }
 

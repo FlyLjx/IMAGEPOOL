@@ -26,10 +26,10 @@ import (
 	"imagepool/internal/images"
 	"imagepool/internal/imagetags"
 	"imagepool/internal/metrics"
-	"imagepool/internal/notifications"
 	"imagepool/internal/oauthlogin"
 	"imagepool/internal/openaiweb"
 	"imagepool/internal/persistence"
+	"imagepool/internal/postprocess"
 	proxyservice "imagepool/internal/proxy"
 	"imagepool/internal/registration"
 	"imagepool/internal/searches"
@@ -43,6 +43,8 @@ import (
 type Server struct {
 	cfgMu           sync.RWMutex
 	cfg             config.Config
+	retentionOnce   sync.Once
+	retentionWake   chan struct{}
 	auth            *auth.Service
 	accounts        *accounts.Store
 	images          *images.Service
@@ -53,6 +55,8 @@ type Server struct {
 	tags            *imagetags.Store
 	static          *staticFiles
 	tasks           *tasks.Manager
+	callbacks       *callbackDispatcher
+	postprocess     *postprocess.Service
 	metrics         *metrics.Service
 	refresh         *accounts.RefreshManager
 	autoRefresh     *accounts.AutoRefreshScheduler
@@ -96,7 +100,23 @@ func newServer(cfg config.Config, accountStore *accounts.Store, imageService *im
 		registerManager = registration.NewManagerWithPersistence(state, accountStore, registerWorker)
 	}
 	refreshManager := accounts.NewRefreshManager(accountStore, imageService, cfg.RefreshAccountConcurrency)
-	return &Server{cfg: cfg, auth: authService, accounts: accountStore, images: imageService, texts: textService, searches: searchService, storage: storageService, system: systemstats.New(cfg.ImageOutputDir), tags: tagStore, static: newStaticFiles(cfg.WebDistDir), tasks: taskManager, metrics: metricService, refresh: refreshManager, autoRefresh: accounts.NewAutoRefreshScheduler(accountStore, refreshManager, cfg.RefreshAccountIntervalMinutes), oauth: oauthlogin.New(), debugClient: openaiweb.NewReloadableClient(cfg), register: registerManager, updater: updater.NewFromEnvironment(), state: state, onConfigUpdated: onConfigUpdated}
+	callbacks := newCallbackDispatcher()
+	server := &Server{cfg: cfg, retentionWake: make(chan struct{}, 1), auth: authService, accounts: accountStore, images: imageService, texts: textService, searches: searchService, storage: storageService, system: systemstats.New(cfg.ImageOutputDir), tags: tagStore, static: newStaticFiles(cfg.WebDistDir), tasks: taskManager, callbacks: callbacks, metrics: metricService, refresh: refreshManager, autoRefresh: accounts.NewAutoRefreshScheduler(accountStore, refreshManager, cfg.RefreshAccountIntervalMinutes), oauth: oauthlogin.New(), debugClient: openaiweb.NewReloadableClient(cfg), register: registerManager, updater: updater.NewFromEnvironment(), state: state, onConfigUpdated: onConfigUpdated}
+	if taskManager != nil {
+		taskManager.SetCompletionHook(func(task tasks.Task) {
+			if strings.TrimSpace(task.CallbackURL) != "" {
+				callbacks.deliver(task.CallbackURL, standardImageTask(publicTask(task)))
+			}
+		})
+	}
+	return server
+}
+
+func (s *Server) SetPostprocess(service *postprocess.Service) {
+	if s == nil {
+		return
+	}
+	s.postprocess = service
 }
 
 func (s *Server) StartBackground(ctx context.Context) {
@@ -104,6 +124,51 @@ func (s *Server) StartBackground(ctx context.Context) {
 		return
 	}
 	s.autoRefresh.Start(ctx)
+	s.retentionOnce.Do(func() { go s.runImageRetention(ctx) })
+}
+
+func (s *Server) runImageRetention(ctx context.Context) {
+	ticker := time.NewTicker(time.Hour)
+	defer ticker.Stop()
+	s.cleanupExpiredImages(time.Now())
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.cleanupExpiredImages(time.Now())
+		case <-s.retentionWake:
+			s.cleanupExpiredImages(time.Now())
+		}
+	}
+}
+
+func (s *Server) triggerImageRetention() {
+	if s == nil || s.retentionWake == nil {
+		return
+	}
+	select {
+	case s.retentionWake <- struct{}{}:
+	default:
+	}
+}
+
+func (s *Server) cleanupExpiredImages(now time.Time) {
+	if s == nil || s.storage == nil {
+		return
+	}
+	days := s.currentConfig().ImageRetentionDays
+	if days <= 0 {
+		return
+	}
+	cutoff := now.Add(-time.Duration(days) * 24 * time.Hour)
+	removed, freedBytes, _, err := s.storage.CleanupOlderThan(cutoff)
+	if err != nil {
+		log.Printf("image retention cleanup failed: %v", err)
+	}
+	if removed > 0 {
+		log.Printf("image retention cleanup removed %d image(s), freed %d byte(s), retention=%d day(s)", removed, freedBytes, days)
+	}
 }
 
 // Close flushes service-owned buffered state. Shared stores and the task
@@ -193,6 +258,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleImageGeneration(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/images/edits":
 		s.handleImageEdit(w, r, false)
+	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/images/"):
+		s.handleStandardImageTask(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/chat/completions":
 		s.handleChatCompletions(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/responses":
@@ -209,6 +276,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleUserKeyItem(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/api/dashboard":
 		s.handleDashboard(w, r)
+	case r.Method == http.MethodGet && r.URL.Path == "/api/diagnostics/scheduler":
+		s.handleSchedulerDiagnostics(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/api/system/load":
 		w.Header().Set("Cache-Control", "no-store")
 		writeJSON(w, http.StatusOK, s.system.Sample())
@@ -230,8 +299,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, s.storage.Stats())
 	case r.Method == http.MethodPost && r.URL.Path == "/api/images/storage/compress":
 		s.handleImagesCompress(w, r)
-	case r.Method == http.MethodPost && r.URL.Path == "/api/images/storage/cleanup-to-target":
-		s.handleImagesCleanup(w, r)
+	case r.Method == http.MethodPost && r.URL.Path == "/api/images/storage/release-before-today":
+		s.handleImagesReleaseBeforeToday(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/api/images/delete":
 		s.handleImagesDelete(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/api/images/download":
@@ -248,8 +317,6 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleProxyRuntime(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/api/proxy/clearance/test":
 		s.handleProxyClearanceTest(w, r)
-	case r.Method == http.MethodPost && r.URL.Path == "/api/notifications/bark/test":
-		s.handleBarkTest(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/api/register/events":
 		s.handleRegisterEvents(w, r)
 	case r.URL.Path == "/api/register":
@@ -266,6 +333,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleTaskList(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/api/image-tasks/history":
 		s.handleTaskHistory(w, r)
+	case r.Method == http.MethodGet && r.URL.Path == "/api/postprocess-tasks/history":
+		s.handlePostprocessTaskHistory(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/api/image-tasks/generations":
 		s.handleTaskGeneration(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/api/image-tasks/edits":
@@ -540,11 +609,49 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, err)
 		return
 	}
-	data := make([]map[string]any, 0, len(models))
-	for _, model := range models {
-		data = append(data, map[string]any{"id": model, "object": "model", "created": 0, "owned_by": "image-pool", "permission": []any{}, "root": model, "parent": nil})
+	cfg := s.currentConfig()
+	type modelItem struct {
+		id     string
+		owner  string
+		parent any
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": data})
+	items := make([]modelItem, 0, len(models)+32)
+	for _, model := range models {
+		var parent any
+		if base, ok := images.SuperResolutionBaseModel(model); ok {
+			if !cfg.ImageSuperResolutionEnabled {
+				continue
+			}
+			parent = base
+		}
+		items = append(items, modelItem{id: model, owner: "image-pool", parent: parent})
+	}
+	seen := map[string]bool{}
+	data := make([]map[string]any, 0, len(items))
+	for _, item := range items {
+		if item.id == "" || seen[item.id] {
+			continue
+		}
+		seen[item.id] = true
+		data = append(data, map[string]any{"id": item.id, "object": "model", "created": 0, "owned_by": item.owner, "permission": []any{}, "root": item.id, "parent": item.parent})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"object": "list",
+		"data":   data,
+		"features": map[string]any{
+			"image_super_resolution":           cfg.ImageSuperResolutionEnabled,
+			"image_super_resolution_available": s.postprocess != nil,
+			"image_restoration":                cfg.ImageRestorationEnabled,
+		},
+	})
+}
+
+func requestMetricImageModel(model string) string {
+	model = strings.TrimSpace(model)
+	if base, ok := images.SuperResolutionBaseModel(model); ok {
+		return base
+	}
+	return model
 }
 
 func (s *Server) handleImageGeneration(w http.ResponseWriter, r *http.Request) {
@@ -557,17 +664,26 @@ func (s *Server) handleImageGeneration(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	if err := validateAsyncImageRequest(r, req, false); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
 	req.OutputBaseURL = baseURL(r)
-	metrics.SetModel(r.Context(), images.PublicImageModel)
+	metrics.SetModel(r.Context(), requestMetricImageModel(req.Model))
 	if err := s.consumeQuota(r, "/v1/images/generations", req.Model, 1, normalizedImageCount(req.N)); err != nil {
 		writeError(w, statusFromError(err), err)
+		return
+	}
+	identity, _ := auth.IdentityFromContext(r.Context())
+	if req.Async {
+		task := s.tasks.SubmitGenerationForOwner(identity.ID, "", req)
+		writeJSON(w, http.StatusAccepted, standardImageTask(publicTask(task)))
 		return
 	}
 	if req.Stream {
 		s.streamImage(w, r, req)
 		return
 	}
-	identity, _ := auth.IdentityFromContext(r.Context())
 	_, resp, err := s.tasks.RunGenerationForOwner(r.Context(), identity.ID, req)
 	if err != nil {
 		writeError(w, statusFromError(err), err)
@@ -586,8 +702,12 @@ func (s *Server) handleImageEdit(w http.ResponseWriter, r *http.Request, asTask 
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	if err := validateAsyncImageRequest(r, req, asTask); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
 	req.OutputBaseURL = baseURL(r)
-	metrics.SetModel(r.Context(), images.PublicImageModel)
+	metrics.SetModel(r.Context(), requestMetricImageModel(req.Model))
 	endpoint := "/v1/images/edits"
 	if asTask {
 		endpoint = "/api/image-tasks/edits"
@@ -596,10 +716,15 @@ func (s *Server) handleImageEdit(w http.ResponseWriter, r *http.Request, asTask 
 		writeError(w, statusFromError(err), err)
 		return
 	}
-	if asTask {
+	asyncTask := asTask || req.Async
+	if asyncTask {
 		identity, _ := auth.IdentityFromContext(r.Context())
 		task := s.tasks.SubmitEditForOwner(identity.ID, clientTaskID, req)
-		writeJSON(w, http.StatusAccepted, publicTask(task))
+		if asTask {
+			writeJSON(w, http.StatusAccepted, publicTask(task))
+		} else {
+			writeJSON(w, http.StatusAccepted, standardImageTask(publicTask(task)))
+		}
 		return
 	}
 	identity, _ := auth.IdentityFromContext(r.Context())
@@ -863,18 +988,24 @@ func (s *Server) handleTaskGeneration(w http.ResponseWriter, r *http.Request) {
 		Quality        string `json:"quality"`
 		ResponseFormat string `json:"response_format"`
 		OutputFormat   string `json:"output_format"`
+		CallbackURL    string `json:"callback_url"`
+		HDRepair       bool   `json:"hd_repair"`
 		N              int    `json:"n"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	req := images.Request{Prompt: body.Prompt, Model: body.Model, Size: body.Size, Quality: body.Quality, ResponseFormat: body.ResponseFormat, OutputFormat: body.OutputFormat, N: normalizedImageCount(body.N), OutputBaseURL: baseURL(r)}
+	req := images.Request{Prompt: body.Prompt, Model: body.Model, Size: body.Size, Quality: body.Quality, ResponseFormat: body.ResponseFormat, OutputFormat: body.OutputFormat, CallbackURL: body.CallbackURL, HDRepair: body.HDRepair, N: normalizedImageCount(body.N), OutputBaseURL: baseURL(r)}
 	if err := validateImageOutputOptions(req); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	metrics.SetModel(r.Context(), images.PublicImageModel)
+	if err := validateAsyncImageRequest(r, req, true); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	metrics.SetModel(r.Context(), requestMetricImageModel(req.Model))
 	if err := s.consumeQuota(r, "/api/image-tasks/generations", body.Model, 1, normalizedImageCount(body.N)); err != nil {
 		writeError(w, statusFromError(err), err)
 		return
@@ -1184,7 +1315,7 @@ func (s *Server) handleAccountImageTest(w http.ResponseWriter, r *http.Request) 
 	}
 	metrics.SetModel(r.Context(), images.PublicImageModel)
 	identity, _ := auth.IdentityFromContext(r.Context())
-	task, response, err := s.tasks.RunGenerationWithAccountForOwner(r.Context(), identity.ID, body.AccessToken, images.Request{Prompt: body.Prompt, Model: body.Model, Size: body.Size, Quality: body.Quality, N: 1, OutputBaseURL: baseURL(r)})
+	task, response, err := s.tasks.RunGenerationWithAccountForOwner(r.Context(), identity.ID, body.AccessToken, images.Request{Prompt: body.Prompt, Model: body.Model, Size: body.Size, Quality: body.Quality, N: 1, ResponseFormat: "url", OutputBaseURL: baseURL(r)})
 	if err != nil {
 		message := openaiweb.PublicErrorMessage(err)
 		code := "upstream_error"
@@ -1388,6 +1519,9 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	}
 	runtimeWindow := dashboardRuntimeWindow(r)
 	callSummary := s.metrics.Summary(runtimeWindow)
+	if start, end, ok := dashboardRuntimeRange(r); ok {
+		callSummary = s.metrics.SummaryRange(start, end)
+	}
 	callSummary["today"] = s.metrics.TodaySummary()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"app":          cfg.AppName,
@@ -1414,11 +1548,20 @@ func dashboardRuntimeWindow(r *http.Request) time.Duration {
 		return time.Hour
 	}
 	switch minutes {
-	case 60, 24 * 60, 7 * 24 * 60, 30 * 24 * 60:
+	case 60, 24 * 60, 7 * 24 * 60, 15 * 24 * 60, 30 * 24 * 60:
 		return time.Duration(minutes) * time.Minute
 	default:
 		return time.Hour
 	}
+}
+
+func dashboardRuntimeRange(r *http.Request) (time.Time, time.Time, bool) {
+	start, startErr := time.Parse(time.RFC3339, strings.TrimSpace(r.URL.Query().Get("runtime_start")))
+	end, endErr := time.Parse(time.RFC3339, strings.TrimSpace(r.URL.Query().Get("runtime_end")))
+	if startErr != nil || endErr != nil || !start.Before(end) || end.Sub(start) > 90*24*time.Hour {
+		return time.Time{}, time.Time{}, false
+	}
+	return start, end, true
 }
 
 func mergeDashboardStorageHealth(health map[string]any, accountsTotal any, authKeyCount int) map[string]any {
@@ -1602,21 +1745,28 @@ func (s *Server) handleImagesCompress(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"compressed": compressed, "saved_bytes": savedBytes, "saved_mb": float64(savedBytes) / (1024 * 1024)})
 }
 
-func (s *Server) handleImagesCleanup(w http.ResponseWriter, r *http.Request) {
-	target, err := strconv.ParseInt(strings.TrimSpace(r.URL.Query().Get("target_free_mb")), 10, 64)
-	if err != nil || target <= 0 {
-		writeError(w, http.StatusBadRequest, fmt.Errorf("target_free_mb must be greater than zero"))
-		return
-	}
-	removed, freedBytes, paths, done, err := s.storage.CleanupToFreeMB(target)
+func (s *Server) handleImagesReleaseBeforeToday(w http.ResponseWriter, r *http.Request) {
+	location, err := time.LoadLocation(s.currentConfig().Timezone)
 	if err != nil {
+		location = time.Local
+	}
+	now := time.Now().In(location)
+	cutoff := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, location)
+	removed, freedBytes, removedPaths, cleanupErr := s.storage.CleanupOlderThan(cutoff)
+	if err := s.tags.RemovePaths(removedPaths); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	if len(paths) > 0 {
-		_ = s.tags.RemovePaths(paths)
+	if cleanupErr != nil {
+		writeError(w, http.StatusInternalServerError, cleanupErr)
+		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"removed": removed, "freed_bytes": freedBytes, "freed_mb": float64(freedBytes) / (1024 * 1024), "done": done})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"removed":     removed,
+		"freed_bytes": freedBytes,
+		"freed_mb":    float64(freedBytes) / (1024 * 1024),
+		"cutoff":      cutoff.Format(time.RFC3339),
+	})
 }
 
 func (s *Server) handleImageTagsSet(w http.ResponseWriter, r *http.Request) {
@@ -1781,11 +1931,6 @@ func (s *Server) handleProxyClearanceTest(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, map[string]any{"result": result})
 }
 
-func (s *Server) handleBarkTest(w http.ResponseWriter, r *http.Request) {
-	result := notifications.TestBark(r.Context(), s.currentConfig().Notifications.Bark, nil)
-	writeJSON(w, http.StatusOK, map[string]any{"result": result})
-}
-
 func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
 		writeJSON(w, http.StatusOK, map[string]any{"register": s.register.Get()})
@@ -1891,6 +2036,7 @@ func (s *Server) applyConfigPatch(patch map[string]any) (config.Config, error) {
 	}
 	s.auth.UpdateAdminKeys(next.APIKeys)
 	s.setConfig(next)
+	s.triggerImageRetention()
 	s.refresh.SetConcurrency(next.RefreshAccountConcurrency)
 	s.autoRefresh.UpdateInterval(next.RefreshAccountIntervalMinutes)
 	s.debugClient.UpdateConfig(next)
@@ -1937,7 +2083,10 @@ func (s *Server) parseEditRequest(r *http.Request) (images.Request, string, erro
 			return images.Request{}, "", err
 		}
 		form := r.MultipartForm
-		req := images.Request{Prompt: formValue(form, "prompt"), Model: formValue(form, "model"), Size: formValue(form, "size"), Quality: formValue(form, "quality"), ResponseFormat: formValue(form, "response_format"), OutputFormat: formValue(form, "output_format")}
+		req := images.Request{Prompt: formValue(form, "prompt"), Model: formValue(form, "model"), Size: formValue(form, "size"), Quality: formValue(form, "quality"), ResponseFormat: formValue(form, "response_format"), OutputFormat: formValue(form, "output_format"), CallbackURL: formValue(form, "callback_url")}
+		req.Async, _ = strconv.ParseBool(formValue(form, "async"))
+		req.HDRepair, _ = strconv.ParseBool(formValue(form, "hd_repair"))
+		req.SuperResolution, _ = strconv.ParseBool(formValue(form, "super_resolution"))
 		if n, _ := strconv.Atoi(formValue(form, "n")); n > 0 {
 			req.N = n
 		}
@@ -1970,6 +2119,10 @@ func (s *Server) parseEditRequest(r *http.Request) (images.Request, string, erro
 		Quality         string `json:"quality"`
 		ResponseFormat  string `json:"response_format"`
 		OutputFormat    string `json:"output_format"`
+		Async           bool   `json:"async"`
+		CallbackURL     string `json:"callback_url"`
+		HDRepair        bool   `json:"hd_repair"`
+		SuperResolution bool   `json:"super_resolution"`
 		Image           any    `json:"image"`
 		Images          any    `json:"images"`
 		ImageURL        any    `json:"image_url"`
@@ -1998,7 +2151,7 @@ func (s *Server) parseEditRequest(r *http.Request) (images.Request, string, erro
 	if err != nil {
 		return images.Request{}, "", err
 	}
-	return images.Request{Prompt: body.Prompt, Model: body.Model, N: body.N, Size: body.Size, Quality: body.Quality, ResponseFormat: body.ResponseFormat, OutputFormat: body.OutputFormat, References: refs}, body.ClientTaskID, nil
+	return images.Request{Prompt: body.Prompt, Model: body.Model, N: body.N, Size: body.Size, Quality: body.Quality, ResponseFormat: body.ResponseFormat, OutputFormat: body.OutputFormat, Async: body.Async, CallbackURL: body.CallbackURL, HDRepair: body.HDRepair, SuperResolution: body.SuperResolution, References: refs}, body.ClientTaskID, nil
 }
 
 func editMultipartImageFields(files map[string][]*multipart.FileHeader) []string {

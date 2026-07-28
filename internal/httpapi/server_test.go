@@ -71,6 +71,9 @@ func (b *validatingAPIBackend) readinessCheckCount() int {
 func (apiBackend) GenerateImage(ctx context.Context, account accounts.Account, req openaiweb.ImageRequest) (openaiweb.ImageResult, error) {
 	return openaiweb.ImageResult{URLs: []string{"https://example.com/a.png"}, AccountEmail: account.Email, BackendModel: "gpt-5-5", ConversationID: "conv"}, nil
 }
+func (apiBackend) DownloadImageFor(context.Context, accounts.Account, string) ([]byte, error) {
+	return []byte{0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a, 0x00}, nil
+}
 func (apiBackend) ListModels(ctx context.Context, token string) ([]string, error) {
 	return []string{"gpt-5-5"}, nil
 }
@@ -140,6 +143,78 @@ func TestHealthAndAuth(t *testing.T) {
 	resp, err = http.DefaultClient.Do(req)
 	if err != nil || resp.StatusCode != 401 {
 		t.Fatalf("auth status=%v err=%v", resp.StatusCode, err)
+	}
+}
+
+func TestModelsOnlyExpose2KWhenSuperResolutionIsEnabled(t *testing.T) {
+	tests := []struct {
+		name        string
+		enabled     bool
+		want2KModel bool
+	}{
+		{name: "disabled by default", enabled: false, want2KModel: false},
+		{name: "enabled", enabled: true, want2KModel: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := config.Default()
+			cfg.APIKeys = []string{"k"}
+			cfg.ImageSuperResolutionEnabled = tt.enabled
+			srv := httptest.NewServer(newTestServer(cfg))
+			defer srv.Close()
+
+			request, _ := http.NewRequest(http.MethodGet, srv.URL+"/v1/models", nil)
+			request.Header.Set("Authorization", "Bearer k")
+			response, err := http.DefaultClient.Do(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer response.Body.Close()
+			var payload struct {
+				Data []struct {
+					ID string `json:"id"`
+				} `json:"data"`
+				Features struct {
+					SuperResolution bool `json:"image_super_resolution"`
+				} `json:"features"`
+			}
+			if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+				t.Fatal(err)
+			}
+			has2KModel := false
+			for _, model := range payload.Data {
+				if model.ID == "gpt-image-2-2k" {
+					has2KModel = true
+				}
+			}
+			if response.StatusCode != http.StatusOK || payload.Features.SuperResolution != tt.enabled || has2KModel != tt.want2KModel {
+				t.Fatalf("status=%d enabled=%t models=%#v", response.StatusCode, payload.Features.SuperResolution, payload.Data)
+			}
+		})
+	}
+}
+
+func TestPostprocessTaskHistoryEndpoint(t *testing.T) {
+	srv := httptest.NewServer(testServer(t))
+	defer srv.Close()
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/postprocess-tasks/history?page=1&page_size=20", nil)
+	req.Header.Set("Authorization", "Bearer k")
+	response, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	var payload struct {
+		Items    []any `json:"items"`
+		Page     int   `json:"page"`
+		PageSize int   `json:"page_size"`
+		Total    int   `json:"total"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusOK || payload.Items == nil || payload.Page != 1 || payload.PageSize != 20 || payload.Total != 0 {
+		t.Fatalf("status=%d payload=%#v", response.StatusCode, payload)
 	}
 }
 
@@ -376,6 +451,13 @@ func TestImageGenerationEndpoint(t *testing.T) {
 	if len(data) != 1 || payload["backend_model"] != images.PublicImageModel {
 		t.Fatalf("payload=%#v", payload)
 	}
+	item, _ := data[0].(map[string]any)
+	if b64, _ := item["b64_json"].(string); b64 == "" {
+		t.Fatalf("default response must include b64_json: %#v", payload)
+	}
+	if _, found := item["url"]; found {
+		t.Fatalf("default response must not include url: %#v", payload)
+	}
 	for _, hidden := range []string{"account_email", "attempts"} {
 		if _, found := payload[hidden]; found {
 			t.Fatalf("response exposed %s: %#v", hidden, payload)
@@ -394,9 +476,55 @@ func TestImageGenerationEndpoint(t *testing.T) {
 	if err := json.NewDecoder(tasksResponse.Body).Decode(&taskPayload); err != nil {
 		t.Fatal(err)
 	}
-	if tasksResponse.StatusCode != http.StatusOK || len(taskPayload.Items) != 1 || taskPayload.Items[0].Status != tasks.StatusSucceeded || taskPayload.Items[0].Model != images.PublicImageModel {
+	if tasksResponse.StatusCode != http.StatusOK || len(taskPayload.Items) != 1 || taskPayload.Items[0].Status != tasks.StatusSucceeded || taskPayload.Items[0].Model != images.PublicImageModel || len(taskPayload.Items[0].Data) != 1 || taskPayload.Items[0].Data[0].B64JSON == "" || taskPayload.Items[0].Data[0].URL != "" {
 		t.Fatalf("task status=%d payload=%#v", tasksResponse.StatusCode, taskPayload)
 	}
+}
+
+func TestImageTaskGenerationEndpointDefaultsToB64JSON(t *testing.T) {
+	srv := httptest.NewServer(testServer(t))
+	defer srv.Close()
+	request, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/image-tasks/generations", strings.NewReader(`{"prompt":"draw","model":"gpt-image-2"}`))
+	request.Header.Set("Authorization", "Bearer k")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	var submitted tasks.Task
+	if err := json.NewDecoder(response.Body).Decode(&submitted); err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusAccepted || submitted.ID == "" {
+		t.Fatalf("status=%d task=%#v", response.StatusCode, submitted)
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		statusRequest, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/image-tasks/"+submitted.ID+"/status", nil)
+		statusRequest.Header.Set("Authorization", "Bearer k")
+		statusResponse, err := http.DefaultClient.Do(statusRequest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var task tasks.Task
+		err = json.NewDecoder(statusResponse.Body).Decode(&task)
+		statusResponse.Body.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if statusResponse.StatusCode != http.StatusOK {
+			t.Fatalf("status=%d task=%#v", statusResponse.StatusCode, task)
+		}
+		if task.Status == tasks.StatusSucceeded {
+			if len(task.Data) != 1 || task.Data[0].B64JSON == "" || task.Data[0].URL != "" {
+				t.Fatalf("task=%#v", task)
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("task did not complete")
 }
 
 func TestCredentialFailureNeverLeaksUpstreamDiagnostics(t *testing.T) {
@@ -618,7 +746,7 @@ func TestCallLogsUseLogTypeAndDetailShape(t *testing.T) {
 func TestAccountImageTestCreatesTrackedTask(t *testing.T) {
 	srv := httptest.NewServer(testServer(t))
 	defer srv.Close()
-	request, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/accounts/test-image", strings.NewReader(`{"access_token":"tok","model":"gpt-image-2"}`))
+	request, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/accounts/test-image", strings.NewReader(`{"access_token":"tok","model":"gpt-image-2-2k","prompt":"custom test prompt"}`))
 	request.Header.Set("Authorization", "Bearer k")
 	response, err := http.DefaultClient.Do(request)
 	if err != nil {
@@ -650,6 +778,28 @@ func TestAccountImageTestCreatesTrackedTask(t *testing.T) {
 	}
 	if tasksResponse.StatusCode != http.StatusOK || len(taskPayload.Items) != 1 || taskPayload.Items[0].Status != tasks.StatusSucceeded {
 		t.Fatalf("task status=%d payload=%#v", tasksResponse.StatusCode, taskPayload)
+	}
+	if taskPayload.Items[0].Prompt != "custom test prompt" || taskPayload.Items[0].Model != "gpt-image-2-2k" || taskPayload.Items[0].Size != "2048x2048" || !taskPayload.Items[0].SuperResolution {
+		t.Fatalf("test image model options were not preserved: %#v", taskPayload.Items[0])
+	}
+	if taskPayload.Items[0].ResponseFormat != "url" || len(taskPayload.Items[0].Data) != 1 || !strings.HasPrefix(taskPayload.Items[0].Data[0].URL, srv.URL+"/images/") {
+		t.Fatalf("test image was not stored locally: %#v", taskPayload.Items[0])
+	}
+	imagesRequest, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/images", nil)
+	imagesRequest.Header.Set("Authorization", "Bearer k")
+	imagesResponse, err := http.DefaultClient.Do(imagesRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer imagesResponse.Body.Close()
+	var imagesPayload struct {
+		Items []storage.ImageItem `json:"items"`
+	}
+	if err := json.NewDecoder(imagesResponse.Body).Decode(&imagesPayload); err != nil {
+		t.Fatal(err)
+	}
+	if imagesResponse.StatusCode != http.StatusOK || len(imagesPayload.Items) != 1 {
+		t.Fatalf("stored image list status=%d payload=%#v", imagesResponse.StatusCode, imagesPayload)
 	}
 }
 
@@ -899,28 +1049,6 @@ func TestChatGPTWebDebugEndpoint(t *testing.T) {
 	}
 }
 
-func TestBarkTestEndpointReportsDisabledConfiguration(t *testing.T) {
-	srv := httptest.NewServer(testServer(t))
-	defer srv.Close()
-	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/notifications/bark/test", nil)
-	req.Header.Set("Authorization", "Bearer k")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	var payload struct {
-		Result struct {
-			OK    bool   `json:"ok"`
-			Error string `json:"error"`
-		} `json:"result"`
-	}
-	_ = json.NewDecoder(resp.Body).Decode(&payload)
-	if resp.StatusCode != http.StatusOK || payload.Result.OK || payload.Result.Error == "" {
-		t.Fatalf("status=%d payload=%#v", resp.StatusCode, payload)
-	}
-}
-
 func TestRegisterManagementEndpoints(t *testing.T) {
 	srv := httptest.NewServer(testServer(t))
 	defer srv.Close()
@@ -1044,7 +1172,8 @@ func TestSettingsPersistAndNotify(t *testing.T) {
 	cfg.CallLogFile = filepath.Join(t.TempDir(), "calls.json")
 	cfg.ImageTagsFile = filepath.Join(t.TempDir(), "tags.json")
 	var updated config.Config
-	srv := httptest.NewServer(newTestServer(cfg, func(next config.Config) { updated = next }))
+	handler := newTestServer(cfg, func(next config.Config) { updated = next }).(*Server)
+	srv := httptest.NewServer(handler)
 	defer srv.Close()
 	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/settings", strings.NewReader(`{"image_web_model_slug":"gpt-5-6","refresh_account_interval_minute":2,"refresh_account_concurrency":3,"image_retention_days":7}`))
 	req.Header.Set("Authorization", "Bearer k")
@@ -1055,6 +1184,11 @@ func TestSettingsPersistAndNotify(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK || updated.ImageWebModelSlug != "gpt-5-6" || updated.RefreshAccountIntervalMinutes != 2 || updated.RefreshAccountConcurrency != 3 || updated.ImageRetentionDays != 7 {
 		t.Fatalf("status=%d updated=%#v", resp.StatusCode, updated)
+	}
+	select {
+	case <-handler.retentionWake:
+	default:
+		t.Fatal("settings update did not schedule image retention cleanup")
 	}
 	reloaded, err := config.Load(path)
 	if err != nil {
@@ -1410,7 +1544,29 @@ func TestDashboardSupportsRuntimeWindow(t *testing.T) {
 	calls, _ := payload["calls"].(map[string]any)
 	runtime, _ := calls["runtime"].(map[string]any)
 	series, _ := runtime["series"].([]any)
-	if response.StatusCode != http.StatusOK || runtime["window_minutes"] != float64(10080) || runtime["bucket_minutes"] != float64(60) || len(series) != 168 {
+	if response.StatusCode != http.StatusOK || runtime["window_minutes"] != float64(10080) || runtime["bucket_minutes"] != float64(1440) || len(series) != 7 {
+		t.Fatalf("status=%d runtime=%#v", response.StatusCode, runtime)
+	}
+}
+
+func TestDashboardSupportsCustomRuntimeRange(t *testing.T) {
+	srv := httptest.NewServer(testServer(t))
+	defer srv.Close()
+	request, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/dashboard?runtime_start=2026-07-01T00%3A00%3A00Z&runtime_end=2026-07-16T00%3A00%3A00Z", nil)
+	request.Header.Set("Authorization", "Bearer k")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	var payload map[string]any
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	calls, _ := payload["calls"].(map[string]any)
+	runtime, _ := calls["runtime"].(map[string]any)
+	series, _ := runtime["series"].([]any)
+	if response.StatusCode != http.StatusOK || runtime["window_minutes"] != float64(21600) || runtime["bucket_minutes"] != float64(1440) || len(series) != 15 {
 		t.Fatalf("status=%d runtime=%#v", response.StatusCode, runtime)
 	}
 }
@@ -1430,6 +1586,56 @@ func TestProxyRuntimeEndpoint(t *testing.T) {
 	runtime, _ := payload["runtime"].(map[string]any)
 	if response.StatusCode != http.StatusOK || runtime["proxy_url"] != "http://127.0.0.1:8081" {
 		t.Fatalf("status=%d payload=%#v", response.StatusCode, payload)
+	}
+}
+
+func TestImageRetentionLoopRunsImmediatelyAndOnWake(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.ImageOutputDir = dir
+	cfg.ImageRetentionDays = 7
+	handler := &Server{cfg: cfg, storage: storage.NewService(cfg), retentionWake: make(chan struct{}, 1)}
+	writeExpired := func(name string) string {
+		t.Helper()
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte("png"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		old := time.Now().Add(-8 * 24 * time.Hour)
+		if err := os.Chtimes(path, old, old); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	waitRemoved := func(path string) {
+		t.Helper()
+		deadline := time.Now().Add(time.Second)
+		for time.Now().Before(deadline) {
+			if _, err := os.Stat(path); os.IsNotExist(err) {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		t.Fatalf("expired image remains: %s", path)
+	}
+
+	first := writeExpired("first.png")
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		handler.runImageRetention(ctx)
+		close(done)
+	}()
+	waitRemoved(first)
+
+	second := writeExpired("second.png")
+	handler.triggerImageRetention()
+	waitRemoved(second)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("retention loop did not stop")
 	}
 }
 
@@ -1494,6 +1700,82 @@ func TestImageTagsAndThumbnailEndpoints(t *testing.T) {
 	thumb.Body.Close()
 	if thumb.StatusCode != http.StatusOK {
 		t.Fatalf("thumbnail status=%d", thumb.StatusCode)
+	}
+}
+
+func TestReleaseImagesBeforeTodayKeepsTodayImages(t *testing.T) {
+	cfg := config.Default()
+	dir := t.TempDir()
+	cfg.AuthKeyFile = filepath.Join(dir, "auth-keys.json")
+	cfg.ImageTagsFile = filepath.Join(dir, "tags.json")
+	cfg.ImageOutputDir = filepath.Join(dir, "images")
+	cfg.CallLogFile = filepath.Join(dir, "calls.json")
+	cfg.Timezone = "Asia/Shanghai"
+
+	location, err := time.LoadLocation(cfg.Timezone)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().In(location)
+	cutoff := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, location)
+	oldRel := filepath.ToSlash(filepath.Join("history", "old.png"))
+	todayRel := filepath.ToSlash(filepath.Join("today", "current.png"))
+	oldPath := filepath.Join(cfg.ImageOutputDir, filepath.FromSlash(oldRel))
+	todayPath := filepath.Join(cfg.ImageOutputDir, filepath.FromSlash(todayRel))
+	for path, data := range map[string][]byte{oldPath: []byte("history"), todayPath: []byte("today")} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Chtimes(oldPath, cutoff.Add(-time.Hour), cutoff.Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(todayPath, cutoff, cutoff); err != nil {
+		t.Fatal(err)
+	}
+
+	handler := newTestServer(cfg).(*Server)
+	if _, err := handler.tags.Set(oldRel, []string{"history"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := handler.tags.Set(todayRel, []string{"today"}); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/images/storage/release-before-today", nil)
+	req.Header.Set("Authorization", "Bearer k")
+	response, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	var payload struct {
+		Removed    int     `json:"removed"`
+		FreedBytes int64   `json:"freed_bytes"`
+		FreedMB    float64 `json:"freed_mb"`
+		Cutoff     string  `json:"cutoff"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusOK || payload.Removed != 1 || payload.FreedBytes != int64(len("history")) || payload.FreedMB <= 0 || payload.Cutoff != cutoff.Format(time.RFC3339) {
+		t.Fatalf("status=%d payload=%#v", response.StatusCode, payload)
+	}
+	if _, err := os.Stat(oldPath); !os.IsNotExist(err) {
+		t.Fatalf("historical image remains: %v", err)
+	}
+	if _, err := os.Stat(todayPath); err != nil {
+		t.Fatalf("today image was removed: %v", err)
+	}
+	if tags := handler.tags.Get(oldRel); len(tags) != 0 {
+		t.Fatalf("historical image tags remain: %#v", tags)
+	}
+	if tags := handler.tags.Get(todayRel); len(tags) != 1 || tags[0] != "today" {
+		t.Fatalf("today image tags changed: %#v", tags)
 	}
 }
 

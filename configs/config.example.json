@@ -14,7 +14,7 @@
   "image_output_dir": "../data/images",
   "image_retention_days": 30,
   "chatgpt_base_url": "https://chatgpt.com",
-  "upstream_transport": "tls_client",
+  "upstream_transport": "standard",
   "image_web_model_slug": "gpt-5-5",
   "image_poll_timeout_secs": 300,
   "image_poll_interval_secs": 3,
@@ -27,6 +27,12 @@
   "image_account_precheck_timeout_secs": 75,
   "image_check_before_hit_enabled": true,
   "image_settle_enabled": true,
+  "image_super_resolution_enabled": false,
+  "image_restoration_enabled": false,
+  "image_postprocess_worker": "../postprocess/worker.mjs",
+  "image_super_resolution_model": "../postprocess/models/realesr-general-x4v3.onnx",
+  "image_restoration_model": "../postprocess/models/scunet-color-real-gan.onnx",
+  "image_postprocess_timeout_secs": 180,
   "max_image_attempts": 3,
   "request_timeout_secs": 120,
   "refresh_account_interval_minute": 60,
@@ -51,21 +57,5 @@
       "warm_up_on_start": false
     }
   },
-  "notifications": {
-    "bark": {
-      "enabled": false,
-      "server_url": "https://api.day.app",
-      "device_key": "",
-      "title_prefix": "IMAGE POOL",
-      "group": "image-pool",
-      "level": "active",
-      "timeout_secs": 10,
-      "min_interval_seconds": 60,
-      "notify_failed_calls": true,
-      "notify_register": true,
-      "notify_register_errors_only": false,
-      "notify_auto_refill": true
-    }
-  },
-  "models": ["gpt-image-2", "codex-gpt-image-2", "plus-codex-gpt-image-2", "team-codex-gpt-image-2", "pro-codex-gpt-image-2"]
+  "models": ["gpt-image-2"]
 }

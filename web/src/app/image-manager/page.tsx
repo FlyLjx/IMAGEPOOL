@@ -7,7 +7,6 @@ import {
   Empty,
   Image,
   Input,
-  InputNumber,
   Modal,
   Pagination,
   Select,
@@ -17,7 +16,6 @@ import {
   Tooltip,
   Typography,
 } from "antd";
-import type { InputNumberProps } from "antd";
 import {
   Archive,
   Download,
@@ -35,15 +33,14 @@ import { toast } from "sonner";
 
 import { ImageThumbnail } from "@/components/image-thumbnail";
 import {
-  compressAllImages,
   deleteImageTag,
   deleteManagedImages,
-  deleteToTarget,
   downloadImages,
   downloadSingleImage,
   fetchImageStorage,
   fetchImageTags,
   fetchManagedImages,
+  releaseImagesBeforeToday,
   setImageTags,
   type ImageStorageStats,
   type ManagedImage,
@@ -156,7 +153,6 @@ function ImageManagerContent() {
   const [isMutating, setIsMutating] = useState(false);
   const [previewImage, setPreviewImage] = useState<ManagedImage | null>(null);
   const [tagEditor, setTagEditor] = useState<TagEditorState>({ open: false, image: null, value: "" });
-  const [cleanupTargetMb, setCleanupTargetMb] = useState<number>(2048);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(12);
 
@@ -286,33 +282,25 @@ function ImageManagerContent() {
     }
   };
 
-  const handleCompress = async () => {
-    setIsMutating(true);
-    try {
-      const result = await compressAllImages();
-      await refreshAfterMutation(`已压缩 ${result.compressed} 张图片，节省 ${result.saved_mb} MB`);
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "压缩图片失败");
-    } finally {
-      setIsMutating(false);
-    }
-  };
-
-  const handleCleanup = async () => {
-    const target = Number(cleanupTargetMb);
-    if (!Number.isFinite(target) || target <= 0) {
-      toast.error("请输入有效的磁盘剩余目标");
-      return;
-    }
-    setIsMutating(true);
-    try {
-      const result = await deleteToTarget(target);
-      await refreshAfterMutation(`清理完成，删除 ${result.removed} 张图片，释放 ${result.freed_mb} MB`);
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "磁盘清理失败");
-    } finally {
-      setIsMutating(false);
-    }
+  const handleReleaseBeforeToday = () => {
+    Modal.confirm({
+      title: "释放1天外所有图片",
+      content: "将删除今天 00:00 之前的全部图片，今天生成的图片会保留。删除后不可恢复，确认继续吗？",
+      okText: "确认释放",
+      cancelText: "取消",
+      okButtonProps: { danger: true },
+      onOk: async () => {
+        setIsMutating(true);
+        try {
+          const result = await releaseImagesBeforeToday();
+          await refreshAfterMutation(`已删除 ${result.removed} 张历史图片，释放 ${result.freed_mb.toFixed(2)} MB`);
+        } catch (error) {
+          toast.error(error instanceof Error ? error.message : "释放历史图片失败");
+        } finally {
+          setIsMutating(false);
+        }
+      },
+    });
   };
 
   const openTagEditor = (image: ManagedImage) => {
@@ -376,7 +364,7 @@ function ImageManagerContent() {
             图片管理
           </Typography.Title>
           <Typography.Text type="secondary">
-            查看本地图片、批量下载删除、管理标签，并做存储压缩与清理。
+            查看本地图片、批量下载删除、管理标签，并可立即释放今天之前的图片。
           </Typography.Text>
         </div>
         <Space wrap>
@@ -685,28 +673,11 @@ function ImageManagerContent() {
           >
             <div className="space-y-4">
               <div className="rounded-lg border border-slate-100 bg-slate-50/70 p-4">
-                <div className="mb-3 text-sm font-medium text-slate-800">一键压缩图片</div>
-                <div className="mb-4 text-sm text-slate-500">重新优化本地 PNG，减少磁盘占用。</div>
-                <Button block onClick={() => void handleCompress()} disabled={isMutating}>
-                  立即压缩
+                <div className="mb-3 text-sm font-medium text-slate-800">释放历史图片</div>
+                <div className="mb-4 text-sm text-slate-500">立即删除今天之前的全部图片，今日图片保留。</div>
+                <Button block danger onClick={handleReleaseBeforeToday} disabled={isMutating}>
+                  立即释放1天外所有图片
                 </Button>
-              </div>
-
-              <div className="rounded-lg border border-slate-100 bg-slate-50/70 p-4">
-                <div className="mb-3 text-sm font-medium text-slate-800">按目标剩余空间清理</div>
-                <div className="mb-4 text-sm text-slate-500">从最旧图片开始删除，直到达到目标剩余空间。</div>
-                <Space.Compact block>
-                  <InputNumber<number>
-                    min={1}
-                    value={cleanupTargetMb}
-                    onChange={(value: InputNumberProps<number>["value"]) => setCleanupTargetMb(Number(value || 0))}
-                    addonAfter="MB"
-                    style={{ width: "100%" }}
-                  />
-                  <Button onClick={() => void handleCleanup()} disabled={isMutating}>
-                    清理
-                  </Button>
-                </Space.Compact>
               </div>
             </div>
           </Card>

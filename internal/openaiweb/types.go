@@ -18,17 +18,24 @@ type ImageInput struct {
 }
 
 type ImageRequest struct {
-	Prompt         string              `json:"prompt"`
-	Model          string              `json:"model"`
-	N              int                 `json:"n"`
-	Size           string              `json:"size"`
-	Quality        string              `json:"quality"`
-	ResponseFormat string              `json:"response_format"`
-	OutputFormat   string              `json:"output_format"`
-	Stream         bool                `json:"stream"`
-	References     []ImageInput        `json:"-"`
-	OutputBaseURL  string              `json:"-"`
-	Progress       func(ProgressEvent) `json:"-"`
+	Prompt          string              `json:"prompt"`
+	Model           string              `json:"model"`
+	N               int                 `json:"n"`
+	Size            string              `json:"size"`
+	Quality         string              `json:"quality"`
+	ResponseFormat  string              `json:"response_format"`
+	OutputFormat    string              `json:"output_format"`
+	Stream          bool                `json:"stream"`
+	Async           bool                `json:"async"`
+	CallbackURL     string              `json:"callback_url,omitempty"`
+	HDRepair        bool                `json:"hd_repair,omitempty"`
+	SuperResolution bool                `json:"super_resolution,omitempty"`
+	References      []ImageInput        `json:"-"`
+	OutputBaseURL   string              `json:"-"`
+	TaskID          string              `json:"-"`
+	OwnerID         string              `json:"-"`
+	PublicModel     string              `json:"-"`
+	Progress        func(ProgressEvent) `json:"-"`
 }
 
 type ProgressEvent struct {

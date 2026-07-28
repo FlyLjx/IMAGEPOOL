@@ -35,17 +35,24 @@ func (s *staticFiles) Serve(w http.ResponseWriter, r *http.Request) bool {
 	}
 	for _, candidate := range candidates {
 		if path := s.resolve(root, candidate); path != "" && isFile(path) {
-			http.ServeFile(w, r, path)
+			serveWebFile(w, r, path)
 			return true
 		}
 	}
 	if strings.Contains(strings.ToLower(r.Header.Get("Accept")), "text/html") {
 		if path := s.resolve(root, "index.html"); path != "" && isFile(path) {
-			http.ServeFile(w, r, path)
+			serveWebFile(w, r, path)
 			return true
 		}
 	}
 	return false
+}
+
+func serveWebFile(w http.ResponseWriter, r *http.Request, path string) {
+	if strings.EqualFold(filepath.Ext(path), ".html") {
+		w.Header().Set("Cache-Control", "no-store")
+	}
+	http.ServeFile(w, r, path)
 }
 
 func (s *staticFiles) resolve(root, rel string) string {

@@ -5,7 +5,6 @@ import {
   Alert,
   Button,
   Card,
-  Checkbox,
   Col,
   Divider,
   Form,
@@ -13,17 +12,14 @@ import {
   Row,
   Space,
   Switch,
-  Tag,
   Typography,
 } from "antd";
-import { BellRing, LoaderCircle, PlugZap, Save, ShieldCheck } from "lucide-react";
+import { ImageUpscale, LoaderCircle, PlugZap, Save, ShieldCheck, WandSparkles } from "lucide-react";
 import { toast } from "sonner";
 
 import { testProxy, type ProxyTestResult } from "@/lib/api";
 
 import { useSettingsStore } from "../store";
-
-const logLevelOptions = ["debug", "info", "warning", "error"];
 
 function SectionTitle({ title, description }: { title: string; description: string }) {
   return (
@@ -95,19 +91,17 @@ export function ConfigCard() {
   const config = useSettingsStore((state) => state.config);
   const isLoadingConfig = useSettingsStore((state) => state.isLoadingConfig);
   const isSavingConfig = useSettingsStore((state) => state.isSavingConfig);
+  const postprocessSaving = useSettingsStore((state) => state.postprocessSaving);
+  const setPostprocessEnabled = useSettingsStore((state) => state.setPostprocessEnabled);
   const setRefreshAccountIntervalMinute = useSettingsStore((state) => state.setRefreshAccountIntervalMinute);
   const setRefreshAccountConcurrency = useSettingsStore((state) => state.setRefreshAccountConcurrency);
   const setImageRetentionDays = useSettingsStore((state) => state.setImageRetentionDays);
   const setImagePollTimeoutSecs = useSettingsStore((state) => state.setImagePollTimeoutSecs);
   const setImageCapacityBurstParallel = useSettingsStore((state) => state.setImageCapacityBurstParallel);
   const setImageWebModelSlug = useSettingsStore((state) => state.setImageWebModelSlug);
-  const setLogLevel = useSettingsStore((state) => state.setLogLevel);
   const setProxy = useSettingsStore((state) => state.setProxy);
   const setBaseUrl = useSettingsStore((state) => state.setBaseUrl);
   const setTimezone = useSettingsStore((state) => state.setTimezone);
-  const setBarkNotificationField = useSettingsStore((state) => state.setBarkNotificationField);
-  const testBark = useSettingsStore((state) => state.testBark);
-  const isTestingBarkNotification = useSettingsStore((state) => state.isTestingBarkNotification);
   const saveConfig = useSettingsStore((state) => state.saveConfig);
 
   const handleTestProxy = async () => {
@@ -147,7 +141,7 @@ export function ConfigCard() {
     return null;
   }
 
-  const barkEnabled = Boolean(config.notifications?.bark?.enabled);
+  const isPostprocessSaving = Object.values(postprocessSaving).some(Boolean);
 
   return (
     <Card
@@ -162,7 +156,7 @@ export function ConfigCard() {
           type="primary"
           icon={isSavingConfig ? <LoaderCircle className="size-4 animate-spin" /> : <Save className="size-4" />}
           onClick={() => void saveConfig()}
-          disabled={isSavingConfig}
+          disabled={isSavingConfig || isPostprocessSaving}
         >
           保存配置
         </Button>
@@ -288,126 +282,40 @@ export function ConfigCard() {
         </Row>
 
         <Divider />
-        <Row gutter={[16, 16]}>
-          <Col xs={24} lg={8}>
-            <Form.Item label="控制台日志级别" extra="不选时使用默认 info / warning / error。">
-              <Checkbox.Group
-                value={config.log_levels || []}
-                onChange={(values) => {
-                  for (const level of logLevelOptions) {
-                    setLogLevel(level, values.includes(level));
-                  }
-                }}
-              >
-                <Space wrap>
-                  {logLevelOptions.map((level) => (
-                    <Checkbox key={level} value={level}>
-                      <span className="capitalize">{level}</span>
-                    </Checkbox>
-                  ))}
-                </Space>
-              </Checkbox.Group>
-            </Form.Item>
-          </Col>
-        </Row>
+				<SectionTitle title="图片后处理" description="独立队列运行，开关仅影响新提交的图片任务。" />
+				<div className="grid gap-3 md:grid-cols-2">
+					<div className="flex min-h-20 items-center justify-between gap-4 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
+						<Space>
+							<ImageUpscale className="size-4 text-emerald-600" />
+							<div>
+								<Typography.Text strong>自动超分</Typography.Text>
+								<div className="text-xs text-slate-400">Real-ESRGAN</div>
+							</div>
+						</Space>
+						<Switch
+							checked={Boolean(config.image_super_resolution_enabled)}
+							loading={postprocessSaving.image_super_resolution_enabled}
+							disabled={isSavingConfig}
+							onChange={(checked) => void setPostprocessEnabled("image_super_resolution_enabled", checked)}
+						/>
+					</div>
+					<div className="flex min-h-20 items-center justify-between gap-4 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
+						<Space>
+							<WandSparkles className="size-4 text-sky-600" />
+							<div>
+								<Typography.Text strong>高清修复</Typography.Text>
+								<div className="text-xs text-slate-400">SCUNet</div>
+							</div>
+						</Space>
+						<Switch
+							checked={Boolean(config.image_restoration_enabled)}
+							loading={postprocessSaving.image_restoration_enabled}
+							disabled={isSavingConfig}
+							onChange={(checked) => void setPostprocessEnabled("image_restoration_enabled", checked)}
+						/>
+					</div>
+				</div>
 
-        <Divider />
-        <SectionTitle title="Bark 推送通知" description="把异常调用日志和注册机最终统计推送到手机，方便第一时间排障。" />
-        <Card size="small">
-          <div className="mb-4 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-            <Space>
-              <Switch checked={barkEnabled} onChange={(checked) => setBarkNotificationField("enabled", checked)} />
-              <Typography.Text strong>启用 Bark 推送</Typography.Text>
-              <Tag color={barkEnabled ? "green" : "default"}>{barkEnabled ? "已启用" : "未启用"}</Tag>
-            </Space>
-            <Button
-              icon={isTestingBarkNotification ? <LoaderCircle className="size-4 animate-spin" /> : <BellRing className="size-4" />}
-              onClick={() => void testBark()}
-              disabled={isTestingBarkNotification || !barkEnabled}
-            >
-              发送测试
-            </Button>
-          </div>
-          <Row gutter={[16, 16]}>
-            <Col xs={24} md={12}>
-              <Form.Item label="Bark Server URL" extra="官方 Bark 可用 https://api.day.app，自建服务填你自己的地址。">
-                <Input
-                  value={String(config.notifications?.bark?.server_url || "")}
-                  onChange={(event) => setBarkNotificationField("server_url", event.target.value)}
-                  placeholder="https://api.day.app"
-                  disabled={!barkEnabled}
-                />
-              </Form.Item>
-            </Col>
-            <Col xs={24} md={12}>
-              <Form.Item label="Device Key">
-                <Input.Password
-                  value={String(config.notifications?.bark?.device_key || "")}
-                  onChange={(event) => setBarkNotificationField("device_key", event.target.value)}
-                  placeholder="Bark App 里的 key"
-                  disabled={!barkEnabled}
-                />
-              </Form.Item>
-            </Col>
-            <Col xs={24} md={8}>
-              <Form.Item label="标题前缀">
-                <Input
-                  value={String(config.notifications?.bark?.title_prefix || "")}
-                  onChange={(event) => setBarkNotificationField("title_prefix", event.target.value)}
-                  placeholder="IMAGE POOL"
-                  disabled={!barkEnabled}
-                />
-              </Form.Item>
-            </Col>
-            <Col xs={24} md={8}>
-              <Form.Item label="分组">
-                <Input
-                  value={String(config.notifications?.bark?.group || "")}
-                  onChange={(event) => setBarkNotificationField("group", event.target.value)}
-                  placeholder="image-pool"
-                  disabled={!barkEnabled}
-                />
-              </Form.Item>
-            </Col>
-            <Col xs={24} md={8}>
-              <NumberInput
-                label="重复推送冷却"
-                value={String(config.notifications?.bark?.min_interval_seconds ?? "")}
-                onChange={(value) => setBarkNotificationField("min_interval_seconds", value)}
-                placeholder="60"
-                help="单位秒。"
-                disabled={!barkEnabled}
-              />
-            </Col>
-            <Col xs={24}>
-              <Form.Item label="推送范围">
-                <Space wrap>
-                  <Checkbox
-                    checked={Boolean(config.notifications?.bark?.notify_failed_calls !== false)}
-                    onChange={(event) => setBarkNotificationField("notify_failed_calls", event.target.checked)}
-                    disabled={!barkEnabled}
-                  >
-                    异常调用日志
-                  </Checkbox>
-                  <Checkbox
-                    checked={Boolean(config.notifications?.bark?.notify_register !== false)}
-                    onChange={(event) => setBarkNotificationField("notify_register", event.target.checked)}
-                    disabled={!barkEnabled}
-                  >
-                    注册机最终统计
-                  </Checkbox>
-                  <Checkbox
-                    checked={Boolean(config.notifications?.bark?.notify_register_errors_only)}
-                    onChange={(event) => setBarkNotificationField("notify_register_errors_only", event.target.checked)}
-                    disabled={!barkEnabled || !config.notifications?.bark?.notify_register}
-                  >
-                    注册机仅推失败统计
-                  </Checkbox>
-                </Space>
-              </Form.Item>
-            </Col>
-          </Row>
-        </Card>
       </Form>
     </Card>
   );

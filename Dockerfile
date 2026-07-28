@@ -7,6 +7,12 @@ RUN bun install --frozen-lockfile
 COPY web/ ./
 RUN bun run build
 
+FROM oven/bun:1.3.9 AS postprocess-build
+WORKDIR /postprocess
+
+COPY postprocess/package.json postprocess/bun.lock ./
+RUN bun install --frozen-lockfile --production
+
 FROM golang:1.24-alpine AS go-build
 WORKDIR /src
 
@@ -15,14 +21,17 @@ RUN go mod download
 COPY . ./
 RUN go test ./... && go build -trimpath -ldflags="-s -w" -o /out/image-pool ./cmd/image-pool
 
-FROM alpine:3.20
+FROM node:22-bookworm-slim
 WORKDIR /app
 
-RUN apk add --no-cache ca-certificates nodejs tzdata
+COPY --from=go-build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 ENV TZ=Asia/Shanghai
 
 COPY --from=go-build /out/image-pool /app/image-pool
 COPY --from=web-build /web/out /app/web_dist
+COPY --from=postprocess-build /postprocess/node_modules /app/postprocess/node_modules
+COPY postprocess/worker.mjs postprocess/THIRD_PARTY_NOTICES.md /app/postprocess/
+COPY postprocess/models /app/postprocess/models
 COPY configs/config.example.json /app/default-config.json
 COPY cmd/docker-entrypoint.sh /app/docker-entrypoint.sh
 RUN chmod +x /app/docker-entrypoint.sh

@@ -74,6 +74,9 @@ type Task struct {
 	Quality                string           `json:"quality,omitempty"`
 	ResponseFormat         string           `json:"response_format,omitempty"`
 	OutputFormat           string           `json:"output_format,omitempty"`
+	CallbackURL            string           `json:"callback_url,omitempty"`
+	HDRepair               bool             `json:"hd_repair,omitempty"`
+	SuperResolution        bool             `json:"super_resolution,omitempty"`
 	CreatedAt              time.Time        `json:"created_at"`
 	StartedAt              *time.Time       `json:"started_at,omitempty"`
 	FinishedAt             *time.Time       `json:"finished_at,omitempty"`
@@ -106,6 +109,18 @@ type HistoryPage struct {
 	HasMore  bool   `json:"has_more"`
 }
 
+type Stats struct {
+	QueueDepth    int            `json:"queue_depth"`
+	QueueCapacity int            `json:"queue_capacity"`
+	ActiveWorkers int            `json:"active_workers"`
+	WorkerLimit   int            `json:"worker_limit"`
+	MemoryTotal   int            `json:"memory_total"`
+	ByStatus      map[string]int `json:"by_status"`
+	Accepting     bool           `json:"accepting"`
+}
+
+type CompletionHook func(Task)
+
 type Manager struct {
 	mu              sync.RWMutex
 	seq             uint64
@@ -126,6 +141,8 @@ type Manager struct {
 	dispatchDone    chan struct{}
 	workerSlots     chan struct{}
 	workers         sync.WaitGroup
+	hookMu          sync.RWMutex
+	completionHook  CompletionHook
 	close           sync.Once
 }
 
@@ -135,6 +152,42 @@ func NewManager(service ImageService) *Manager {
 
 func NewManagerWithPersistence(service ImageService, state persistence.Store) *Manager {
 	return newManager(service, state)
+}
+
+// SetCompletionHook replaces the observer invoked after a task reaches a final state.
+func (m *Manager) SetCompletionHook(hook CompletionHook) {
+	if m == nil {
+		return
+	}
+	m.hookMu.Lock()
+	m.completionHook = hook
+	m.hookMu.Unlock()
+}
+
+func (m *Manager) Stats() Stats {
+	if m == nil {
+		return Stats{ByStatus: map[string]int{}}
+	}
+	stats := Stats{
+		QueueDepth:    len(m.jobs),
+		QueueCapacity: cap(m.jobs),
+		ActiveWorkers: len(m.workerSlots),
+		WorkerLimit:   cap(m.workerSlots),
+		ByStatus:      map[string]int{},
+		Accepting:     true,
+	}
+	m.mu.RLock()
+	stats.MemoryTotal = len(m.tasks)
+	for _, task := range m.tasks {
+		if task != nil {
+			stats.ByStatus[task.Status]++
+		}
+	}
+	m.mu.RUnlock()
+	m.dispatchMu.Lock()
+	stats.Accepting = !m.dispatchClosing
+	m.dispatchMu.Unlock()
+	return stats
 }
 
 func newManager(service ImageService, state persistence.Store) *Manager {
@@ -200,6 +253,7 @@ func (m *Manager) RunGenerationWithAccountForOwner(ctx context.Context, ownerID,
 }
 
 func (m *Manager) submit(mode, ownerID, clientTaskID string, req images.Request) Task {
+	req.OwnerID = strings.TrimSpace(ownerID)
 	task, ctx := m.create(mode, ownerID, clientTaskID, req, context.Background())
 	if !m.enqueue(task.ID, ctx, req) {
 		if rejected, ok := m.Status(task.ID); ok {
@@ -296,6 +350,7 @@ func (m *Manager) runSync(ctx context.Context, mode, ownerID string, req images.
 }
 
 func (m *Manager) runSyncWith(ctx context.Context, mode, ownerID string, req images.Request, generate imageGenerator) (Task, images.Response, error) {
+	req.OwnerID = strings.TrimSpace(ownerID)
 	task, runCtx := m.create(mode, ownerID, "", req, ctx)
 	result, err := m.runWith(runCtx, task.ID, req, generate)
 	final, ok := m.Status(task.ID)
@@ -313,7 +368,9 @@ func (m *Manager) create(mode, ownerID, clientTaskID string, req images.Request,
 	m.seq++
 	id := fmt.Sprintf("img_%d_%d", time.Now().UnixNano(), m.seq)
 	now := time.Now()
-	task := &Task{ID: id, OwnerID: strings.TrimSpace(ownerID), ClientTaskID: clientTaskID, Mode: mode, Status: StatusQueued, Progress: "queued", ProgressPercent: 0, RealtimeStatus: "任务已提交", Prompt: req.Prompt, Model: images.PublicImageModel, Size: req.Size, Quality: req.Quality, ResponseFormat: req.ResponseFormat, OutputFormat: req.OutputFormat, CreatedAt: now, UpdatedAt: now}
+	publicSize := images.SuperResolutionTargetSize(req.Model, req.Size)
+	_, variantSuperResolution := images.SuperResolutionBaseModel(req.Model)
+	task := &Task{ID: id, OwnerID: strings.TrimSpace(ownerID), ClientTaskID: clientTaskID, Mode: mode, Status: StatusQueued, Progress: "queued", ProgressPercent: 0, RealtimeStatus: "任务已提交", Prompt: req.Prompt, Model: publicTaskModel(req.Model), Size: publicSize, Quality: req.Quality, ResponseFormat: req.ResponseFormat, OutputFormat: req.OutputFormat, CallbackURL: strings.TrimSpace(req.CallbackURL), HDRepair: req.HDRepair, SuperResolution: req.SuperResolution || variantSuperResolution, CreatedAt: now, UpdatedAt: now}
 	appendLog(task, LogEntry{Time: now, Level: "info", Event: "submitted", Progress: "queued", Message: "任务已提交"})
 	m.tasks[id] = task
 	m.markDirtyLocked(id)
@@ -329,6 +386,7 @@ func (m *Manager) run(ctx context.Context, id string, req images.Request) (image
 }
 
 func (m *Manager) runWith(ctx context.Context, id string, req images.Request, generate imageGenerator) (images.Response, error) {
+	req.TaskID = id
 	req.Progress = func(event openaiweb.ProgressEvent) {
 		event = openaiweb.PublicProgressEvent(event)
 		m.update(id, func(task *Task) {
@@ -357,7 +415,19 @@ func (m *Manager) runWith(ctx context.Context, id string, req images.Request, ge
 	result, err := generate(ctx, req)
 	internalResult := result
 	result = publicImageResponse(result)
+	if _, ok := images.SuperResolutionBaseModel(req.Model); ok {
+		result.BackendModel = req.Model
+		if result.ImageRoute != nil {
+			route := make(map[string]any, len(result.ImageRoute))
+			for key, value := range result.ImageRoute {
+				route[key] = value
+			}
+			route["backend_model"] = req.Model
+			result.ImageRoute = route
+		}
+	}
 
+	defer m.notifyCompletion(id)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	task := m.tasks[id]
@@ -411,6 +481,23 @@ func (m *Manager) runWith(ctx context.Context, id string, req images.Request, ge
 	applyAttemptStats(task, internalResult)
 	appendLog(task, LogEntry{Time: now, Level: "success", Event: "completed", Progress: "succeeded", Message: "任务处理完成"})
 	return result, nil
+}
+
+func (m *Manager) notifyCompletion(id string) {
+	if m == nil || strings.TrimSpace(id) == "" {
+		return
+	}
+	m.hookMu.RLock()
+	hook := m.completionHook
+	m.hookMu.RUnlock()
+	if hook == nil {
+		return
+	}
+	task, ok := m.Status(id)
+	if !ok {
+		return
+	}
+	go hook(task)
 }
 
 func applyTaskError(task *Task, classified errorinfo.Info) {
@@ -865,7 +952,7 @@ func (m *Manager) copyTask(task *Task) Task {
 		return Task{}
 	}
 	cp := *task
-	cp.Model = images.PublicImageModel
+	cp.Model = publicTaskModel(cp.Model)
 	cp.Error = openaiweb.PublicErrorText(cp.Error)
 	cp.RealtimeStatus = openaiweb.PublicErrorText(cp.RealtimeStatus)
 	if task.Result != nil {
@@ -881,6 +968,10 @@ func (m *Manager) copyTask(task *Task) Task {
 		cp.StatusLogs[i].Details = openaiweb.PublicDetails(cp.StatusLogs[i].Details)
 	}
 	return cp
+}
+
+func publicTaskModel(model string) string {
+	return images.PublicModelName(model)
 }
 
 func appendLog(task *Task, entry LogEntry) {
@@ -1062,6 +1153,14 @@ func progressPercent(progress string) int {
 		return 88
 	case "polling_image":
 		return 90
+	case "postprocess_queued":
+		return 91
+	case "restoring_image":
+		return 94
+	case "super_resolving":
+		return 97
+	case "postprocess_complete":
+		return 99
 	case "succeeded", "success":
 		return 100
 	default:

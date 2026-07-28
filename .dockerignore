@@ -1,10 +1,13 @@
 .git
 .gitignore
+.tmp
 data
 postgres-data
 web/node_modules
+postprocess/node_modules
 web/.next
 web/out
+postprocess/*.log
 web_dist
 image-pool
 image-pool.exe

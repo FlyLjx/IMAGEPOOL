@@ -18,6 +18,7 @@ import (
 	"imagepool/internal/images"
 	"imagepool/internal/openaiweb"
 	"imagepool/internal/persistence"
+	"imagepool/internal/postprocess"
 	"imagepool/internal/searches"
 	"imagepool/internal/storage"
 	"imagepool/internal/tasks"
@@ -62,7 +63,10 @@ func main() {
 
 	webClient := openaiweb.NewReloadableClient(cfg)
 	storageService := storage.NewService(cfg)
+	postprocessService := postprocess.New(cfg, state)
+	defer postprocessService.Close()
 	imageService := images.NewService(cfg, store, webClient, storageService)
+	imageService.SetPostprocessor(postprocessService)
 	textService := texts.NewService(cfg, store, webClient)
 	searchService := searches.NewService(cfg, store, webClient)
 	taskManager := tasks.NewManager(imageService)
@@ -73,12 +77,14 @@ func main() {
 	configUpdated := func(next config.Config) {
 		setTimezone(next.Timezone)
 		imageService.UpdateConfig(next)
+		postprocessService.UpdateConfig(next)
 		webClient.UpdateConfig(next)
 	}
 	handler := httpapi.NewServer(cfg, store, imageService, textService, searchService, storageService, taskManager, configUpdated)
 	if state != nil {
 		handler = httpapi.NewServerWithPersistence(cfg, store, imageService, textService, searchService, storageService, taskManager, state, configUpdated)
 	}
+	handler.SetPostprocess(postprocessService)
 	defer handler.Close()
 
 	srv := &http.Server{

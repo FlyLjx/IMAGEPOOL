@@ -10,10 +10,8 @@ import {
   resetRegister as resetRegisterApi,
   startRegister,
   stopRegister,
-  testBarkNotification,
   updateRegisterConfig,
   updateSettingsConfig,
-  type BarkNotificationSettings,
   type ProxyRuntimeSettings,
   type RegisterConfig,
   type SettingsConfig,
@@ -43,33 +41,11 @@ function defaultProxyRuntime(): ProxyRuntimeSettings {
   };
 }
 
-function defaultBark(): BarkNotificationSettings {
-  return {
-    enabled: false,
-    server_url: "https://api.day.app",
-    device_key: "",
-    title_prefix: "IMAGE POOL",
-    group: "image-pool",
-    level: "active",
-    timeout_secs: 10,
-    min_interval_seconds: 60,
-    notify_failed_calls: true,
-    notify_register: true,
-    notify_register_errors_only: false,
-    notify_auto_refill: true,
-  };
-}
-
 function normalizeConfig(config: SettingsConfig): SettingsConfig {
   const proxyRuntime =
     typeof config.proxy_runtime === "object" && config.proxy_runtime
       ? (config.proxy_runtime as ProxyRuntimeSettings)
       : defaultProxyRuntime();
-  const bark =
-    typeof config.notifications?.bark === "object" && config.notifications.bark
-      ? (config.notifications.bark as BarkNotificationSettings)
-      : defaultBark();
-
   return {
     ...config,
     refresh_account_interval_minute: Number(config.refresh_account_interval_minute || 60),
@@ -85,6 +61,9 @@ function normalizeConfig(config: SettingsConfig): SettingsConfig {
     image_account_precheck_timeout_secs: Number(config.image_account_precheck_timeout_secs || 75),
     image_settle_enabled: Boolean(config.image_settle_enabled !== false),
     image_check_before_hit_enabled: Boolean(config.image_check_before_hit_enabled !== false),
+		image_super_resolution_enabled: Boolean(config.image_super_resolution_enabled),
+		image_restoration_enabled: Boolean(config.image_restoration_enabled),
+		image_postprocess_timeout_secs: Math.min(1800, Math.max(30, Number(config.image_postprocess_timeout_secs) || 180)),
     image_settle_secs: Number(config.image_settle_secs || 2.0),
     image_timeout_retry_secs: Number(config.image_timeout_retry_secs || 30),
     auto_remove_invalid_accounts: Boolean(config.auto_remove_invalid_accounts),
@@ -94,23 +73,6 @@ function normalizeConfig(config: SettingsConfig): SettingsConfig {
     auto_refill_threshold_percent: Number(config.auto_refill_threshold_percent || 30),
     auto_refill_target_available: Number(config.auto_refill_target_available || 10),
     auto_refill_interval_minutes: Number(config.auto_refill_interval_minutes || 5),
-    log_levels: Array.isArray(config.log_levels) ? config.log_levels : [],
-    notifications: {
-      bark: {
-        enabled: Boolean(bark.enabled),
-        server_url: String(bark.server_url || "https://api.day.app"),
-        device_key: String(bark.device_key || ""),
-        title_prefix: String(bark.title_prefix || "IMAGE POOL"),
-        group: String(bark.group || "image-pool"),
-        level: String(bark.level || "active"),
-        timeout_secs: Number(bark.timeout_secs || 10),
-        min_interval_seconds: Number(bark.min_interval_seconds ?? 60),
-        notify_failed_calls: Boolean(bark.notify_failed_calls !== false),
-        notify_register: Boolean(bark.notify_register !== false),
-        notify_register_errors_only: Boolean(bark.notify_register_errors_only),
-        notify_auto_refill: Boolean(bark.notify_auto_refill !== false),
-      },
-    },
     proxy_runtime: {
       enabled: Boolean(proxyRuntime.enabled),
       egress_mode: proxyRuntime.egress_mode === "single_proxy" ? "single_proxy" : "direct",
@@ -152,11 +114,13 @@ function normalizeConfig(config: SettingsConfig): SettingsConfig {
   };
 }
 
+type PostprocessToggle = "image_super_resolution_enabled" | "image_restoration_enabled";
+
 type SettingsStore = {
   config: SettingsConfig | null;
   isLoadingConfig: boolean;
   isSavingConfig: boolean;
-  isTestingBarkNotification: boolean;
+  postprocessSaving: Record<PostprocessToggle, boolean>;
   registerConfig: RegisterConfig | null;
   isLoadingRegister: boolean;
   isSavingRegister: boolean;
@@ -165,6 +129,7 @@ type SettingsStore = {
   loadConfig: () => Promise<void>;
   setConfig: (config: SettingsConfig) => void;
   saveConfig: () => Promise<boolean>;
+  setPostprocessEnabled: (field: PostprocessToggle, enabled: boolean) => Promise<void>;
   setRefreshAccountIntervalMinute: (value: string) => void;
   setRefreshAccountConcurrency: (value: string) => void;
   setImageRetentionDays: (value: string) => void;
@@ -178,12 +143,9 @@ type SettingsStore = {
   setAutoRefillThresholdPercent: (value: string) => void;
   setAutoRefillTargetAvailable: (value: string) => void;
   setAutoRefillIntervalMinutes: (value: string) => void;
-  setLogLevel: (level: string, enabled: boolean) => void;
   setProxy: (value: string) => void;
   setBaseUrl: (value: string) => void;
   setTimezone: (value: string) => void;
-  setBarkNotificationField: (key: keyof BarkNotificationSettings, value: string | boolean) => void;
-  testBark: () => Promise<void>;
   setProxyRuntimeField: (key: keyof ProxyRuntimeSettings, value: string | boolean | string[]) => void;
   setProxyRuntimeClearanceField: (key: keyof ProxyRuntimeSettings["clearance"], value: string | boolean) => void;
   setProxyRuntimeStatusCodesText: (value: string) => void;
@@ -211,7 +173,10 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
   config: null,
   isLoadingConfig: true,
   isSavingConfig: false,
-  isTestingBarkNotification: false,
+  postprocessSaving: {
+    image_super_resolution_enabled: false,
+    image_restoration_enabled: false,
+  },
   registerConfig: null,
   isLoadingRegister: true,
   isSavingRegister: false,
@@ -244,8 +209,6 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
 
     set({ isSavingConfig: true });
     try {
-      const barkTimeout = Number(config.notifications?.bark?.timeout_secs);
-      const barkMinInterval = Number(config.notifications?.bark?.min_interval_seconds);
       const data = await updateSettingsConfig({
         ...config,
         refresh_account_interval_minute: Math.max(1, Number(config.refresh_account_interval_minute) || 1),
@@ -261,6 +224,9 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         image_account_precheck_timeout_secs: Math.min(180, Math.max(10, Number(config.image_account_precheck_timeout_secs) || 75)),
         image_settle_enabled: Boolean(config.image_settle_enabled !== false),
         image_check_before_hit_enabled: Boolean(config.image_check_before_hit_enabled !== false),
+				image_super_resolution_enabled: Boolean(config.image_super_resolution_enabled),
+				image_restoration_enabled: Boolean(config.image_restoration_enabled),
+				image_postprocess_timeout_secs: Math.min(1800, Math.max(30, Number(config.image_postprocess_timeout_secs) || 180)),
         image_settle_secs: Math.max(0.5, Number(config.image_settle_secs) || 2.0),
         image_timeout_retry_secs: Math.max(1, Number(config.image_timeout_retry_secs) || 30),
         auto_remove_invalid_accounts: Boolean(config.auto_remove_invalid_accounts),
@@ -270,24 +236,6 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         auto_refill_threshold_percent: Math.min(100, Math.max(0, Number(config.auto_refill_threshold_percent) || 30)),
         auto_refill_target_available: Math.max(1, Number(config.auto_refill_target_available) || 10),
         auto_refill_interval_minutes: Math.max(1, Number(config.auto_refill_interval_minutes) || 5),
-        notifications: {
-          bark: {
-            enabled: Boolean(config.notifications?.bark?.enabled),
-            server_url: String(config.notifications?.bark?.server_url || "https://api.day.app").trim(),
-            device_key: String(config.notifications?.bark?.device_key || "").trim(),
-            title_prefix: String(config.notifications?.bark?.title_prefix || "IMAGE POOL").trim(),
-            group: String(config.notifications?.bark?.group || "image-pool").trim(),
-            level: ["active", "timeSensitive", "passive", "critical"].includes(String(config.notifications?.bark?.level))
-              ? String(config.notifications?.bark?.level)
-              : "active",
-            timeout_secs: Math.min(60, Math.max(1, Number.isFinite(barkTimeout) ? barkTimeout : 10)),
-            min_interval_seconds: Math.min(3600, Math.max(0, Number.isFinite(barkMinInterval) ? barkMinInterval : 60)),
-            notify_failed_calls: Boolean(config.notifications?.bark?.notify_failed_calls !== false),
-            notify_register: Boolean(config.notifications?.bark?.notify_register !== false),
-            notify_register_errors_only: Boolean(config.notifications?.bark?.notify_register_errors_only),
-            notify_auto_refill: Boolean(config.notifications?.bark?.notify_auto_refill !== false),
-          },
-        },
         proxy_runtime: {
           ...(config.proxy_runtime as ProxyRuntimeSettings),
           enabled: Boolean(config.proxy_runtime?.enabled),
@@ -335,6 +283,36 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
       return false;
     } finally {
       set({ isSavingConfig: false });
+    }
+  },
+
+  setPostprocessEnabled: async (field, enabled) => {
+    const current = get().config;
+    if (!current || get().postprocessSaving[field]) {
+      return;
+    }
+    const previous = Boolean(current[field]);
+    const label = field === "image_super_resolution_enabled" ? "自动超分" : "高清修复";
+    set((state) => ({
+      config: state.config ? { ...state.config, [field]: enabled } : null,
+      postprocessSaving: { ...state.postprocessSaving, [field]: true },
+    }));
+    try {
+      const data = await updateSettingsConfig({ [field]: enabled });
+      const persisted = Boolean(data.config[field]);
+      set((state) => ({
+        config: state.config ? normalizeConfig({ ...state.config, [field]: persisted }) : null,
+      }));
+      toast.success(`${label}已${persisted ? "开启" : "关闭"}`);
+    } catch (error) {
+      set((state) => ({
+        config: state.config ? { ...state.config, [field]: previous } : null,
+      }));
+      toast.error(error instanceof Error ? error.message : `${label}设置失败`);
+    } finally {
+      set((state) => ({
+        postprocessSaving: { ...state.postprocessSaving, [field]: false },
+      }));
     }
   },
 
@@ -390,16 +368,6 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
     set((state) => (state.config ? { config: { ...state.config, auto_refill_interval_minutes: value } } : {}));
   },
 
-  setLogLevel: (level, enabled) => {
-    set((state) => {
-      if (!state.config) return {};
-      const levels = new Set(state.config.log_levels || []);
-      if (enabled) levels.add(level);
-      else levels.delete(level);
-      return { config: { ...state.config, log_levels: Array.from(levels) } };
-    });
-  },
-
   setProxy: (value) => {
     set((state) => {
       if (!state.config) {
@@ -429,46 +397,6 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
 
   setTimezone: (value) => {
     set((state) => (state.config ? { config: { ...state.config, timezone: value } } : {}));
-  },
-
-  setBarkNotificationField: (key, value) => {
-    set((state) => {
-      if (!state.config?.notifications?.bark) {
-        return {};
-      }
-      return {
-        config: {
-          ...state.config,
-          notifications: {
-            ...state.config.notifications,
-            bark: {
-              ...state.config.notifications.bark,
-              [key]: value,
-            },
-          },
-        },
-      };
-    });
-  },
-
-  testBark: async () => {
-    set({ isTestingBarkNotification: true });
-    try {
-      const saved = await get().saveConfig();
-      if (!saved) {
-        return;
-      }
-      const data = await testBarkNotification();
-      if (data.result.ok) {
-        toast.success(`Bark 推送成功（HTTP ${data.result.status}）`);
-      } else {
-        toast.error(`Bark 推送失败：${data.result.error ?? `HTTP ${data.result.status}`}`);
-      }
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "测试 Bark 推送失败");
-    } finally {
-      set({ isTestingBarkNotification: false });
-    }
   },
 
   setProxyRuntimeField: (key, value) => {

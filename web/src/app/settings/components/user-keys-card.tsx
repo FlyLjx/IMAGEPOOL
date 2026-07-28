@@ -5,7 +5,7 @@ import { Alert, Button, Card, Empty, Form, Input, InputNumber, List, Modal, Sele
 import { Ban, CheckCircle2, Copy, KeyRound, Pencil, Plus, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
-import { createUserKey, deleteUserKey, fetchUserKeys, updateUserKey, type UserKey } from "@/lib/api";
+import { createUserKey, deleteUserKey, fetchModels, fetchUserKeys, updateUserKey, type UserKey } from "@/lib/api";
 import { formatShanghaiDateTime } from "@/lib/datetime";
 
 const endpointOptions = [
@@ -19,9 +19,8 @@ const endpointOptions = [
   { label: "搜索", value: "/v1/search" },
 ];
 
-const modelSuggestions = [
+const defaultModelSuggestions = [
   "gpt-image-2",
-  "codex-gpt-image-2",
   "auto",
   "gpt-5",
   "gpt-5-mini",
@@ -67,6 +66,7 @@ export function UserKeysCard() {
   const [editName, setEditName] = useState("");
   const [editKey, setEditKey] = useState("");
   const [editLimits, setEditLimits] = useState<UserKey["limits"]>(emptyLimits);
+  const [modelSuggestions, setModelSuggestions] = useState(defaultModelSuggestions);
 
   const load = async () => {
     setIsLoading(true);
@@ -86,6 +86,12 @@ export function UserKeysCard() {
     }
     didLoadRef.current = true;
     void load();
+    void fetchModels()
+      .then((result) => {
+        const imageModels = (result.data || []).map((model) => model.id).filter(Boolean);
+        setModelSuggestions(Array.from(new Set([...imageModels, ...defaultModelSuggestions])));
+      })
+      .catch(() => undefined);
   }, []);
 
   const handleCreate = async () => {

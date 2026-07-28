@@ -80,6 +80,31 @@ func TestSummaryAggregatesLongRuntimeWindow(t *testing.T) {
 	}
 	if series := runtime["series"].([]map[string]any); len(series) != 30 {
 		t.Fatalf("series length=%d", len(series))
+	} else if series[len(series)-1]["total"] != 1 {
+		t.Fatalf("latest series point=%#v", series[len(series)-1])
+	}
+	totals := runtime["totals"].(map[string]int)
+	if totals["success"] != 1 || totals["failed"] != 1 {
+		t.Fatalf("totals=%#v", totals)
+	}
+}
+
+func TestSummaryRangeUsesExactBounds(t *testing.T) {
+	svc := NewService("")
+	start := time.Date(2026, 7, 1, 0, 0, 0, 0, time.Local)
+	end := start.Add(15 * 24 * time.Hour)
+	svc.now = func() time.Time { return end }
+	svc.Record(Call{Time: start.Add(-time.Minute), Status: "success"})
+	svc.Record(Call{Time: start.Add(2 * time.Hour), Status: "success"})
+	svc.Record(Call{Time: end.Add(-time.Hour), Status: "failed"})
+	svc.Record(Call{Time: end.Add(time.Minute), Status: "failed"})
+
+	runtime := svc.SummaryRange(start, end)["runtime"].(map[string]any)
+	if runtime["window_minutes"] != 15*24*60 || runtime["bucket_minutes"] != 24*60 {
+		t.Fatalf("runtime=%#v", runtime)
+	}
+	if series := runtime["series"].([]map[string]any); len(series) != 15 {
+		t.Fatalf("series length=%d", len(series))
 	}
 	totals := runtime["totals"].(map[string]int)
 	if totals["success"] != 1 || totals["failed"] != 1 {

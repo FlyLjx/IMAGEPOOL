@@ -7,25 +7,6 @@ export type AuthRole = "admin" | "user";
 export type ProxyRuntimeEgressMode = "direct" | "single_proxy";
 export type ProxyRuntimeClearanceMode = "none" | "manual" | "flaresolverr";
 
-export type BarkNotificationSettings = {
-  enabled: boolean;
-  server_url: string;
-  device_key: string;
-  title_prefix: string;
-  group: string;
-  level: "active" | "timeSensitive" | "passive" | "critical" | string;
-  timeout_secs: number | string;
-  min_interval_seconds: number | string;
-  notify_failed_calls: boolean;
-  notify_register: boolean;
-  notify_register_errors_only: boolean;
-  notify_auto_refill: boolean;
-};
-
-export type NotificationSettings = {
-  bark: BarkNotificationSettings;
-};
-
 export type ProxyRuntimeSettings = {
   enabled: boolean;
   egress_mode: ProxyRuntimeEgressMode;
@@ -72,15 +53,21 @@ export type ClearanceTestResult = {
 
 export type Account = {
   access_token: string;
+  account_ref?: string | null;
   type: AccountType;
   source_type?: string | null;
+  provider?: string | null;
   status: AccountStatus;
+  disabled?: boolean;
   quota: number;
   image_quota_total?: number;
   usage?: unknown;
   image_quota_unknown?: boolean;
   email?: string | null;
   has_password?: boolean;
+  login_state?: string | null;
+  login_message?: string | null;
+  last_error?: string | null;
   user_id?: string | null;
   limits_progress?: Array<{
     feature_name?: string;
@@ -124,7 +111,7 @@ export type Account = {
 };
 
 export type AccountImportPayload = {
-  access_token: string;
+  access_token?: string;
   accessToken?: string;
   type?: string;
   export_type?: string;
@@ -163,18 +150,24 @@ export type ChatGPTWebDebugResponse = {
   body: unknown;
 };
 
-type AccountListResponse = {
+export type AccountListResponse = {
   items: Account[];
 };
 
 type ModelListResponse = {
   object: string;
   data: Model[];
+  features?: {
+    image_super_resolution?: boolean;
+    image_super_resolution_available?: boolean;
+    image_restoration?: boolean;
+  };
 };
 
-type AccountMutationResponse = {
+export type AccountMutationResponse = {
   items: Account[];
   added?: number;
+  updated?: number;
   skipped?: number;
   removed?: number;
   refreshed?: number;
@@ -200,16 +193,17 @@ export type RefreshProgressResponse = {
   results?: Array<{ token: string; email?: string; status: string; quota?: number; error?: string | null }>;
 };
 
-type AccountUpdateResponse = {
+export type AccountUpdateResponse = {
   item: Account;
   items: Account[];
 };
 
-type AccountImageTestResponse = {
+export type AccountImageTestResponse = {
   ok: boolean;
   created?: number;
   image_count?: number;
   task_id?: string;
+  status?: "queued" | "running" | "success" | "error";
   error?: string;
   items: Account[];
 };
@@ -243,6 +237,9 @@ export type SettingsConfig = {
   image_parallel_generation?: boolean;
   image_settle_enabled?: boolean;
   image_check_before_hit_enabled?: boolean;
+	image_super_resolution_enabled?: boolean;
+	image_restoration_enabled?: boolean;
+	image_postprocess_timeout_secs?: number | string;
   image_settle_secs?: number | string;
   image_timeout_retry_secs?: number | string;
   auto_remove_invalid_accounts?: boolean;
@@ -252,8 +249,6 @@ export type SettingsConfig = {
   auto_refill_threshold_percent?: number | string;
   auto_refill_target_available?: number | string;
   auto_refill_interval_minutes?: number | string;
-  log_levels?: string[];
-  notifications?: NotificationSettings;
   proxy_runtime?: ProxyRuntimeSettings;
   [key: string]: unknown;
 };
@@ -511,6 +506,63 @@ export type DashboardTodayCalls = {
   recent_failed?: DashboardRecentFailedCall[];
 };
 
+export type PostprocessTask = {
+  id: string;
+  parent_task_id?: string;
+  owner_id?: string;
+  status: "queued" | "running" | "success" | "skipped" | "error";
+  model?: string;
+  requested_size?: string;
+  hd_repair?: boolean;
+  super_resolution?: boolean;
+  force_super_resolution?: boolean;
+  restored?: boolean;
+  super_resolved?: boolean;
+  skipped?: boolean;
+  input_bytes?: number;
+  output_bytes?: number;
+  input_image_path?: string;
+  output_image_path?: string;
+  created_at: string;
+  started_at?: string;
+  finished_at?: string;
+  updated_at: string;
+  duration_ms?: number;
+  error?: string;
+};
+
+export type PostprocessTaskListResponse = {
+  items: PostprocessTask[];
+  page: number;
+  page_size: number;
+  total: number;
+  has_more: boolean;
+};
+
+export type DashboardAccountSummary = {
+  total: number;
+  cumulative_total?: number;
+  active: number;
+  limited: number;
+  abnormal: number;
+  disabled: number;
+  cooling: number;
+  total_quota: number;
+  unlimited_quota_count: number;
+  total_success: number;
+  total_fail: number;
+  recent_success_rate?: number | null;
+  by_type: Record<string, number>;
+  by_error_type: Record<string, number>;
+  proxy_stats: {
+    accounts: number;
+    success: number;
+    fail: number;
+    cooling: number;
+    by_error_type: Record<string, number>;
+  };
+};
+
 export type DashboardSummary = {
   version: string;
   generated_at: string;
@@ -532,29 +584,7 @@ export type DashboardSummary = {
       [key: string]: unknown;
     };
   };
-  accounts: {
-    total: number;
-    cumulative_total?: number;
-    active: number;
-    limited: number;
-    abnormal: number;
-    disabled: number;
-    cooling: number;
-    total_quota: number;
-    unlimited_quota_count: number;
-    total_success: number;
-    total_fail: number;
-    recent_success_rate?: number | null;
-    by_type: Record<string, number>;
-    by_error_type: Record<string, number>;
-    proxy_stats: {
-      accounts: number;
-      success: number;
-      fail: number;
-      cooling: number;
-      by_error_type: Record<string, number>;
-    };
-  };
+  accounts: DashboardAccountSummary;
   auth_keys: {
     users: number;
     enabled_users: number;
@@ -584,6 +614,7 @@ export type DashboardSummary = {
       series: Array<{
         time: string;
         label: string;
+        total?: number;
         success: number;
         failed: number;
       }>;
@@ -609,6 +640,59 @@ export type DashboardSummary = {
     by_status: Record<string, number>;
     by_mode: Record<string, number>;
     recent: ImageTask[];
+  };
+};
+
+export type SchedulerPoolStats = {
+  total: number;
+  usable: number;
+  dispatchable: number;
+  idle: number;
+  leased: number;
+  cooling: number;
+  limited: number;
+  invalid: number;
+  recovering: number;
+  abnormal: number;
+  disabled: number;
+  dead: number;
+  next_cooldown_ends_at?: string;
+};
+
+export type SchedulerDiagnostics = {
+  generated_at: string;
+  tasks: {
+    queue_depth: number;
+    queue_capacity: number;
+    active_workers: number;
+    worker_limit: number;
+    memory_total: number;
+    by_status: Record<string, number>;
+    accepting: boolean;
+  };
+  gpt: SchedulerPoolStats;
+  postprocess: {
+    enabled: boolean;
+    super_resolution_enabled: boolean;
+    restoration_enabled: boolean;
+    queue_depth: number;
+    queue_capacity: number;
+    active_workers: number;
+    worker_limit: number;
+    worker_running: boolean;
+    processed: number;
+    failed: number;
+    restored: number;
+    super_resolved: number;
+    skipped: number;
+    last_error?: string;
+  };
+  callbacks: {
+    delivered: number;
+    failed: number;
+    attempts: number;
+    last_error?: string;
+    last_delivery_at?: string;
   };
 };
 
@@ -732,12 +816,23 @@ export async function fetchModels() {
   return httpRequest<ModelListResponse>("/v1/models");
 }
 
-export async function fetchDashboard(runtimeWindowMinutes = 60) {
-  return httpRequest<DashboardSummary>(`/api/dashboard?runtime_window_minutes=${encodeURIComponent(String(runtimeWindowMinutes))}`);
+export async function fetchDashboard(runtimeWindowMinutes = 7 * 24 * 60, range?: { start: string; end: string } | null) {
+  const params = new URLSearchParams();
+  if (range) {
+    params.set("runtime_start", range.start);
+    params.set("runtime_end", range.end);
+  } else {
+    params.set("runtime_window_minutes", String(runtimeWindowMinutes));
+  }
+  return httpRequest<DashboardSummary>(`/api/dashboard?${params.toString()}`);
 }
 
 export async function fetchSystemLoad() {
   return httpRequest<SystemLoad>("/api/system/load");
+}
+
+export async function fetchSchedulerDiagnostics() {
+  return httpRequest<SchedulerDiagnostics>(`/api/diagnostics/scheduler?_t=${Date.now()}`);
 }
 
 export async function fetchLatestVersion(currentVersion: string) {
@@ -832,10 +927,10 @@ export async function updateAccount(
   });
 }
 
-export async function testAccountImage(accessToken: string) {
+export async function testAccountImage(accessToken: string, model: ImageModel, prompt: string) {
   return httpRequest<AccountImageTestResponse>("/api/accounts/test-image", {
     method: "POST",
-    body: { access_token: accessToken },
+    body: { access_token: accessToken, model, prompt },
   });
 }
 
@@ -857,7 +952,7 @@ export async function generateImage(prompt: string, model?: ImageModel, size?: s
   );
 }
 
-export async function editImage(files: File | File[], prompt: string, model?: ImageModel, size?: string, quality = "auto", outputFormat?: string, responseFormat?: string) {
+export async function editImage(files: File | File[], prompt: string, model?: ImageModel, size?: string, quality = "auto", outputFormat?: string, responseFormat = "b64_json") {
   const formData = new FormData();
   const uploadFiles = Array.isArray(files) ? files : [files];
 
@@ -889,7 +984,7 @@ export async function editImage(files: File | File[], prompt: string, model?: Im
   );
 }
 
-export async function createImageGenerationTask(clientTaskId: string, prompt: string, model?: ImageModel, size?: string, quality = "auto", outputFormat?: string, responseFormat?: string) {
+export async function createImageGenerationTask(clientTaskId: string, prompt: string, model?: ImageModel, size?: string, quality = "auto", outputFormat?: string, responseFormat = "b64_json", hdRepair = false) {
   return httpRequest<ImageTask>("/api/image-tasks/generations", {
     method: "POST",
     body: {
@@ -900,6 +995,7 @@ export async function createImageGenerationTask(clientTaskId: string, prompt: st
       quality,
       ...(responseFormat ? { response_format: responseFormat } : {}),
       ...(outputFormat ? { output_format: outputFormat } : {}),
+		hd_repair: hdRepair,
     },
   });
 }
@@ -912,7 +1008,8 @@ export async function createImageEditTask(
   size?: string,
   quality = "auto",
   outputFormat?: string,
-  responseFormat?: string,
+  responseFormat = "b64_json",
+	hdRepair = false,
 ) {
   const formData = new FormData();
   const uploadFiles = Array.isArray(files) ? files : [files];
@@ -935,6 +1032,7 @@ export async function createImageEditTask(
   if (outputFormat) {
     formData.append("output_format", outputFormat);
   }
+	formData.append("hd_repair", String(hdRepair));
 
   return httpRequest<ImageTask>("/api/image-tasks/edits", {
     method: "POST",
@@ -961,6 +1059,14 @@ export async function fetchImageTaskHistory(options: { page?: number; pageSize?:
   }
   params.set("_t", String(Date.now()));
   return httpRequest<ImageTaskListResponse>(`/api/image-tasks/history?${params.toString()}`);
+}
+
+export async function fetchPostprocessTaskHistory(options: { page?: number; pageSize?: number } = {}) {
+  const params = new URLSearchParams();
+  params.set("page", String(options.page || 1));
+  params.set("page_size", String(options.pageSize || 50));
+  params.set("_t", String(Date.now()));
+  return httpRequest<PostprocessTaskListResponse>(`/api/postprocess-tasks/history?${params.toString()}`);
 }
 
 export async function fetchImageTaskStatus(taskId: string) {
@@ -1001,13 +1107,6 @@ export async function updateSettingsConfig(settings: Partial<SettingsConfig>) {
   return httpRequest<{ config: SettingsConfig }>("/api/settings", {
     method: "POST",
     body: settings,
-  });
-}
-
-export async function testBarkNotification() {
-  return httpRequest<{ result: { ok: boolean; status: number; latency_ms?: number; error?: string } }>("/api/notifications/bark/test", {
-    method: "POST",
-    body: {},
   });
 }
 
@@ -1076,13 +1175,9 @@ export async function fetchImageStorage() {
   return httpRequest<ImageStorageStats>("/api/images/storage");
 }
 
-export async function compressAllImages() {
-  return httpRequest<{ compressed: number; saved_bytes: number; saved_mb: number }>("/api/images/storage/compress", { method: "POST" });
-}
-
-export async function deleteToTarget(targetFreeMb: number) {
-  return httpRequest<{ removed: number; freed_mb: number; done: boolean }>(
-    `/api/images/storage/cleanup-to-target?target_free_mb=${targetFreeMb}&dry_run=false`,
+export async function releaseImagesBeforeToday() {
+  return httpRequest<{ removed: number; freed_bytes: number; freed_mb: number; cutoff: string }>(
+    "/api/images/storage/release-before-today",
     { method: "POST" },
   );
 }

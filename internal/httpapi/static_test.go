@@ -24,7 +24,7 @@ func TestStaticFilesServesRoutesAndDoesNotStealAPI(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, test.path, nil)
 		req.Header.Set("Accept", "text/html")
 		response := httptest.NewRecorder()
-		if !files.Serve(response, req) || response.Body.String() != test.want {
+		if !files.Serve(response, req) || response.Body.String() != test.want || response.Header().Get("Cache-Control") != "no-store" {
 			t.Fatalf("path=%s status=%d body=%q", test.path, response.Code, response.Body.String())
 		}
 	}

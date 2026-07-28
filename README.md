@@ -19,7 +19,7 @@
 - 异步图片任务：`GET /api/image-tasks`、`POST /api/image-tasks/generations`、`POST /api/image-tasks/edits`、`GET /api/image-tasks/{id}/status`
 - 管理接口：账号池、用户 Key、配置、运行状况、日志、图片与标签、代理运行时设置。
 
-账号导入支持 OpenAI OAuth PKCE：管理员在账号导入页打开授权 URL，完成登录后粘贴 callback URL 即可保存 access token、refresh token 和 id token。Bark 设置可通过 `/api/notifications/bark/test` 验证；FlareSolverr 模式可通过 clearance 测试接口刷新并保存通行 Cookie。
+账号导入支持 OpenAI OAuth PKCE：管理员在账号导入页打开授权 URL，完成登录后粘贴 callback URL 即可保存 access token、refresh token 和 id token。FlareSolverr 模式可通过 clearance 测试接口刷新并保存通行 Cookie。
 
 普通用户只能访问自己的异步图片任务；管理员可以查看全部任务。每次提交都会创建新的任务 ID，不会因为 `client_task_id` 相同而复用任务。
 

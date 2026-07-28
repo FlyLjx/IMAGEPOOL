@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Button, Card, Empty, Image, Input, Modal, Progress, Select, Tag, Tooltip, Typography } from "antd";
+import { Button, Card, Checkbox, Empty, Image, Input, Modal, Progress, Select, Tag, Tooltip, Typography } from "antd";
 import {
   CheckCircle2,
   CircleAlert,
@@ -19,6 +19,7 @@ import { toast } from "sonner";
 import {
   createImageEditTask,
   createImageGenerationTask,
+  fetchModels,
   fetchImageTaskStatus,
   fetchImageTasks,
   type ImageTask,
@@ -27,7 +28,7 @@ import {
 import { formatShanghaiDateTime } from "@/lib/datetime";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 
-const MODEL_OPTIONS = ["gpt-image-2", "codex-gpt-image-2", "plus-codex-gpt-image-2"];
+const DEFAULT_MODEL_OPTIONS = ["gpt-image-2"];
 const SIZE_OPTIONS = ["1024x1024", "1536x1024", "1024x1536"];
 const QUALITY_OPTIONS = ["auto", "low", "medium", "high"];
 const MAX_REFERENCE_FILES = 4;
@@ -71,6 +72,10 @@ function detectImageMimeTypeFromBase64(value?: string) {
   if (head.startsWith("UklGR")) return "image/webp";
   if (head.startsWith("R0lGOD")) return "image/gif";
   return "";
+}
+
+function uniqueModelIDs(ids: string[]) {
+  return Array.from(new Set(ids.map((item) => item.trim()).filter(Boolean)));
 }
 
 function statusTone(status: ImageTask["status"]) {
@@ -142,9 +147,13 @@ function TaskStatusModal({ task, onClose }: { task: ImageTask | null; onClose: (
 
 function ImageWorkspace() {
   const [prompt, setPrompt] = useState("");
-  const [model, setModel] = useState(MODEL_OPTIONS[0]);
+  const [model, setModel] = useState(DEFAULT_MODEL_OPTIONS[0]);
+  const [modelOptions, setModelOptions] = useState(DEFAULT_MODEL_OPTIONS);
+  const [isLoadingModels, setIsLoadingModels] = useState(false);
   const [size, setSize] = useState(SIZE_OPTIONS[0]);
   const [quality, setQuality] = useState("auto");
+	const [restorationAvailable, setRestorationAvailable] = useState(false);
+	const [hdRepair, setHDRepair] = useState(false);
   const [references, setReferences] = useState<File[]>([]);
   const [tasks, setTasks] = useState<ImageTask[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -184,6 +193,32 @@ function ImageWorkspace() {
     void loadTasks();
   }, [loadTasks]);
 
+  useEffect(() => {
+    let active = true;
+    const loadModels = async () => {
+      setIsLoadingModels(true);
+      try {
+        const result = await fetchModels();
+				setRestorationAvailable(Boolean(result.features?.image_restoration));
+        const ids = uniqueModelIDs((result.data || []).map((item) => item.id));
+        if (active && ids.length > 0) {
+          setModelOptions(ids);
+          setModel((current) => (ids.includes(current) ? current : ids[0]));
+        }
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "加载模型列表失败");
+      } finally {
+        if (active) {
+          setIsLoadingModels(false);
+        }
+      }
+    };
+    void loadModels();
+    return () => {
+      active = false;
+    };
+  }, []);
+
   const hasActiveTask = tasks.some((task) => task.status === "queued" || task.status === "running");
   useEffect(() => {
     if (!hasActiveTask) return;
@@ -205,6 +240,9 @@ function ImageWorkspace() {
   const completedTasks = useMemo(() => tasks.filter((task) => task.status === "success"), [tasks]);
   const activeTasks = useMemo(() => tasks.filter((task) => task.status === "queued" || task.status === "running"), [tasks]);
   const failedTasks = useMemo(() => tasks.filter((task) => task.status === "error").slice(0, 5), [tasks]);
+  const modelSelectOptions = useMemo(() => {
+    return [{ label: "GPT号池模型", options: modelOptions.map((value) => ({ value, label: value })) }];
+  }, [modelOptions]);
 
   const addReferences = (files: FileList | null) => {
     if (!files) return;
@@ -228,8 +266,8 @@ function ImageWorkspace() {
     try {
       const clientTaskID = newClientTaskID();
       const task = references.length > 0
-        ? await createImageEditTask(clientTaskID, references, cleanPrompt, model, size, quality)
-        : await createImageGenerationTask(clientTaskID, cleanPrompt, model, size, quality);
+				? await createImageEditTask(clientTaskID, references, cleanPrompt, model, size, quality, undefined, "b64_json", hdRepair)
+				: await createImageGenerationTask(clientTaskID, cleanPrompt, model, size, quality, undefined, "b64_json", hdRepair);
       setTasks((current) => [task, ...current.filter((item) => item.id !== task.id)]);
       toast.success(references.length > 0 ? "参考图任务已提交" : "生图任务已提交");
     } catch (error) {
@@ -257,10 +295,17 @@ function ImageWorkspace() {
               <Input.TextArea value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder="描述你想生成或修改的图片" autoSize={{ minRows: 6, maxRows: 12 }} maxLength={4000} showCount />
             </div>
             <div className="grid gap-3 sm:grid-cols-3">
-              <label className="text-sm font-medium text-slate-700">模型<Select className="mt-1.5 w-full" value={model} options={MODEL_OPTIONS.map((value) => ({ value, label: value }))} onChange={setModel} /></label>
+              <label className="text-sm font-medium text-slate-700">模型<Select className="mt-1.5 w-full" value={model} options={modelSelectOptions} onChange={setModel} loading={isLoadingModels} /></label>
               <label className="text-sm font-medium text-slate-700">尺寸<Select className="mt-1.5 w-full" value={size} options={SIZE_OPTIONS.map((value) => ({ value, label: value }))} onChange={setSize} /></label>
               <label className="text-sm font-medium text-slate-700">质量<Select className="mt-1.5 w-full" value={quality} options={QUALITY_OPTIONS.map((value) => ({ value, label: value }))} onChange={setQuality} /></label>
             </div>
+						{restorationAvailable ? (
+							<div className="flex items-center border-y border-slate-100 py-3">
+								<Checkbox checked={hdRepair} onChange={(event) => setHDRepair(event.target.checked)}>
+									高清修复
+								</Checkbox>
+							</div>
+						) : null}
             <div>
               <div className="mb-2 flex items-center justify-between gap-3"><label className="text-sm font-medium text-slate-700">参考图</label><span className="text-xs text-slate-400">可选，添加后将以图生图方式处理</span></div>
               <input ref={fileInput} className="hidden" type="file" accept="image/*" multiple onChange={(event) => addReferences(event.target.files)} />

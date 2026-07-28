@@ -229,8 +229,23 @@ func (s *Service) Summary(window time.Duration) map[string]any {
 	if window <= 0 {
 		window = time.Hour
 	}
+	end := s.now()
+	return s.summaryRange(end.Add(-window), end)
+}
+
+func (s *Service) SummaryRange(start, end time.Time) map[string]any {
 	now := s.now()
-	start := now.Add(-window)
+	if end.IsZero() || end.After(now) {
+		end = now
+	}
+	if start.IsZero() || !start.Before(end) {
+		start = end.Add(-time.Hour)
+	}
+	return s.summaryRange(start, end)
+}
+
+func (s *Service) summaryRange(start, end time.Time) map[string]any {
+	window := end.Sub(start)
 	bucket := runtimeBucket(window)
 	items := s.List("", "", "")
 	byStatus := map[string]int{}
@@ -246,7 +261,7 @@ func (s *Service) Summary(window time.Duration) map[string]any {
 		if call.Model != "" {
 			byModel[call.Model]++
 		}
-		if call.Time.Before(start) {
+		if call.Time.Before(start) || call.Time.After(end) {
 			continue
 		}
 		category := callCategory(call)
@@ -278,12 +293,13 @@ func (s *Service) Summary(window time.Duration) map[string]any {
 		bucketCount = 1
 	}
 	series := make([]map[string]any, 0, bucketCount)
-	lastBucket := runtimeBucketTime(now, bucket)
+	lastBucket := runtimeBucketTime(end, bucket)
 	for offset := bucketCount - 1; offset >= 0; offset-- {
 		at := lastBucket.Add(-time.Duration(offset) * bucket)
 		key := at.Format(time.RFC3339)
 		counts := bucketCounts[key]
-		series = append(series, map[string]any{"time": at, "label": runtimeBucketLabel(at, window, bucket), "success": counts["success"], "failed": counts["failed"]})
+		bucketTotal := counts["success"] + counts["failed"] + counts["canceled"] + counts["rejected"] + counts["running"] + counts["other"]
+		series = append(series, map[string]any{"time": at, "label": runtimeBucketLabel(at, window, bucket), "total": bucketTotal, "success": counts["success"], "failed": counts["failed"]})
 	}
 	statusPie := []map[string]any{}
 	for _, status := range []string{"success", "failed", "canceled", "rejected", "running", "other"} {
@@ -300,8 +316,8 @@ func (s *Service) Summary(window time.Duration) map[string]any {
 		errorRate = float64(totals["failed"]) * 100 / float64(availabilityTotal)
 	}
 	return map[string]any{
-		"date": now.Local().Format("2006-01-02"), "total": len(items), "by_status": byStatus, "by_endpoint": byEndpoint, "by_model": byModel,
-		"runtime":       map[string]any{"window_minutes": int(window / time.Minute), "bucket_minutes": int(bucket / time.Minute), "start_time": start, "end_time": now, "total": total, "success_rate": successRate, "error_rate": errorRate, "totals": totals, "series": series, "status_pie": statusPie, "error_reasons": reasons},
+		"date": end.Local().Format("2006-01-02"), "total": len(items), "by_status": byStatus, "by_endpoint": byEndpoint, "by_model": byModel,
+		"runtime":       map[string]any{"window_minutes": int(window / time.Minute), "bucket_minutes": int(bucket / time.Minute), "start_time": start, "end_time": end, "total": total, "success_rate": successRate, "error_rate": errorRate, "totals": totals, "series": series, "status_pie": statusPie, "error_reasons": reasons},
 		"recent_failed": recentFailed,
 	}
 }
@@ -493,10 +509,10 @@ func runtimeBucket(window time.Duration) time.Duration {
 		return time.Minute
 	case window <= 24*time.Hour:
 		return 15 * time.Minute
-	case window <= 7*24*time.Hour:
-		return time.Hour
-	default:
+	case window > 24*time.Hour:
 		return 24 * time.Hour
+	default:
+		return time.Hour
 	}
 }
 

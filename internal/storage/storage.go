@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"image"
 	"image/color"
@@ -83,7 +84,7 @@ func (s *Service) List(baseURL, startDate, endDate string) ([]ImageItem, error) 
 	}
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil || d == nil || d.IsDir() {
-			if d != nil && d.IsDir() && d.Name() == ".thumbnails" {
+			if d != nil && d.IsDir() && (d.Name() == ".thumbnails" || d.Name() == ".postprocess-comparisons") {
 				return filepath.SkipDir
 			}
 			return err
@@ -264,42 +265,61 @@ func (s *Service) Compress() (compressed int, savedBytes int64, err error) {
 	return compressed, savedBytes, nil
 }
 
-// CleanupToFreeMB removes the oldest cached images until the requested free space is reached.
-func (s *Service) CleanupToFreeMB(targetMB int64) (removed int, freedBytes int64, removedPaths []string, done bool, err error) {
-	if targetMB <= 0 {
-		return 0, 0, nil, false, fmt.Errorf("target_free_mb must be greater than zero")
+// CleanupOlderThan removes cached images whose modification time is before cutoff.
+func (s *Service) CleanupOlderThan(cutoff time.Time) (removed int, freedBytes int64, removedPaths []string, err error) {
+	if cutoff.IsZero() {
+		return 0, 0, nil, fmt.Errorf("cleanup cutoff is required")
 	}
-	if err := os.MkdirAll(s.root, 0o755); err != nil {
-		return 0, 0, nil, false, err
+	root := filepath.Clean(s.root)
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		return 0, 0, nil, err
 	}
-	_, _, free, err := diskUsage(s.root)
-	if err != nil {
-		return 0, 0, nil, false, err
-	}
-	targetBytes := targetMB * 1024 * 1024
-	if free >= targetBytes {
-		return 0, 0, nil, true, nil
-	}
-	items, err := s.List("", "", "")
-	if err != nil {
-		return 0, 0, nil, false, err
-	}
-	sort.Slice(items, func(i, j int) bool { return items[i].CreatedAt.Before(items[j].CreatedAt) })
-	for _, item := range items {
-		path := filepath.Join(s.root, filepath.FromSlash(item.Rel))
+	var cleanupErrors []error
+	walkErr := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			cleanupErrors = append(cleanupErrors, walkErr)
+			return nil
+		}
+		if entry.IsDir() {
+			if path != root && entry.Name() == ".thumbnails" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !isImageName(entry.Name()) {
+			return nil
+		}
+		info, infoErr := entry.Info()
+		if infoErr != nil {
+			cleanupErrors = append(cleanupErrors, infoErr)
+			return nil
+		}
+		if !info.ModTime().Before(cutoff) {
+			return nil
+		}
+		rel, relErr := filepath.Rel(root, path)
+		if relErr != nil {
+			cleanupErrors = append(cleanupErrors, relErr)
+			return nil
+		}
+		rel = filepath.ToSlash(rel)
 		if removeErr := os.Remove(path); removeErr != nil {
-			continue
+			cleanupErrors = append(cleanupErrors, removeErr)
+			return nil
 		}
-		_ = os.Remove(s.thumbnailPath(item.Rel))
+		freedBytes += info.Size()
+		if strings.HasPrefix(rel, ".postprocess-comparisons/") {
+			return nil
+		}
+		_ = os.Remove(s.thumbnailPath(rel))
 		removed++
-		freedBytes += item.Size
-		removedPaths = append(removedPaths, item.Rel)
-		free += item.Size
-		if free >= targetBytes {
-			return removed, freedBytes, removedPaths, true, nil
-		}
+		removedPaths = append(removedPaths, rel)
+		return nil
+	})
+	if walkErr != nil {
+		cleanupErrors = append(cleanupErrors, walkErr)
 	}
-	return removed, freedBytes, removedPaths, false, nil
+	return removed, freedBytes, removedPaths, errors.Join(cleanupErrors...)
 }
 
 func imageDimensionsFromFile(path string) (int, int) {

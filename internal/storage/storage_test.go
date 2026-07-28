@@ -8,11 +8,12 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"imagepool/internal/config"
 )
 
-func TestCompressAndCleanupOperateOnlyOnImageRoot(t *testing.T) {
+func TestCompressOperatesOnlyOnImageRoot(t *testing.T) {
 	cfg := config.Default()
 	cfg.ImageOutputDir = t.TempDir()
 	service := NewService(cfg)
@@ -42,12 +43,54 @@ func TestCompressAndCleanupOperateOnlyOnImageRoot(t *testing.T) {
 	if decodeErr != nil {
 		t.Fatalf("compressed image is invalid: %v", decodeErr)
 	}
-	removed, _, paths, _, err := service.CleanupToFreeMB(1_000_000_000)
+}
+
+func TestCleanupOlderThanRemovesOnlyExpiredImagesAndThumbnails(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.ImageOutputDir = dir
+	service := NewService(cfg)
+	now := time.Date(2026, 7, 27, 12, 0, 0, 0, time.Local)
+	oldPath := filepath.Join(dir, "2026", "07", "01", "old.png")
+	freshPath := filepath.Join(dir, "2026", "07", "26", "fresh.png")
+	for _, path := range []string{oldPath, freshPath} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("png"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Chtimes(oldPath, now.Add(-8*24*time.Hour), now.Add(-8*24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(freshPath, now.Add(-6*24*time.Hour), now.Add(-6*24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	oldRel := filepath.ToSlash(filepath.Join("2026", "07", "01", "old.png"))
+	thumbnail := service.thumbnailPath(oldRel)
+	if err := os.MkdirAll(filepath.Dir(thumbnail), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(thumbnail, []byte("thumbnail"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	removed, freed, paths, err := service.CleanupOlderThan(now.Add(-7 * 24 * time.Hour))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if removed != 1 || len(paths) != 1 || paths[0] != first.Rel {
-		t.Fatalf("removed=%d paths=%#v", removed, paths)
+	if removed != 1 || freed != 3 || len(paths) != 1 || paths[0] != oldRel {
+		t.Fatalf("removed=%d freed=%d paths=%#v", removed, freed, paths)
+	}
+	if _, err := os.Stat(oldPath); !os.IsNotExist(err) {
+		t.Fatalf("expired image remains: %v", err)
+	}
+	if _, err := os.Stat(thumbnail); !os.IsNotExist(err) {
+		t.Fatalf("expired thumbnail remains: %v", err)
+	}
+	if _, err := os.Stat(freshPath); err != nil {
+		t.Fatalf("fresh image was removed: %v", err)
 	}
 }
 
@@ -61,6 +104,13 @@ func TestListOpenDelete(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(img, []byte("png"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	comparison := filepath.Join(dir, ".postprocess-comparisons", "pp_test", "before.png")
+	if err := os.MkdirAll(filepath.Dir(comparison), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(comparison, []byte("comparison"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	items, err := svc.List("http://localhost", "", "")

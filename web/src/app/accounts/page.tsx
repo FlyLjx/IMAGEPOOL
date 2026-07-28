@@ -13,6 +13,7 @@ import {
   Pagination as AntPagination,
   Progress as AntProgress,
   Row,
+  Segmented as AntSegmented,
   Select as AntSelect,
   Space,
   Spin,
@@ -451,6 +452,9 @@ function AccountsPageContent() {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [refreshingTokens, setRefreshingTokens] = useState<Set<string>>(new Set());
   const [testingImageTokens, setTestingImageTokens] = useState<Set<string>>(new Set());
+  const [testImageAccount, setTestImageAccount] = useState<Account | null>(null);
+  const [testImageModel, setTestImageModel] = useState("gpt-image-2");
+  const [testImagePrompt, setTestImagePrompt] = useState("Generate a simple small blue circle on a white background.");
   const [isDeleting, setIsDeleting] = useState(false);
   const [isUpdating, setIsUpdating] = useState(false);
   const [isRelogining, setIsRelogining] = useState(false);
@@ -631,6 +635,18 @@ function AccountsPageContent() {
   const abnormalTokens = useMemo(() => {
     return accounts.filter((item) => isAbnormalAccountStatus(item.status)).map((item) => item.access_token);
   }, [accounts]);
+
+  const imageTestModels = useMemo(() => {
+    const modelIDs = availableModels
+      .filter((model) => model.id.includes("image"))
+      .map((model) => model.id);
+    for (const modelID of ["gpt-image-2"]) {
+      if (!modelIDs.includes(modelID)) {
+        modelIDs.push(modelID);
+      }
+    }
+    return modelIDs;
+  }, [availableModels]);
 
   const handleDeleteTokens = async (tokens: string[]) => {
     if (tokens.length === 0) {
@@ -1002,14 +1018,33 @@ function AccountsPageContent() {
     }
   };
 
-  const handleTestAccountImage = async (account: Account) => {
+  const openTestAccountImageDialog = (account: Account) => {
+    const defaultModel = imageTestModels.includes("gpt-image-2")
+      ? "gpt-image-2"
+      : imageTestModels[0] ?? "gpt-image-2";
+    setTestImageModel(defaultModel);
+    setTestImagePrompt("Generate a simple small blue circle on a white background.");
+    setTestImageAccount(account);
+  };
+
+  const handleTestAccountImage = async () => {
+    const account = testImageAccount;
+    if (!account) {
+      return;
+    }
+    const prompt = testImagePrompt.trim();
+    if (!prompt) {
+      toast.error("请输入测试提示词");
+      return;
+    }
     setTestingImageTokens((prev) => new Set([...prev, account.access_token]));
     try {
-      const data = await testAccountImage(account.access_token);
+      const data = await testAccountImage(account.access_token, testImageModel, prompt);
       setAccounts(data.items);
       setSelectedIds((prev) => prev.filter((id) => data.items.some((item) => item.access_token === id)));
       if (data.ok) {
-        toast.success(`生图测试成功${data.image_count ? `，生成 ${data.image_count} 张` : ""}`);
+        toast.success(`${testImageModel} 生图测试成功${data.image_count ? `，生成 ${data.image_count} 张` : ""}`);
+        setTestImageAccount(null);
       } else {
         toast.error(`生图测试失败：${data.error || "未生成图片"}`);
       }
@@ -1272,13 +1307,16 @@ function AccountsPageContent() {
               }}
             />
           </Tooltip>
-          <AntButton
-            type="text"
-            size="small"
-            icon={<ImageIcon className={cn("size-4", testingImageTokens.has(account.access_token) ? "animate-pulse" : "")} />}
-            onClick={() => void handleTestAccountImage(account)}
-            disabled={testingImageTokens.has(account.access_token)}
-          />
+          <Tooltip title="测试生图">
+            <AntButton
+              type="text"
+              size="small"
+              aria-label="测试生图"
+              icon={<ImageIcon className={cn("size-4", testingImageTokens.has(account.access_token) ? "animate-pulse" : "")} />}
+              onClick={() => openTestAccountImageDialog(account)}
+              disabled={testingImageTokens.has(account.access_token)}
+            />
+          </Tooltip>
           <AntButton
             type="text"
             size="small"
@@ -1458,6 +1496,60 @@ function AccountsPageContent() {
               ))}
             </div>
           )}
+        </div>
+      </Modal>
+
+      <Modal
+        title="账号生图测试"
+        open={Boolean(testImageAccount)}
+        onCancel={() => setTestImageAccount(null)}
+        footer={[
+          <AntButton
+            key="cancel"
+            onClick={() => setTestImageAccount(null)}
+            disabled={Boolean(testImageAccount && testingImageTokens.has(testImageAccount.access_token))}
+          >
+            取消
+          </AntButton>,
+          <AntButton
+            key="submit"
+            type="primary"
+            icon={<ImageIcon className="size-4" />}
+            loading={Boolean(testImageAccount && testingImageTokens.has(testImageAccount.access_token))}
+            onClick={() => void handleTestAccountImage()}
+          >
+            开始测试
+          </AntButton>,
+        ]}
+      >
+        <div className="space-y-4 pt-2">
+          <div className="space-y-1">
+            <div className="text-xs text-slate-400">测试账号</div>
+            <div className="break-all text-sm font-medium text-slate-700">
+              {testImageAccount?.email || "未识别账号"}
+            </div>
+          </div>
+          <div className="space-y-2">
+            <label className="text-sm font-medium text-slate-700">测试模型</label>
+            <AntSegmented
+              block
+              value={testImageModel}
+              onChange={(value) => setTestImageModel(String(value))}
+              options={imageTestModels.map((modelID) => ({ label: modelID, value: modelID }))}
+              disabled={Boolean(testImageAccount && testingImageTokens.has(testImageAccount.access_token)) || isLoadingModels}
+            />
+          </div>
+          <div className="space-y-2">
+            <label className="text-sm font-medium text-slate-700">测试提示词</label>
+            <AntInput.TextArea
+              value={testImagePrompt}
+              onChange={(event) => setTestImagePrompt(event.target.value)}
+              placeholder="输入本次测试使用的生图提示词"
+              autoSize={{ minRows: 4, maxRows: 8 }}
+              maxLength={4000}
+              showCount
+            />
+          </div>
         </div>
       </Modal>
 

@@ -330,7 +330,7 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
         return;
       }
 
-      await submitTokens([account.access_token], "Codex 认证 JSON 导入完成", [account]);
+      await submitTokens([String(account.access_token || "").trim()], "Codex 认证 JSON 导入完成", [account]);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Codex 认证 JSON 解析失败";
       toast.error(message);

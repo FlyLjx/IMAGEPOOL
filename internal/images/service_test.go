@@ -10,6 +10,7 @@ import (
 	"image/color"
 	"image/png"
 	"net/url"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -24,6 +25,7 @@ import (
 type fakeBackend struct {
 	mu              sync.Mutex
 	calls           int
+	lastRequest     openaiweb.ImageRequest
 	errs            []error
 	modelErrs       map[string]error
 	modelTokens     []string
@@ -157,6 +159,7 @@ func setTaskTimeoutForTest(service *Service, timeout float64) {
 func (f *fakeBackend) GenerateImage(ctx context.Context, account accounts.Account, req openaiweb.ImageRequest) (openaiweb.ImageResult, error) {
 	f.mu.Lock()
 	f.calls++
+	f.lastRequest = req
 	call := f.calls
 	var err error
 	if len(f.errs) >= call {
@@ -168,6 +171,11 @@ func (f *fakeBackend) GenerateImage(ctx context.Context, account accounts.Accoun
 	}
 	return openaiweb.ImageResult{URLs: []string{"https://example.com/image.png"}, AccountEmail: account.Email, BackendModel: "gpt-5-5", ConversationID: "conv"}, nil
 }
+
+func (f *fakeBackend) DownloadImageFor(context.Context, accounts.Account, string) ([]byte, error) {
+	return []byte{0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a, 0x00}, nil
+}
+
 func (f *fakeBackend) ListModels(ctx context.Context, token string) ([]string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -523,8 +531,31 @@ func TestGenerateInteractiveChallengePreservesAccounts(t *testing.T) {
 
 func TestListModelsFallback(t *testing.T) {
 	models, err := NewService(config.Default(), accounts.NewStore(nil, ""), &fakeBackend{}).ListModels(context.Background())
-	if err != nil || len(models) == 0 {
-		t.Fatalf("models=%#v err=%v", models, err)
+	want := []string{"gpt-image-2", "gpt-image-2-2k"}
+	if err != nil || !reflect.DeepEqual(models, want) {
+		t.Fatalf("models=%#v want=%#v err=%v", models, want, err)
+	}
+}
+
+func TestGenerateUsesBaseUpstreamModelFor2KVariant(t *testing.T) {
+	store := accounts.NewStore([]accounts.Account{{AccessToken: "token", CreatedAt: 1}}, "")
+	backend := &fakeBackend{}
+	response, err := NewService(config.Default(), store, backend).Generate(context.Background(), Request{
+		Prompt: "draw",
+		Model:  "gpt-image-2-2k",
+		Size:   "1024x1536",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend.mu.Lock()
+	request := backend.lastRequest
+	backend.mu.Unlock()
+	if request.Model != "gpt-image-2" || request.Size != "1368x2048" || !request.SuperResolution {
+		t.Fatalf("upstream request=%#v", request)
+	}
+	if response.BackendModel != "gpt-image-2-2k" {
+		t.Fatalf("response model=%q", response.BackendModel)
 	}
 }
 
@@ -534,7 +565,7 @@ func TestGenerateCachesRemoteImageLocally(t *testing.T) {
 	store := accounts.NewStore([]accounts.Account{{AccessToken: "token", CreatedAt: 1}}, "")
 	backend := &cacheBackend{fakeBackend: &fakeBackend{}}
 	service := NewService(cfg, store, backend, storage.NewService(cfg))
-	response, err := service.Generate(context.Background(), Request{Prompt: "draw", OutputBaseURL: "https://pool.example"})
+	response, err := service.Generate(context.Background(), Request{Prompt: "draw", ResponseFormat: "url", OutputBaseURL: "https://pool.example"})
 	if err != nil || len(response.Data) != 1 {
 		t.Fatalf("response=%#v err=%v", response, err)
 	}
@@ -557,7 +588,7 @@ func TestGenerateConvertsCachedURLWhenOutputFormatIsSet(t *testing.T) {
 	store := accounts.NewStore([]accounts.Account{{AccessToken: "token", CreatedAt: 1}}, "")
 	backend := &cacheBackend{fakeBackend: &fakeBackend{}, data: testPNGBytes(t)}
 	service := NewService(cfg, store, backend, storage.NewService(cfg))
-	response, err := service.Generate(context.Background(), Request{Prompt: "draw", OutputBaseURL: "https://pool.example", OutputFormat: "jpeg"})
+	response, err := service.Generate(context.Background(), Request{Prompt: "draw", ResponseFormat: "url", OutputBaseURL: "https://pool.example", OutputFormat: "jpeg"})
 	if err != nil || len(response.Data) != 1 {
 		t.Fatalf("response=%#v err=%v", response, err)
 	}
@@ -590,6 +621,18 @@ func TestGenerateConvertsB64JSONWhenOutputFormatIsSet(t *testing.T) {
 	}
 	if response.Data[0].MimeType != "image/jpeg" || response.Data[0].Format != "jpeg" {
 		t.Fatalf("b64_json response must report converted format, got %#v", response.Data[0])
+	}
+}
+
+func TestGenerateDefaultsToB64JSON(t *testing.T) {
+	store := accounts.NewStore([]accounts.Account{{AccessToken: "token", CreatedAt: 1}}, "")
+	backend := &cacheBackend{fakeBackend: &fakeBackend{}, data: testPNGBytes(t)}
+	response, err := NewService(config.Default(), store, backend).Generate(context.Background(), Request{Prompt: "draw"})
+	if err != nil || len(response.Data) != 1 || response.Data[0].B64JSON == "" || response.Data[0].URL != "" {
+		t.Fatalf("response=%#v err=%v", response, err)
+	}
+	if backend.downloadedAccount.AccessToken != "token" {
+		t.Fatalf("download account=%#v", backend.downloadedAccount)
 	}
 }
 
@@ -699,7 +742,7 @@ func TestGenerateRemovesAccountAfterAuthenticatedCacheDownloadFailure(t *testing
 		fakeBackend: &fakeBackend{},
 		downloadErr: &openaiweb.UpstreamError{Path: "/backend-api/files/file/download", StatusCode: 401, Body: `{"error":{"code":"token_revoked"}}`},
 	}
-	response, err := NewService(cfg, store, backend, storage.NewService(cfg)).Generate(context.Background(), Request{Prompt: "draw"})
+	response, err := NewService(cfg, store, backend, storage.NewService(cfg)).Generate(context.Background(), Request{Prompt: "draw", ResponseFormat: "url"})
 	if err != nil || len(response.Data) != 1 || response.Data[0].URL != "https://example.com/image.png" {
 		t.Fatalf("response=%#v err=%v", response, err)
 	}
