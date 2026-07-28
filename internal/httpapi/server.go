@@ -1030,7 +1030,11 @@ func (s *Server) handleTaskList(w http.ResponseWriter, r *http.Request) {
 	items = publicTasks(items)
 	compact := strings.TrimSpace(r.URL.Query().Get("compact")) == "1"
 	if compact {
-		items = compactTaskList(items)
+		if strings.TrimSpace(r.URL.Query().Get("include_data")) == "1" {
+			items = compactTaskListWithData(items)
+		} else {
+			items = compactTaskList(items)
+		}
 	}
 	found := map[string]bool{}
 	for _, item := range items {
@@ -1078,7 +1082,11 @@ func (s *Server) handleTaskItem(w http.ResponseWriter, r *http.Request) {
 	identity, _ := auth.IdentityFromContext(r.Context())
 	if action == "status" && r.Method == http.MethodGet {
 		if task, ok := s.tasks.StatusForOwner(id, identity.ID, identity.IsAdmin()); ok {
-			writeJSON(w, http.StatusOK, publicTask(task))
+			task = publicTask(task)
+			if strings.TrimSpace(r.URL.Query().Get("compact")) == "1" {
+				task.Data = nil
+			}
+			writeJSON(w, http.StatusOK, task)
 			return
 		}
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": "task not found"})
@@ -2468,6 +2476,14 @@ func firstTasks(items []tasks.Task, limit int) []tasks.Task {
 // compactTaskList keeps list and dashboard responses small. Full logs remain
 // available from the per-task status endpoint when the operator opens a task.
 func compactTaskList(items []tasks.Task) []tasks.Task {
+	return compactTaskListResponse(items, false)
+}
+
+func compactTaskListWithData(items []tasks.Task) []tasks.Task {
+	return compactTaskListResponse(items, true)
+}
+
+func compactTaskListResponse(items []tasks.Task, includeData bool) []tasks.Task {
 	if len(items) == 0 {
 		return items
 	}
@@ -2475,6 +2491,9 @@ func compactTaskList(items []tasks.Task) []tasks.Task {
 	for i := range out {
 		out[i] = publicTask(out[i])
 		out[i].StatusLogs = nil
+		if !includeData {
+			out[i].Data = nil
+		}
 	}
 	return out
 }

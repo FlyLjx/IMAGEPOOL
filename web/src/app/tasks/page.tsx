@@ -149,7 +149,7 @@ function TasksContent() {
       setStatusLoading(true);
     }
     try {
-      const data = await fetchImageTaskStatus(taskId);
+      const data = await fetchImageTaskStatus(taskId, true);
       setStatusTask(data);
       setItems((prev) => prev.map((item) => (item.id === data.id ? { ...item, ...data, status_logs: item.status_logs } : item)));
     } catch (error) {

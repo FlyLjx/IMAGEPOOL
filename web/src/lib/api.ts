@@ -1049,6 +1049,7 @@ export async function fetchImageTasks(ids: string[]) {
     params.set("ids", ids.join(","));
   }
   params.set("compact", "1");
+  params.set("include_data", "1");
   params.set("_t", String(Date.now()));
   return httpRequest<ImageTaskListResponse>(`/api/image-tasks?${params.toString()}`);
 }
@@ -1072,8 +1073,11 @@ export async function fetchPostprocessTaskHistory(options: { page?: number; page
   return httpRequest<PostprocessTaskListResponse>(`/api/postprocess-tasks/history?${params.toString()}`);
 }
 
-export async function fetchImageTaskStatus(taskId: string) {
+export async function fetchImageTaskStatus(taskId: string, compact = false) {
   const params = new URLSearchParams({ _t: String(Date.now()) });
+  if (compact) {
+    params.set("compact", "1");
+  }
   return httpRequest<ImageTask>(`/api/image-tasks/${encodeURIComponent(taskId)}/status?${params.toString()}`);
 }
 

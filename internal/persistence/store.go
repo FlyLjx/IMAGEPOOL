@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -109,7 +110,13 @@ CREATE TABLE IF NOT EXISTS image_pool_collection_items (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   PRIMARY KEY(collection, id)
 );
-CREATE INDEX IF NOT EXISTS image_pool_collection_items_updated_at_idx ON image_pool_collection_items(collection, updated_at DESC);`)
+CREATE INDEX IF NOT EXISTS image_pool_collection_items_updated_at_idx ON image_pool_collection_items(collection, updated_at DESC);
+CREATE INDEX IF NOT EXISTS image_pool_collection_items_created_at_idx
+  ON image_pool_collection_items(collection, (NULLIF(value->>'created_at', '')) DESC NULLS LAST, updated_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS image_pool_collection_items_status_idx
+  ON image_pool_collection_items(collection, (value->>'status'), updated_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS image_pool_collection_items_owner_created_at_idx
+  ON image_pool_collection_items(collection, (COALESCE(value->>'owner_id', '')), (NULLIF(value->>'created_at', '')) DESC NULLS LAST, updated_at DESC, id DESC);`)
 	if err != nil {
 		return fmt.Errorf("migrate PostgreSQL schema: %w", err)
 	}
@@ -266,23 +273,45 @@ func (p *Postgres) LoadCollectionPage(ctx context.Context, collection string, pa
 	}
 	ownerID := strings.TrimSpace(page.OwnerID)
 	var total int
+	if page.AllowAll {
+		if err := p.pool.QueryRow(ctx, `
+SELECT COUNT(*)
+FROM image_pool_collection_items
+WHERE collection=$1`, collection).Scan(&total); err != nil {
+			return 0, err
+		}
+		rows, err := p.pool.Query(ctx, `
+SELECT value
+FROM image_pool_collection_items
+WHERE collection=$1
+ORDER BY NULLIF(value->>'created_at','') DESC NULLS LAST, updated_at DESC, id DESC
+LIMIT $2 OFFSET $3`, collection, limit, offset)
+		if err != nil {
+			return 0, err
+		}
+		return decodeCollectionPage(rows, collection, limit, total, dst)
+	}
 	if err := p.pool.QueryRow(ctx, `
 SELECT COUNT(*)
 FROM image_pool_collection_items
 WHERE collection=$1
-  AND ($2::bool OR COALESCE(value->>'owner_id','')=$3)`, collection, page.AllowAll, ownerID).Scan(&total); err != nil {
+  AND COALESCE(value->>'owner_id','')=$2`, collection, ownerID).Scan(&total); err != nil {
 		return 0, err
 	}
 	rows, err := p.pool.Query(ctx, `
 SELECT value
 FROM image_pool_collection_items
 WHERE collection=$1
-  AND ($2::bool OR COALESCE(value->>'owner_id','')=$3)
-ORDER BY COALESCE(NULLIF(value->>'created_at','')::timestamptz, updated_at) DESC, id DESC
-LIMIT $4 OFFSET $5`, collection, page.AllowAll, ownerID, limit, offset)
+  AND COALESCE(value->>'owner_id','')=$2
+ORDER BY NULLIF(value->>'created_at','') DESC NULLS LAST, updated_at DESC, id DESC
+LIMIT $3 OFFSET $4`, collection, ownerID, limit, offset)
 	if err != nil {
 		return 0, err
 	}
+	return decodeCollectionPage(rows, collection, limit, total, dst)
+}
+
+func decodeCollectionPage(rows pgx.Rows, collection string, limit, total int, dst any) (int, error) {
 	defer rows.Close()
 	items := make([]json.RawMessage, 0, limit)
 	for rows.Next() {

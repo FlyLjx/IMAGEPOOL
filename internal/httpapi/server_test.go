@@ -677,8 +677,52 @@ func TestCompactTaskListOmitsLogsAndLegacyAlias(t *testing.T) {
 	if compactResponse.StatusCode != http.StatusOK || len(compactPayload.Items) != 1 {
 		t.Fatalf("compact response status=%d payload=%#v", compactResponse.StatusCode, compactPayload)
 	}
-	if compactPayload.Tasks != nil || len(compactPayload.Items[0].StatusLogs) != 0 || compactPayload.Items[0].StatusLogCount == 0 {
+	if compactPayload.Tasks != nil || len(compactPayload.Items[0].StatusLogs) != 0 || compactPayload.Items[0].StatusLogCount == 0 || len(compactPayload.Items[0].Data) != 0 {
 		t.Fatalf("compact payload=%#v", compactPayload)
+	}
+	compactWithDataRequest, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/image-tasks?compact=1&include_data=1", nil)
+	compactWithDataRequest.Header.Set("Authorization", "Bearer k")
+	compactWithDataResponse, err := http.DefaultClient.Do(compactWithDataRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer compactWithDataResponse.Body.Close()
+	var compactWithDataPayload struct {
+		Items []tasks.Task `json:"items"`
+	}
+	if err := json.NewDecoder(compactWithDataResponse.Body).Decode(&compactWithDataPayload); err != nil {
+		t.Fatal(err)
+	}
+	if compactWithDataResponse.StatusCode != http.StatusOK || len(compactWithDataPayload.Items) != 1 || len(compactWithDataPayload.Items[0].StatusLogs) != 0 || len(compactWithDataPayload.Items[0].Data) == 0 {
+		t.Fatalf("compact response with data status=%d payload=%#v", compactWithDataResponse.StatusCode, compactWithDataPayload)
+	}
+	compactStatusRequest, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/image-tasks/"+compactPayload.Items[0].ID+"/status?compact=1", nil)
+	compactStatusRequest.Header.Set("Authorization", "Bearer k")
+	compactStatusResponse, err := http.DefaultClient.Do(compactStatusRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer compactStatusResponse.Body.Close()
+	var compactStatus tasks.Task
+	if err := json.NewDecoder(compactStatusResponse.Body).Decode(&compactStatus); err != nil {
+		t.Fatal(err)
+	}
+	if compactStatusResponse.StatusCode != http.StatusOK || len(compactStatus.StatusLogs) == 0 || len(compactStatus.Data) != 0 {
+		t.Fatalf("compact status code=%d task=%#v", compactStatusResponse.StatusCode, compactStatus)
+	}
+	fullStatusRequest, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/image-tasks/"+compactPayload.Items[0].ID+"/status", nil)
+	fullStatusRequest.Header.Set("Authorization", "Bearer k")
+	fullStatusResponse, err := http.DefaultClient.Do(fullStatusRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fullStatusResponse.Body.Close()
+	var fullStatus tasks.Task
+	if err := json.NewDecoder(fullStatusResponse.Body).Decode(&fullStatus); err != nil {
+		t.Fatal(err)
+	}
+	if fullStatusResponse.StatusCode != http.StatusOK || len(fullStatus.StatusLogs) == 0 || len(fullStatus.Data) == 0 {
+		t.Fatalf("full status code=%d task=%#v", fullStatusResponse.StatusCode, fullStatus)
 	}
 
 	legacyRequest, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/image-tasks", nil)
@@ -704,7 +748,7 @@ func TestCompactTaskListOmitsLogsAndLegacyAlias(t *testing.T) {
 	if err := json.Unmarshal(legacyBody, &legacyPayload); err != nil {
 		t.Fatal(err)
 	}
-	if legacyResponse.StatusCode != http.StatusOK || len(legacyPayload.Items) != 1 || len(legacyPayload.Tasks) == 0 || len(legacyPayload.Items[0].StatusLogs) == 0 {
+	if legacyResponse.StatusCode != http.StatusOK || len(legacyPayload.Items) != 1 || len(legacyPayload.Tasks) == 0 || len(legacyPayload.Items[0].StatusLogs) == 0 || len(legacyPayload.Items[0].Data) == 0 {
 		t.Fatalf("legacy payload=%#v", legacyPayload)
 	}
 }
