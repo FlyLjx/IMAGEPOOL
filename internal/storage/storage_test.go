@@ -174,6 +174,32 @@ func TestThumbnailServesLowResolutionCacheAndDeleteRemovesIt(t *testing.T) {
 	}
 }
 
+func TestListMetadataPopulatesDimensionsOnlyOnDemand(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.ImageOutputDir = dir
+	svc := NewService(cfg)
+	canvas := image.NewRGBA(image.Rect(0, 0, 64, 32))
+	buffer := new(bytes.Buffer)
+	if err := png.Encode(buffer, canvas); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Save(buffer.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+	items, err := svc.ListMetadata("http://localhost", "", "")
+	if err != nil || len(items) != 1 {
+		t.Fatalf("items=%#v err=%v", items, err)
+	}
+	if items[0].Width != 0 || items[0].Height != 0 {
+		t.Fatalf("metadata scan decoded dimensions: %#v", items[0])
+	}
+	svc.PopulateDimensions(items)
+	if items[0].Width != 64 || items[0].Height != 32 {
+		t.Fatalf("dimensions=%dx%d", items[0].Width, items[0].Height)
+	}
+}
+
 func TestSafeRelRejectsTraversal(t *testing.T) {
 	if _, err := safeRel("../x.png"); err == nil {
 		t.Fatal("expected traversal reject")

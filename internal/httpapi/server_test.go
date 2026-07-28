@@ -998,6 +998,88 @@ func TestImagesListUsesForwardedBaseURL(t *testing.T) {
 	}
 }
 
+func TestImagesListPaginationAndFilters(t *testing.T) {
+	cfg := config.Default()
+	dir := t.TempDir()
+	cfg.AuthKeyFile = filepath.Join(dir, "auth-keys.json")
+	cfg.ImageTagsFile = filepath.Join(dir, "tags.json")
+	cfg.ImageOutputDir = filepath.Join(dir, "images")
+	cfg.CallLogFile = filepath.Join(dir, "calls.json")
+	for index, name := range []string{"alpha.png", "beta.png", "gamma.png"} {
+		path := filepath.Join(cfg.ImageOutputDir, "2026", "07", "28", name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("png"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		created := time.Date(2026, 7, 28, 12, index, 0, 0, time.Local)
+		if err := os.Chtimes(path, created, created); err != nil {
+			t.Fatal(err)
+		}
+	}
+	srv := httptest.NewServer(newTestServer(cfg))
+	defer srv.Close()
+
+	setTag, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/images/tags", strings.NewReader(`{"path":"2026/07/28/alpha.png","tags":["favorite"]}`))
+	setTag.Header.Set("Authorization", "Bearer k")
+	setTagResponse, err := http.DefaultClient.Do(setTag)
+	if err != nil {
+		t.Fatal(err)
+	}
+	setTagResponse.Body.Close()
+	if setTagResponse.StatusCode != http.StatusOK {
+		t.Fatalf("set tag status=%d", setTagResponse.StatusCode)
+	}
+
+	request, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/images?page=1&page_size=1&query=alpha&tag=favorite", nil)
+	request.Header.Set("Authorization", "Bearer k")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	var payload struct {
+		Items    []storage.ImageItem `json:"items"`
+		Groups   json.RawMessage     `json:"groups"`
+		Page     int                 `json:"page"`
+		PageSize int                 `json:"page_size"`
+		Total    int                 `json:"total"`
+		Dates    []string            `json:"dates"`
+		Tags     []string            `json:"tags"`
+		Storage  struct {
+			ImageCount int `json:"image_count"`
+		} `json:"storage"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusOK || payload.Page != 1 || payload.PageSize != 1 || payload.Total != 1 || len(payload.Items) != 1 || payload.Items[0].Name != "alpha.png" {
+		t.Fatalf("status=%d payload=%#v", response.StatusCode, payload)
+	}
+	if payload.Groups != nil || payload.Storage.ImageCount != 3 || len(payload.Dates) != 1 || len(payload.Tags) != 1 || payload.Tags[0] != "favorite" {
+		t.Fatalf("paginated metadata=%#v", payload)
+	}
+
+	legacyRequest, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/images", nil)
+	legacyRequest.Header.Set("Authorization", "Bearer k")
+	legacyResponse, err := http.DefaultClient.Do(legacyRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer legacyResponse.Body.Close()
+	var legacyPayload struct {
+		Items  []storage.ImageItem `json:"items"`
+		Groups json.RawMessage     `json:"groups"`
+	}
+	if err := json.NewDecoder(legacyResponse.Body).Decode(&legacyPayload); err != nil {
+		t.Fatal(err)
+	}
+	if legacyResponse.StatusCode != http.StatusOK || len(legacyPayload.Items) != 3 || len(legacyPayload.Groups) == 0 {
+		t.Fatalf("legacy status=%d payload=%#v", legacyResponse.StatusCode, legacyPayload)
+	}
+}
+
 func TestUserKeyAccessAndAdminBoundary(t *testing.T) {
 	srv := httptest.NewServer(testServer(t))
 	defer srv.Close()

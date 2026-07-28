@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Button,
   Card,
@@ -37,8 +37,6 @@ import {
   deleteManagedImages,
   downloadImages,
   downloadSingleImage,
-  fetchImageStorage,
-  fetchImageTags,
   fetchManagedImages,
   releaseImagesBeforeToday,
   setImageTags,
@@ -87,10 +85,6 @@ function imageDimensionsLabel(item: ManagedImage, dimensions?: ImageDimensions) 
   const width = Number(item.width || dimensions?.width || 0);
   const height = Number(item.height || dimensions?.height || 0);
   return width > 0 && height > 0 ? `${width}x${height}` : "读取中";
-}
-
-function dateOptionsFromImages(images: ManagedImage[]) {
-  return Array.from(new Set(images.map((item) => item.date).filter(Boolean))).sort((a, b) => b.localeCompare(a));
 }
 
 function normalizeTagInput(value: string) {
@@ -142,11 +136,14 @@ function MetricCard({
 
 function ImageManagerContent() {
   const [images, setImages] = useState<ManagedImage[]>([]);
+  const [total, setTotal] = useState(0);
   const [storage, setStorage] = useState<ImageStorageStats | null>(null);
   const [knownTags, setKnownTags] = useState<string[]>([]);
+  const [dateOptions, setDateOptions] = useState<string[]>([]);
   const [imageDimensions, setImageDimensions] = useState<Record<string, ImageDimensions>>({});
   const [selectedPaths, setSelectedPaths] = useState<string[]>([]);
   const [query, setQuery] = useState("");
+  const [debouncedQuery, setDebouncedQuery] = useState("");
   const [dateFilter, setDateFilter] = useState<string>("all");
   const [tagFilter, setTagFilter] = useState<string>("all");
   const [isLoading, setIsLoading] = useState(true);
@@ -156,22 +153,23 @@ function ImageManagerContent() {
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(12);
 
-  const load = async (silent = false) => {
+  const load = useCallback(async (silent = false) => {
     if (!silent) {
       setIsLoading(true);
     }
     try {
-      const [imageData, storageData, tagData] = await Promise.all([
-        fetchManagedImages({}),
-        fetchImageStorage(),
-        fetchImageTags(),
-      ]);
+      const imageData = await fetchManagedImages({
+        page,
+        page_size: pageSize,
+        query: debouncedQuery || undefined,
+        date: dateFilter === "all" ? undefined : dateFilter,
+        tag: tagFilter === "all" ? undefined : tagFilter,
+      });
       setImages(imageData.items || []);
-      setStorage(storageData);
-      setKnownTags(tagData.tags || []);
-      setSelectedPaths((current) =>
-        current.filter((path) => (imageData.items || []).some((item) => item.path === path)),
-      );
+      setTotal(typeof imageData.total === "number" ? imageData.total : (imageData.items || []).length);
+      setStorage(imageData.storage || null);
+      setKnownTags(imageData.tags || []);
+      setDateOptions(imageData.dates || []);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "加载图片数据失败");
     } finally {
@@ -179,45 +177,24 @@ function ImageManagerContent() {
         setIsLoading(false);
       }
     }
-  };
+  }, [dateFilter, debouncedQuery, page, pageSize, tagFilter]);
 
   useEffect(() => {
     void load();
-  }, []);
+  }, [load]);
 
-  const dateOptions = useMemo(() => dateOptionsFromImages(images), [images]);
+  useEffect(() => {
+    const timer = window.setTimeout(() => setDebouncedQuery(query.trim()), 300);
+    return () => window.clearTimeout(timer);
+  }, [query]);
 
-  const filteredImages = useMemo(() => {
-    const normalizedQuery = query.trim().toLowerCase();
-    return images.filter((item) => {
-      const tags = item.tags || [];
-      const matchesDate = dateFilter === "all" || item.date === dateFilter;
-      const matchesTag = tagFilter === "all" || tags.includes(tagFilter);
-      const searchField = [item.name, item.path, item.rel, ...tags].join(" ").toLowerCase();
-      const matchesQuery = normalizedQuery.length === 0 || searchField.includes(normalizedQuery);
-      return matchesDate && matchesTag && matchesQuery;
-    });
-  }, [dateFilter, images, query, tagFilter]);
-
-  const selectedImages = useMemo(() => {
-    const selected = new Set(selectedPaths);
-    return images.filter((item) => item.path && selected.has(item.path));
-  }, [images, selectedPaths]);
-
-  const totalPages = Math.max(1, Math.ceil(filteredImages.length / pageSize));
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
   const safePage = Math.min(page, totalPages);
-  const pagedImages = useMemo(() => {
-    const startIndex = (safePage - 1) * pageSize;
-    return filteredImages.slice(startIndex, startIndex + pageSize);
-  }, [filteredImages, pageSize, safePage]);
+  const pagedImages = images;
 
   const allVisibleSelected =
     pagedImages.length > 0 &&
     pagedImages.every((item) => item.path && selectedPaths.includes(item.path));
-
-  useEffect(() => {
-    setPage(1);
-  }, [dateFilter, query, tagFilter]);
 
   useEffect(() => {
     if (page > totalPages) {
@@ -266,7 +243,7 @@ function ImageManagerContent() {
   };
 
   const handleBatchDownload = async () => {
-    const paths = selectedImages.map((item) => item.path).filter((value): value is string => Boolean(value));
+    const paths = selectedPaths;
     if (paths.length === 0) {
       toast.error("请先选择要下载的图片");
       return;
@@ -342,6 +319,7 @@ function ImageManagerContent() {
           const result = await deleteImageTag(tag);
           if (tagFilter === tag) {
             setTagFilter("all");
+            setPage(1);
           }
           await refreshAfterMutation(`标签已移除，影响 ${result.removed_from} 张图片`);
         } catch (error) {
@@ -378,7 +356,7 @@ function ImageManagerContent() {
           <Button
             icon={<Download className="size-4" />}
             onClick={() => void handleBatchDownload()}
-            disabled={selectedImages.length === 0 || isMutating}
+            disabled={selectedPaths.length === 0 || isMutating}
           >
             下载所选
           </Button>
@@ -387,10 +365,10 @@ function ImageManagerContent() {
             icon={<Trash2 className="size-4" />}
             onClick={() =>
               void handleDelete(
-                selectedImages.map((item) => item.path).filter((value): value is string => Boolean(value)),
+                selectedPaths,
               )
             }
-            disabled={selectedImages.length === 0 || isMutating}
+            disabled={selectedPaths.length === 0 || isMutating}
           >
             删除所选
           </Button>
@@ -401,7 +379,7 @@ function ImageManagerContent() {
         <MetricCard
           title="图片总数"
           value={storage?.image_count ?? 0}
-          helper={`筛选结果 ${filteredImages.length} 张`}
+          helper={`筛选结果 ${total} 张`}
           icon={ImageIcon}
           tone="blue"
         />
@@ -433,7 +411,7 @@ function ImageManagerContent() {
           title={
             <Space>
               <span>图片列表</span>
-              <Tag color="blue" className="m-0">{filteredImages.length}</Tag>
+              <Tag color="blue" className="m-0">{total}</Tag>
             </Space>
           }
           extra={
@@ -442,13 +420,19 @@ function ImageManagerContent() {
                 allowClear
                 prefix={<Search className="size-4 text-slate-400" />}
                 value={query}
-                onChange={(event) => setQuery(event.target.value)}
+                onChange={(event) => {
+                  setQuery(event.target.value);
+                  setPage(1);
+                }}
                 placeholder="搜索文件名、路径、标签"
                 style={{ width: 250 }}
               />
               <Select
                 value={dateFilter}
-                onChange={setDateFilter}
+                onChange={(value) => {
+                  setDateFilter(value);
+                  setPage(1);
+                }}
                 style={{ width: 150 }}
                 options={[
                   { label: "全部日期", value: "all" },
@@ -457,7 +441,10 @@ function ImageManagerContent() {
               />
               <Select
                 value={tagFilter}
-                onChange={setTagFilter}
+                onChange={(value) => {
+                  setTagFilter(value);
+                  setPage(1);
+                }}
                 style={{ width: 150 }}
                 options={[
                   { label: "全部标签", value: "all" },
@@ -490,9 +477,9 @@ function ImageManagerContent() {
               >
                 {allVisibleSelected ? "取消全选当前页" : "全选当前页"}
               </Button>
-              {selectedImages.length > 0 ? (
+              {selectedPaths.length > 0 ? (
                 <Tag color="processing" className="m-0">
-                  已选择 {selectedImages.length} 张
+                  已选择 {selectedPaths.length} 张
                 </Tag>
               ) : (
                 <span className="text-sm text-slate-400">当前未选择图片</span>
@@ -505,7 +492,7 @@ function ImageManagerContent() {
             <div className="flex min-h-[360px] items-center justify-center">
               <Spin indicator={<LoaderCircle className="size-5 animate-spin text-stone-400" />} />
             </div>
-          ) : filteredImages.length === 0 ? (
+          ) : images.length === 0 ? (
             <div className="py-16">
               <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="当前没有图片" />
             </div>
@@ -642,13 +629,13 @@ function ImageManagerContent() {
 
               <div className="mt-5 flex flex-col gap-3 border-t border-slate-100 pt-4 lg:flex-row lg:items-center lg:justify-between">
                 <div className="text-sm text-slate-500">
-                  显示第 {filteredImages.length === 0 ? 0 : (safePage - 1) * pageSize + 1} -{" "}
-                  {Math.min(safePage * pageSize, filteredImages.length)} 张，共 {filteredImages.length} 张
+                  显示第 {total === 0 ? 0 : (safePage - 1) * pageSize + 1} -{" "}
+                  {Math.min(safePage * pageSize, total)} 张，共 {total} 张
                 </div>
                 <Pagination
                   current={safePage}
                   pageSize={pageSize}
-                  total={filteredImages.length}
+                  total={total}
                   showSizeChanger
                   pageSizeOptions={[12, 24, 48, 96]}
                   showTotal={(total) => `共 ${total} 张`}
@@ -697,7 +684,10 @@ function ImageManagerContent() {
                     key={tag}
                     color={tagFilter === tag ? "processing" : "default"}
                     className="m-0 cursor-pointer"
-                    onClick={() => setTagFilter((current) => (current === tag ? "all" : tag))}
+                    onClick={() => {
+                      setTagFilter((current) => (current === tag ? "all" : tag));
+                      setPage(1);
+                    }}
                     closable
                     onClose={(event) => {
                       event.preventDefault();

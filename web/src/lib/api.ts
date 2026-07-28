@@ -1117,11 +1117,34 @@ export async function updateSettingsConfig(settings: Partial<SettingsConfig>) {
   });
 }
 
-export async function fetchManagedImages(filters: { start_date?: string; end_date?: string }) {
+export async function fetchManagedImages(filters: {
+  start_date?: string;
+  end_date?: string;
+  page?: number;
+  page_size?: number;
+  query?: string;
+  date?: string;
+  tag?: string;
+}) {
   const params = new URLSearchParams();
   if (filters.start_date) params.set("start_date", filters.start_date);
   if (filters.end_date) params.set("end_date", filters.end_date);
-  return httpRequest<{ items: ManagedImage[]; groups: Array<{ date: string; items: ManagedImage[] }> }>(
+  if (filters.page) params.set("page", String(filters.page));
+  if (filters.page_size) params.set("page_size", String(filters.page_size));
+  if (filters.query) params.set("query", filters.query);
+  if (filters.date) params.set("date", filters.date);
+  if (filters.tag) params.set("tag", filters.tag);
+  return httpRequest<{
+    items: ManagedImage[];
+    groups?: Array<{ date: string; items: ManagedImage[] }>;
+    page?: number;
+    page_size?: number;
+    total?: number;
+    has_more?: boolean;
+    dates?: string[];
+    tags?: string[];
+    storage?: ImageStorageStats;
+  }>(
     `/api/images${params.toString() ? `?${params.toString()}` : ""}`,
   );
 }

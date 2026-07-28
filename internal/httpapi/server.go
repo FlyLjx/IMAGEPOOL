@@ -12,6 +12,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/url"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1637,6 +1638,11 @@ func (s *Server) handleLogsDelete(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleImagesList(w http.ResponseWriter, r *http.Request) {
+	pageSize, _ := strconv.Atoi(strings.TrimSpace(r.URL.Query().Get("page_size")))
+	if pageSize > 0 {
+		s.handleImagesPage(w, r, pageSize)
+		return
+	}
 	items, err := s.storage.List(baseURL(r), strings.TrimSpace(r.URL.Query().Get("start_date")), strings.TrimSpace(r.URL.Query().Get("end_date")))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
@@ -1660,6 +1666,76 @@ func (s *Server) handleImagesList(w http.ResponseWriter, r *http.Request) {
 		groups = append(groups, map[string]any{"date": date, "items": groupsByDate[date]})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items, "groups": groups})
+}
+
+func (s *Server) handleImagesPage(w http.ResponseWriter, r *http.Request, pageSize int) {
+	if pageSize > 200 {
+		pageSize = 200
+	}
+	page, _ := strconv.Atoi(strings.TrimSpace(r.URL.Query().Get("page")))
+	if page < 1 {
+		page = 1
+	}
+	items, err := s.storage.ListMetadata(baseURL(r), strings.TrimSpace(r.URL.Query().Get("start_date")), strings.TrimSpace(r.URL.Query().Get("end_date")))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	storageStats := s.storage.StatsForItems(items)
+	datesSeen := map[string]bool{}
+	for i := range items {
+		items[i].Tags = s.tags.Get(items[i].Rel)
+		datesSeen[items[i].Date] = true
+	}
+	dates := make([]string, 0, len(datesSeen))
+	for date := range datesSeen {
+		dates = append(dates, date)
+	}
+	sort.Sort(sort.Reverse(sort.StringSlice(dates)))
+
+	query := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("query")))
+	dateFilter := strings.TrimSpace(r.URL.Query().Get("date"))
+	tagFilter := strings.TrimSpace(r.URL.Query().Get("tag"))
+	filtered := make([]storage.ImageItem, 0, len(items))
+	for _, item := range items {
+		if dateFilter != "" && item.Date != dateFilter {
+			continue
+		}
+		if tagFilter != "" && !slices.Contains(item.Tags, tagFilter) {
+			continue
+		}
+		if query != "" {
+			searchText := strings.ToLower(strings.Join(append([]string{item.Name, item.Path, item.Rel}, item.Tags...), " "))
+			if !strings.Contains(searchText, query) {
+				continue
+			}
+		}
+		filtered = append(filtered, item)
+	}
+	total := len(filtered)
+	start := (page - 1) * pageSize
+	if start > total {
+		start = total
+	}
+	end := start + pageSize
+	if end > total {
+		end = total
+	}
+	pageItems := append([]storage.ImageItem(nil), filtered[start:end]...)
+	s.storage.PopulateDimensions(pageItems)
+	for i := range pageItems {
+		pageItems[i].ThumbnailURL = strings.Replace(pageItems[i].URL, "/images/", "/image-thumbnails/", 1)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"items":     pageItems,
+		"page":      page,
+		"page_size": pageSize,
+		"total":     total,
+		"has_more":  end < total,
+		"dates":     dates,
+		"tags":      s.tags.All(),
+		"storage":   storageStats,
+	})
 }
 
 func baseURL(r *http.Request) string {

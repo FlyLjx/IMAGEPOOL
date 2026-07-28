@@ -77,6 +77,16 @@ func (s *Service) Save(data []byte) (ImageItem, error) {
 }
 
 func (s *Service) List(baseURL, startDate, endDate string) ([]ImageItem, error) {
+	return s.list(baseURL, startDate, endDate, true)
+}
+
+// ListMetadata scans image file metadata without opening every image to decode
+// its dimensions. Call PopulateDimensions only for the page being displayed.
+func (s *Service) ListMetadata(baseURL, startDate, endDate string) ([]ImageItem, error) {
+	return s.list(baseURL, startDate, endDate, false)
+}
+
+func (s *Service) list(baseURL, startDate, endDate string, includeDimensions bool) ([]ImageItem, error) {
 	root := filepath.Clean(s.root)
 	items := []ImageItem{}
 	if err := os.MkdirAll(root, 0o755); err != nil {
@@ -108,7 +118,10 @@ func (s *Service) List(baseURL, startDate, endDate string) ([]ImageItem, error) 
 		if endDate != "" && day > endDate {
 			return nil
 		}
-		width, height := imageDimensionsFromFile(path)
+		width, height := 0, 0
+		if includeDimensions {
+			width, height = imageDimensionsFromFile(path)
+		}
 		items = append(items, ImageItem{Rel: rel, Path: rel, Name: d.Name(), URL: strings.TrimRight(baseURL, "/") + "/images/" + url.PathEscape(rel), Width: width, Height: height, Size: info.Size(), CreatedAt: info.ModTime(), Date: day, Local: true, Storage: "local"})
 		return nil
 	})
@@ -117,6 +130,13 @@ func (s *Service) List(baseURL, startDate, endDate string) ([]ImageItem, error) 
 	}
 	sort.Slice(items, func(i, j int) bool { return items[i].CreatedAt.After(items[j].CreatedAt) })
 	return items, nil
+}
+
+func (s *Service) PopulateDimensions(items []ImageItem) {
+	root := filepath.Clean(s.root)
+	for i := range items {
+		items[i].Width, items[i].Height = imageDimensionsFromFile(filepath.Join(root, filepath.FromSlash(items[i].Rel)))
+	}
 }
 
 func (s *Service) Open(rel string) (*os.File, string, error) {
@@ -225,7 +245,11 @@ func (s *Service) Zip(paths []string) (*bytes.Reader, error) {
 }
 
 func (s *Service) Stats() map[string]any {
-	items, _ := s.List("", "", "")
+	items, _ := s.ListMetadata("", "", "")
+	return s.StatsForItems(items)
+}
+
+func (s *Service) StatsForItems(items []ImageItem) map[string]any {
 	var size int64
 	for _, item := range items {
 		size += item.Size
@@ -237,7 +261,7 @@ func (s *Service) Stats() map[string]any {
 
 // Compress rewrites PNG and JPEG files only when the replacement is smaller.
 func (s *Service) Compress() (compressed int, savedBytes int64, err error) {
-	items, err := s.List("", "", "")
+	items, err := s.ListMetadata("", "", "")
 	if err != nil {
 		return 0, 0, err
 	}
