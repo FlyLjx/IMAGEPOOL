@@ -359,8 +359,27 @@ func TestManagerStatsAndCompletionHook(t *testing.T) {
 		t.Fatal("completion hook was not invoked")
 	}
 	stats := m.Stats()
-	if stats.QueueCapacity != asyncTaskQueueLimit || stats.WorkerLimit != asyncTaskWorkerLimit || stats.ByStatus[StatusSucceeded] != 1 || !stats.Accepting {
+	if stats.QueueCapacity != asyncTaskQueueLimit || stats.WorkerLimit != asyncTaskWorkerLimit || stats.ByStatus[StatusSucceeded] != 1 || stats.ActiveTasks != 0 || !stats.Accepting {
 		t.Fatalf("stats=%#v", stats)
+	}
+}
+
+func TestManagerStatsCountsQueuedAndRunningTasks(t *testing.T) {
+	m := NewManager(taskSvc{})
+	defer m.Close()
+
+	m.mu.Lock()
+	m.tasks = map[string]*Task{
+		"queued-1":  {ID: "queued-1", Status: StatusQueued},
+		"queued-2":  {ID: "queued-2", Status: StatusQueued},
+		"running-1": {ID: "running-1", Status: StatusRunning},
+		"done-1":    {ID: "done-1", Status: StatusSucceeded},
+	}
+	m.mu.Unlock()
+
+	stats := m.Stats()
+	if stats.QueuedTasks != 2 || stats.RunningTasks != 1 || stats.ActiveTasks != 3 {
+		t.Fatalf("active task stats=%#v", stats)
 	}
 }
 

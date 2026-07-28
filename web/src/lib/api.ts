@@ -666,6 +666,9 @@ export type SchedulerDiagnostics = {
     queue_capacity: number;
     active_workers: number;
     worker_limit: number;
+    queued_tasks?: number;
+    running_tasks?: number;
+    active_tasks?: number;
     memory_total: number;
     by_status: Record<string, number>;
     accepting: boolean;

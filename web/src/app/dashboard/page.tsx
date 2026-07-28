@@ -132,8 +132,11 @@ type OperationsSummary = {
 };
 
 function OperationsOverview({ scheduler, system, summary }: { scheduler: SchedulerDiagnostics; system: SystemLoad; summary: OperationsSummary }) {
-  const queuePercent = percent(scheduler.tasks.queue_depth, scheduler.tasks.queue_capacity);
-  const workerPercent = percent(scheduler.tasks.active_workers, scheduler.tasks.worker_limit);
+  const queuedTasks = scheduler.tasks.queued_tasks ?? scheduler.tasks.by_status?.queued ?? 0;
+  const runningTasks = scheduler.tasks.running_tasks ?? scheduler.tasks.by_status?.running ?? 0;
+  const activeTasks = scheduler.tasks.active_tasks ?? queuedTasks + runningTasks;
+  const queuePercent = percent(queuedTasks, scheduler.tasks.queue_capacity);
+  const workerPercent = percent(runningTasks, scheduler.tasks.worker_limit);
   const postprocessPercent = percent(scheduler.postprocess.queue_depth, scheduler.postprocess.queue_capacity);
   const cpuPercent = loadPercent(system.cpu.usage_percent);
   const memoryPercent = loadPercent(system.memory.usage_percent);
@@ -164,8 +167,8 @@ function OperationsOverview({ scheduler, system, summary }: { scheduler: Schedul
       title: "任务队列",
       icon: Boxes,
       iconClass: "bg-sky-50 text-sky-600",
-      value: `${scheduler.tasks.queue_depth}/${scheduler.tasks.queue_capacity}`,
-      detail: `Worker ${scheduler.tasks.active_workers}/${scheduler.tasks.worker_limit} · 历史 ${summary.taskHistory}`,
+      value: `${numberText(activeTasks)} 项`,
+      detail: `排队 ${queuedTasks} · 处理 ${runningTasks} · 通道 ${scheduler.tasks.queue_depth}/${scheduler.tasks.queue_capacity}`,
       progress: Math.max(queuePercent, workerPercent),
       color: "#0ea5e9",
     },

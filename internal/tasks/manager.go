@@ -114,6 +114,9 @@ type Stats struct {
 	QueueCapacity int            `json:"queue_capacity"`
 	ActiveWorkers int            `json:"active_workers"`
 	WorkerLimit   int            `json:"worker_limit"`
+	QueuedTasks   int            `json:"queued_tasks"`
+	RunningTasks  int            `json:"running_tasks"`
+	ActiveTasks   int            `json:"active_tasks"`
 	MemoryTotal   int            `json:"memory_total"`
 	ByStatus      map[string]int `json:"by_status"`
 	Accepting     bool           `json:"accepting"`
@@ -183,6 +186,9 @@ func (m *Manager) Stats() Stats {
 			stats.ByStatus[task.Status]++
 		}
 	}
+	stats.QueuedTasks = stats.ByStatus[StatusQueued]
+	stats.RunningTasks = stats.ByStatus[StatusRunning]
+	stats.ActiveTasks = stats.QueuedTasks + stats.RunningTasks
 	m.mu.RUnlock()
 	m.dispatchMu.Lock()
 	stats.Accepting = !m.dispatchClosing
