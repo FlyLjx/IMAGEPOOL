@@ -79,8 +79,53 @@ func TestResolveRequestedModelUsesAspectRatioWithinResolution(t *testing.T) {
 	}
 }
 
+func TestResolveRequestedModelUsesSizeAsAspectRatioFallback(t *testing.T) {
+	tests := []struct {
+		model       string
+		aspectRatio string
+		size        string
+		want        string
+	}{
+		{"firefly-nano-banana-4k", "", "3072x1728", "firefly-nano-banana-4k-16x9"},
+		{"firefly-nano-banana2-2k", "", "1152x2048", "firefly-nano-banana2-2k-9x16"},
+		{"firefly-gpt-image-2k", "", "2048x1360", "firefly-gpt-image-2k-3x2"},
+		{"firefly-gpt-image-4k", "", "1360x2048", "firefly-gpt-image-4k-2x3"},
+		{"firefly-gpt-image-2k", "", "1792x1024", "firefly-gpt-image-2k-16x9"},
+		{"firefly-gpt-image-2k", "4:3", "3072x1728", "firefly-gpt-image-2k-4x3"},
+		{"firefly-gpt-image-2k", "2048x1360", "1024x1024", "firefly-gpt-image-2k-3x2"},
+	}
+	for _, test := range tests {
+		resolved, err := ResolveRequestedModelWithSize(test.model, test.aspectRatio, test.size)
+		if err != nil || resolved.ID != test.want {
+			t.Fatalf("ResolveRequestedModelWithSize(%q, %q, %q)=%q, %v; want %q", test.model, test.aspectRatio, test.size, resolved.ID, err, test.want)
+		}
+	}
+}
+
+func TestResolveRequestedModelSupportsAIPAISizeMatrix(t *testing.T) {
+	sizes := map[string]map[string]string{
+		"1k": {
+			"1:1": "1024x1024", "16:9": "1536x864", "9:16": "864x1536", "4:3": "1536x1152", "3:4": "1152x1536", "3:2": "1536x1024", "2:3": "1024x1536",
+		},
+		"2k": {
+			"1:1": "2048x2048", "16:9": "2048x1152", "9:16": "1152x2048", "4:3": "2048x1536", "3:4": "1536x2048", "3:2": "2048x1360", "2:3": "1360x2048",
+		},
+		"4k": {
+			"1:1": "3072x3072", "16:9": "3072x1728", "9:16": "1728x3072", "4:3": "3072x2304", "3:4": "2304x3072", "3:2": "3072x2048", "2:3": "2048x3072",
+		},
+	}
+	for resolution, ratios := range sizes {
+		for ratio, size := range ratios {
+			resolved, err := ResolveRequestedModelWithSize("firefly-gpt-image-"+resolution, "", size)
+			if err != nil || resolved.AspectRatio != ratio || resolved.OutputResolution != strings.ToUpper(resolution) {
+				t.Fatalf("resolution=%s ratio=%s size=%s resolved=%#v err=%v", resolution, ratio, size, resolved, err)
+			}
+		}
+	}
+}
+
 func TestResolveRequestedModelKeepsExactVariantAuthoritative(t *testing.T) {
-	resolved, err := ResolveRequestedModel("firefly-gpt-image-2k-16x9", "1:1")
+	resolved, err := ResolveRequestedModelWithSize("firefly-gpt-image-2k-16x9", "1:1", "1024x1024")
 	if err != nil || resolved.ID != "firefly-gpt-image-2k-16x9" {
 		t.Fatalf("resolved=%#v err=%v", resolved, err)
 	}

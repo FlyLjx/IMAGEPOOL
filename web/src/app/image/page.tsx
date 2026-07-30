@@ -31,7 +31,16 @@ import { useAuthGuard } from "@/lib/use-auth-guard";
 const DEFAULT_MODEL_OPTIONS = ["gpt-image-2"];
 const SIZE_OPTIONS = ["1024x1024", "1536x1024", "1024x1536"];
 const QUALITY_OPTIONS = ["auto", "low", "medium", "high"];
+const STANDARD_ADOBE_ASPECT_RATIOS = ["1:1", "16:9", "9:16", "4:3", "3:4"];
+const NANO2_ASPECT_RATIOS = [...STANDARD_ADOBE_ASPECT_RATIOS, "1:8", "1:4", "4:1", "8:1"];
+const GPT_IMAGE_ASPECT_RATIOS = ["1:1", "5:4", "9:16", "21:9", "16:9", "3:2", "4:3", "4:5", "3:4", "2:3"];
 const MAX_REFERENCE_FILES = 4;
+
+function adobeAspectRatios(model: string) {
+  if (model.startsWith("firefly-gpt-image-")) return GPT_IMAGE_ASPECT_RATIOS;
+  if (model.startsWith("firefly-nano-banana2-")) return NANO2_ASPECT_RATIOS;
+  return STANDARD_ADOBE_ASPECT_RATIOS;
+}
 
 function newClientTaskID() {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
@@ -151,6 +160,7 @@ function ImageWorkspace() {
   const [modelOptions, setModelOptions] = useState(DEFAULT_MODEL_OPTIONS);
   const [isLoadingModels, setIsLoadingModels] = useState(false);
   const [size, setSize] = useState(SIZE_OPTIONS[0]);
+  const [aspectRatio, setAspectRatio] = useState("1:1");
   const [quality, setQuality] = useState("auto");
   const [references, setReferences] = useState<File[]>([]);
   const [tasks, setTasks] = useState<ImageTask[]>([]);
@@ -169,6 +179,15 @@ function ImageWorkspace() {
       }
     }
   }, []);
+
+  const isAdobeModel = model.startsWith("firefly-");
+  const aspectRatioOptions = useMemo(() => adobeAspectRatios(model), [model]);
+
+  useEffect(() => {
+    if (isAdobeModel && !aspectRatioOptions.includes(aspectRatio)) {
+      setAspectRatio("1:1");
+    }
+  }, [aspectRatio, aspectRatioOptions, isAdobeModel]);
 
   const loadTasks = useCallback(async (silent = false) => {
     if (!silent) setIsLoading(true);
@@ -238,7 +257,7 @@ function ImageWorkspace() {
   const activeTasks = useMemo(() => tasks.filter((task) => task.status === "queued" || task.status === "running"), [tasks]);
   const failedTasks = useMemo(() => tasks.filter((task) => task.status === "error").slice(0, 5), [tasks]);
   const modelSelectOptions = useMemo(() => {
-    return [{ label: "GPT号池模型", options: modelOptions.map((value) => ({ value, label: value })) }];
+    return [{ label: "生图模型", options: modelOptions.map((value) => ({ value, label: value })) }];
   }, [modelOptions]);
 
   const addReferences = (files: FileList | null) => {
@@ -263,8 +282,8 @@ function ImageWorkspace() {
     try {
       const clientTaskID = newClientTaskID();
       const task = references.length > 0
-				? await createImageEditTask(clientTaskID, references, cleanPrompt, model, size, quality, undefined, "b64_json")
-				: await createImageGenerationTask(clientTaskID, cleanPrompt, model, size, quality, undefined, "b64_json");
+        ? await createImageEditTask(clientTaskID, references, cleanPrompt, model, isAdobeModel ? undefined : size, quality, isAdobeModel ? aspectRatio : undefined, undefined, "b64_json")
+        : await createImageGenerationTask(clientTaskID, cleanPrompt, model, isAdobeModel ? undefined : size, quality, isAdobeModel ? aspectRatio : undefined, undefined, "b64_json");
       setTasks((current) => [task, ...current.filter((item) => item.id !== task.id)]);
       toast.success(references.length > 0 ? "参考图任务已提交" : "生图任务已提交");
     } catch (error) {
@@ -293,7 +312,9 @@ function ImageWorkspace() {
             </div>
             <div className="grid gap-3 sm:grid-cols-3">
               <label className="text-sm font-medium text-slate-700">模型<Select className="mt-1.5 w-full" value={model} options={modelSelectOptions} onChange={setModel} loading={isLoadingModels} /></label>
-              <label className="text-sm font-medium text-slate-700">尺寸<Select className="mt-1.5 w-full" value={size} options={SIZE_OPTIONS.map((value) => ({ value, label: value }))} onChange={setSize} /></label>
+              {isAdobeModel
+                ? <label className="text-sm font-medium text-slate-700">宽高比<Select className="mt-1.5 w-full" value={aspectRatio} options={aspectRatioOptions.map((value) => ({ value, label: value }))} onChange={setAspectRatio} /></label>
+                : <label className="text-sm font-medium text-slate-700">尺寸<Select className="mt-1.5 w-full" value={size} options={SIZE_OPTIONS.map((value) => ({ value, label: value }))} onChange={setSize} /></label>}
               <label className="text-sm font-medium text-slate-700">质量<Select className="mt-1.5 w-full" value={quality} options={QUALITY_OPTIONS.map((value) => ({ value, label: value }))} onChange={setQuality} /></label>
             </div>
             <div>

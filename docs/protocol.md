@@ -39,7 +39,7 @@ GPT 账号池策略：
 Adobe 账号池策略：
 
 - 9 个公开 `firefly-*` 基础模型及兼容的旧精确变体进入 Adobe 号池；`gpt-image-2` 的 GPT 模型路径保持不变。
-- Adobe 模型只接受图片生成、图片编辑和异步图片任务接口；基础模型名固定 1K/2K/4K 分辨率，客户端 `aspect_ratio` 匹配隐藏精确变体，未命中回退同分辨率 `1:1`，`size` 不参与 Adobe 请求。
+- Adobe 模型只接受图片生成、图片编辑和异步图片任务接口；基础模型名固定 1K/2K/4K 分辨率，客户端 `aspect_ratio` 匹配隐藏精确变体。缺少 `aspect_ratio` 时从 `size=宽x高` 推导比例，`size` 不覆盖固定分辨率或 Adobe 最终像素；未命中才回退同分辨率 `1:1`。
 - Adobe Express 3P 模型目前返回原生 PNG；提交固定请求 `x-accept-mimetype: image/png`，下载后按 `output_format=png|jpeg|jpg|webp` 本地转换，再进行 URL 缓存或 Base64 包装。GPT 号池的格式处理保持不变。
 - 按 `last_used_at` 轮询可用账号，选择时只更新最近使用时间，不创建持久化生成租约。
 - 每个 Adobe 账号固定绑定一条直连或代理线路，Token 刷新与生图共用该线路。

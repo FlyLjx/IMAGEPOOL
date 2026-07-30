@@ -60,7 +60,7 @@ docker compose up -d --build
 
 ## Adobe 号池
 
-Adobe 接入默认关闭，现有 `gpt-image-2` 仍走 ChatGPT Web；启用后公开模型目录新增 9 个 `firefly-*` 基础图片模型：Nano Banana、Nano Banana 2 和 GPT Image 分别提供 1K/2K/4K。客户端通过 `aspect_ratio` 选择对应隐藏变体，未传或不支持时使用同分辨率 `1:1`。旧版带比例后缀的精确模型 ID 继续可用，并优先于 `aspect_ratio`。公开模型目录只返回生图模型，不提供 Chat Completions、Responses 或 Messages 接口。线路池支持本机公网出口直连和 HTTP(S)/SOCKS5 代理。Adobe 管理页可批量导入原版 `adobe2api` 的 `tokens.json` 和 Cookie/Profile JSON，并支持单账号、勾选批量、全部及默认 15 小时定时刷新 Token。生成时按最近使用时间直接轮询可用账号，不建立 ARP 或生成租约。启用前必须使用 PostgreSQL，在 `.env` 设置随机的 `IMAGE_POOL_MASTER_KEY`，再将 `configs/config.json` 的 `adobe.enabled` 改为 `true`。完整配置和导入格式见 [docs/adobe-integration.md](docs/adobe-integration.md)。
+Adobe 接入默认关闭，现有 `gpt-image-2` 仍走 ChatGPT Web；启用后公开模型目录新增 9 个 `firefly-*` 基础图片模型：Nano Banana、Nano Banana 2 和 GPT Image 分别提供 1K/2K/4K。客户端优先通过 `aspect_ratio` 选择对应隐藏变体；未传时，后端从 OpenAI 风格的 `size=宽x高` 推导比例。模型名中的分辨率保持不变，`size` 不会直接覆盖 Adobe 最终像素；缺失或不支持的比例才回退同分辨率 `1:1`。旧版带比例后缀的精确模型 ID 继续可用，并优先于请求参数。公开模型目录只返回生图模型，不提供 Chat Completions、Responses 或 Messages 接口。线路池支持本机公网出口直连和 HTTP(S)/SOCKS5 代理。Adobe 管理页可批量导入原版 `adobe2api` 的 `tokens.json` 和 Cookie/Profile JSON，并支持单账号、勾选批量、全部及默认 15 小时定时刷新 Token。生成时按最近使用时间直接轮询可用账号，不建立 ARP 或生成租约。启用前必须使用 PostgreSQL，在 `.env` 设置随机的 `IMAGE_POOL_MASTER_KEY`，再将 `configs/config.json` 的 `adobe.enabled` 改为 `true`。完整配置和导入格式见 [docs/adobe-integration.md](docs/adobe-integration.md)。
 
 管理端不会返回代理明文、Cookie 或 IMS Token。Token、Cookie 和代理凭据在 PostgreSQL 中使用 `IMAGE_POOL_MASTER_KEY` 加密保存。
 

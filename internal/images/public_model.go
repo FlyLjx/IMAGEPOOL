@@ -14,7 +14,7 @@ func PrepareModelRequest(req Request) (Request, string) {
 	publicModel := PublicModelName(model)
 	req.Model = model
 	if adobeprovider.IsRequestedModel(model) {
-		if resolved, err := adobeprovider.ResolveRequestedModel(model, req.AspectRatio); err == nil {
+		if resolved, err := adobeprovider.ResolveRequestedModelWithSize(model, req.AspectRatio, req.Size); err == nil {
 			req.Model = resolved.ID
 		}
 	} else {

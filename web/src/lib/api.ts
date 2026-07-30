@@ -933,7 +933,7 @@ export async function editImage(files: File | File[], prompt: string, model?: Im
   );
 }
 
-export async function createImageGenerationTask(clientTaskId: string, prompt: string, model?: ImageModel, size?: string, quality = "auto", outputFormat?: string, responseFormat = "b64_json") {
+export async function createImageGenerationTask(clientTaskId: string, prompt: string, model?: ImageModel, size?: string, quality = "auto", aspectRatio?: string, outputFormat?: string, responseFormat = "b64_json") {
   return httpRequest<ImageTask>("/api/image-tasks/generations", {
     method: "POST",
     body: {
@@ -941,6 +941,7 @@ export async function createImageGenerationTask(clientTaskId: string, prompt: st
       prompt,
       ...(model ? { model } : {}),
       ...(size ? { size } : {}),
+      ...(aspectRatio ? { aspect_ratio: aspectRatio } : {}),
       quality,
       ...(responseFormat ? { response_format: responseFormat } : {}),
       ...(outputFormat ? { output_format: outputFormat } : {}),
@@ -955,6 +956,7 @@ export async function createImageEditTask(
   model?: ImageModel,
   size?: string,
   quality = "auto",
+  aspectRatio?: string,
   outputFormat?: string,
   responseFormat = "b64_json",
 ) {
@@ -971,6 +973,9 @@ export async function createImageEditTask(
   }
   if (size) {
     formData.append("size", size);
+  }
+  if (aspectRatio) {
+    formData.append("aspect_ratio", aspectRatio);
   }
   formData.append("quality", quality);
   if (responseFormat) {

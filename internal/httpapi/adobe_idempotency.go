@@ -63,10 +63,11 @@ func imageRequestHash(request images.Request) string {
 		"n": request.N, "response_format": request.ResponseFormat, "output_format": request.OutputFormat, "references": references,
 	}
 	if adobe.IsRequestedModel(request.Model) {
-		if resolved, err := adobe.ResolveRequestedModel(request.Model, request.AspectRatio); err == nil {
+		if resolved, err := adobe.ResolveRequestedModelWithSize(request.Model, request.AspectRatio, request.Size); err == nil {
 			payload["model"] = resolved.ID
 		} else {
 			payload["aspect_ratio"] = request.AspectRatio
+			payload["size"] = request.Size
 		}
 	} else {
 		payload["size"] = request.Size

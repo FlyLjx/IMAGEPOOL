@@ -82,6 +82,23 @@ func TestGenerateResolvesNormalizedAdobeModelFromAspectRatio(t *testing.T) {
 	}
 }
 
+func TestGenerateResolvesNormalizedAdobeModelFromSize(t *testing.T) {
+	service := NewService(config.Default(), accounts.NewStore(nil, ""), &fakeBackend{})
+	adobe := &fakeAdobeBackend{result: adobeprovider.ImageGenerateResult{Images: [][]byte{testPNGBytes(t)}}}
+	service.SetAdobeBackend(adobe)
+
+	response, err := service.Generate(context.Background(), Request{Prompt: "draw", Model: "firefly-nano-banana-4k", Size: "3072x1728", Quality: "high", ResponseFormat: "b64_json"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if adobe.request.Model != "firefly-nano-banana-4k-16x9" || adobe.request.Size != "3072x1728" || adobe.request.Quality != "high" {
+		t.Fatalf("Adobe request=%#v", adobe.request)
+	}
+	if response.Model != "firefly-nano-banana-4k" || response.BackendModel != "firefly-nano-banana-4k" {
+		t.Fatalf("response=%#v", response)
+	}
+}
+
 func TestGenerateKeepsDefaultImageModelOnChatGPTBackend(t *testing.T) {
 	chatgpt := &fakeBackend{}
 	service := NewService(config.Default(), accounts.NewStore([]accounts.Account{{Email: "a", AccessToken: "token"}}, ""), chatgpt)

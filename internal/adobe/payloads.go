@@ -13,12 +13,9 @@ func imagePayload(model Model, prompt, quality string, sourceImageIDs []string) 
 		if err != nil {
 			return nil, err
 		}
-		detail := 1
-		switch strings.ToLower(strings.TrimSpace(quality)) {
-		case "high", "hd", "4k", "ultra":
-			detail = 5
-		case "medium", "2k", "auto", "":
-			detail = 3
+		detailLevel := 1
+		if strings.EqualFold(model.OutputResolution, "4K") {
+			detailLevel = 5
 		}
 		references := make([]map[string]any, 0, len(sourceImageIDs))
 		for _, id := range sourceImageIDs {
@@ -35,7 +32,7 @@ func imagePayload(model Model, prompt, quality string, sourceImageIDs []string) 
 			"modelId": model.UpstreamModelID, "modelVersion": model.UpstreamModelVersion, "n": 1, "prompt": prompt,
 			"seeds": []int64{seed}, "output": map[string]any{"storeInputs": true}, "referenceBlobs": references,
 			"generationMetadata":   map[string]any{"module": "text2image", "submodule": "ff-image-generate"},
-			"modelSpecificPayload": modelSpecificPayload, "generationSettings": map[string]any{"detailLevel": detail},
+			"modelSpecificPayload": modelSpecificPayload, "generationSettings": map[string]any{"detailLevel": detailLevel},
 			"size": size, "outputResolution": model.OutputResolution,
 		}, nil
 	}

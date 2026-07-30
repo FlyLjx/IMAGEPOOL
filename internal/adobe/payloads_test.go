@@ -2,18 +2,35 @@ package adobe
 
 import "testing"
 
+func TestGPTImagePayloadDetailLevelFollowsModelResolution(t *testing.T) {
+	models := map[string]int{
+		"firefly-gpt-image-1k-1x1":  1,
+		"firefly-gpt-image-2k-16x9": 1,
+		"firefly-gpt-image-4k-16x9": 5,
+	}
+	for modelID, expected := range models {
+		model, _ := ResolveModel(modelID)
+		for _, quality := range []string{"", "auto", "low", "medium", "high", "hd", "4k", "ultra"} {
+			payload, err := imagePayload(model, "draw", quality, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			settings := payload["generationSettings"].(map[string]any)
+			if settings["detailLevel"] != expected {
+				t.Fatalf("model=%q quality=%q settings=%#v", modelID, quality, settings)
+			}
+		}
+	}
+}
+
 func TestGPTImagePayloadShape(t *testing.T) {
 	model, _ := ResolveModel("firefly-gpt-image-2k-16x9")
-	payload, err := imagePayload(model, "draw", "medium", nil)
+	payload, err := imagePayload(model, "draw", "high", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if payload["modelId"] != "gpt-image" || payload["modelVersion"] != "2" {
 		t.Fatalf("payload=%#v", payload)
-	}
-	settings := payload["generationSettings"].(map[string]any)
-	if settings["detailLevel"] != 3 {
-		t.Fatalf("settings=%#v", settings)
 	}
 	if _, ok := payload["size"]; ok {
 		size := payload["size"].(map[string]int)

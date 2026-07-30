@@ -50,6 +50,13 @@ func ResolveModel(id string) (Model, error) {
 // ResolveRequestedModel keeps exact legacy variant IDs authoritative. Public
 // base IDs use aspectRatio to select a hidden variant of the same resolution.
 func ResolveRequestedModel(id, aspectRatio string) (Model, error) {
+	return ResolveRequestedModelWithSize(id, aspectRatio, "")
+}
+
+// ResolveRequestedModelWithSize uses size as an aspect-ratio fallback for
+// OpenAI-compatible clients that do not preserve aspect_ratio. The public model
+// ID remains authoritative for output resolution.
+func ResolveRequestedModelWithSize(id, aspectRatio, size string) (Model, error) {
 	id = strings.TrimSpace(id)
 	if model, ok := modelCatalog[id]; ok {
 		return model, nil
@@ -58,7 +65,11 @@ func ResolveRequestedModel(id, aspectRatio string) (Model, error) {
 		return Model{}, fmt.Errorf("invalid Adobe image model %q", id)
 	}
 	variants := publicModelVariants[id]
-	if model, ok := variants[aspectRatioKey(aspectRatio)]; ok {
+	ratio := aspectRatioFromValue(aspectRatio)
+	if ratio == "" {
+		ratio = aspectRatioFromValue(size)
+	}
+	if model, ok := variants[ratio]; ok {
 		return model, nil
 	}
 	return variants[aspectRatioKey("1:1")], nil
@@ -135,6 +146,30 @@ func buildModelCatalog() (map[string]Model, map[string]Model, map[string]map[str
 		}
 	}
 	return catalog, public, variants
+}
+
+// These downstream dimensions are intentionally close to a standard ratio but
+// do not reduce to it exactly. Most other pixel sizes are handled by fraction
+// reduction in aspectRatioKey.
+var approximateSizeAspectRatios = map[string]string{
+	"1792x1024": "16:9",
+	"1024x1792": "9:16",
+	"1360x768":  "16:9",
+	"768x1360":  "9:16",
+	"2752x1536": "16:9",
+	"1536x2752": "9:16",
+	"5504x3072": "16:9",
+	"3072x5504": "9:16",
+	"2048x1360": "3:2",
+	"1360x2048": "2:3",
+}
+
+func aspectRatioFromValue(value string) string {
+	value = strings.ToLower(strings.Join(strings.Fields(strings.TrimSpace(value)), ""))
+	if ratio, ok := approximateSizeAspectRatios[value]; ok {
+		return aspectRatioKey(ratio)
+	}
+	return aspectRatioKey(value)
 }
 
 func aspectRatioKey(value string) string {

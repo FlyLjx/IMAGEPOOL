@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.1.48 - 2026-07-30
+
++ [优化] Firefly GPT Image 的推理档位改由模型分辨率控制，1K/2K 使用快速 `detailLevel=1`，仅 4K 使用高质量 `detailLevel=5`，避免兼容请求中的 `quality=high` 将低分辨率任务送入慢队列。
+
 ## 0.1.47 - 2026-07-30
 
 + [新增] Adobe 公开模型归一化为 9 个按家族与 1K/2K/4K 区分的基础模型，请求通过 `aspect_ratio` 自动匹配对应隐藏变体。

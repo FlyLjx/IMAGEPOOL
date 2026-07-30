@@ -31,6 +31,7 @@ type ImageReference struct {
 type ImageGenerateRequest struct {
 	Prompt       string
 	Model        string
+	Size         string
 	AspectRatio  string
 	Quality      string
 	OutputFormat string
@@ -134,7 +135,7 @@ func validateImageGenerateRequest(request *ImageGenerateRequest) (Model, error) 
 		return Model{}, err
 	}
 	request.OutputFormat = outputFormat
-	model, err := ResolveRequestedModel(request.Model, request.AspectRatio)
+	model, err := ResolveRequestedModelWithSize(request.Model, request.AspectRatio, request.Size)
 	if err != nil {
 		return Model{}, err
 	}

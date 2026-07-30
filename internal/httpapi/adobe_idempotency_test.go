@@ -41,6 +41,22 @@ func TestAdobeImageRequestHashIncludesAspectRatio(t *testing.T) {
 	}
 }
 
+func TestAdobeImageRequestHashUsesSizeAsAspectRatioFallback(t *testing.T) {
+	bySize := images.Request{Prompt: "draw", Model: "firefly-nano-banana-4k", Size: "3072x1728", Quality: "high"}
+	byAspectRatio := bySize
+	byAspectRatio.Size = ""
+	byAspectRatio.AspectRatio = "16:9"
+	if imageRequestHash(bySize) != imageRequestHash(byAspectRatio) {
+		t.Fatal("Adobe size and equivalent aspect_ratio produced different hashes")
+	}
+
+	portrait := bySize
+	portrait.Size = "1728x3072"
+	if imageRequestHash(bySize) == imageRequestHash(portrait) {
+		t.Fatal("Adobe size did not change the effective ratio variant")
+	}
+}
+
 func TestAdobeImageRequestHashUsesEffectiveVariant(t *testing.T) {
 	colon := images.Request{Prompt: "draw", Model: "firefly-gpt-image-2k", AspectRatio: "16:9"}
 	xAlias := colon
