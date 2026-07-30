@@ -8,11 +8,11 @@ import (
 
 func TestImageJobManagerTracksResultAndDeduplicatesAccount(t *testing.T) {
 	manager := newTestImageJobManager()
-	job, created, err := manager.Start("account-1", DefaultModelID)
+	job, created, err := manager.Start("account-1", DefaultModelID, "16:9")
 	if err != nil || !created || job.Status != "running" {
 		t.Fatalf("job=%#v created=%v err=%v", job, created, err)
 	}
-	duplicate, created, err := manager.Start("account-1", DefaultModelID)
+	duplicate, created, err := manager.Start("account-1", DefaultModelID, "16:9")
 	if err != nil || created || duplicate.ID != job.ID {
 		t.Fatalf("duplicate=%#v created=%v err=%v", duplicate, created, err)
 	}
@@ -23,7 +23,7 @@ func TestImageJobManagerTracksResultAndDeduplicatesAccount(t *testing.T) {
 		t.Fatalf("completed=%#v ok=%v", completed, ok)
 	}
 
-	next, created, err := manager.Start("account-1", DefaultModelID)
+	next, created, err := manager.Start("account-1", DefaultModelID, "16:9")
 	if err != nil || !created || next.ID == job.ID {
 		t.Fatalf("next=%#v created=%v err=%v", next, created, err)
 	}

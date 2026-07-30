@@ -61,6 +61,14 @@ function formatCredits(value: number) {
   return new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 2 }).format(value);
 }
 
+const standardAspectRatios = ["1:1", "16:9", "9:16", "4:3", "3:4"];
+
+function adobeAspectRatios(model: string) {
+  if (model.startsWith("firefly-gpt-image-")) return ["1:1", "5:4", "9:16", "21:9", "16:9", "3:2", "4:3", "4:5", "3:4", "2:3"];
+  if (model.startsWith("firefly-nano-banana2-")) return [...standardAspectRatios, "1:8", "1:4", "4:1", "8:1"];
+  return standardAspectRatios;
+}
+
 function AdobeConsole() {
   const [routes, setRoutes] = useState<AdobeRoute[]>([]);
   const [accounts, setAccounts] = useState<AdobeAccount[]>([]);
@@ -82,6 +90,14 @@ function AdobeConsole() {
   const [routeForm] = Form.useForm();
   const [testImageForm] = Form.useForm();
   const routeKind = Form.useWatch("kind", routeForm) || "direct";
+  const testImageModel = Form.useWatch("model", testImageForm) || "";
+  const testImageAspectRatioOptions = useMemo(() => adobeAspectRatios(testImageModel).map((ratio) => ({ label: ratio, value: ratio })), [testImageModel]);
+
+  useEffect(() => {
+    if (!testImageModel) return;
+    const supported = adobeAspectRatios(testImageModel);
+    if (!supported.includes(testImageForm.getFieldValue("aspect_ratio"))) testImageForm.setFieldValue("aspect_ratio", "1:1");
+  }, [testImageForm, testImageModel]);
 
   const load = useCallback(async (silent = false) => {
     if (!silent) setLoading(true);
@@ -189,7 +205,7 @@ function AdobeConsole() {
         models = (await fetchModels()).data.filter((model) => model.owned_by === "adobe-firefly");
         setAdobeModels(models);
       }
-      testImageForm.setFieldsValue({ prompt: "", model: models[0]?.id, quality: "standard" });
+      testImageForm.setFieldsValue({ prompt: "", model: models[0]?.id, aspect_ratio: "1:1", quality: "standard" });
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "加载 Adobe 模型失败");
     } finally {
@@ -345,7 +361,7 @@ function AdobeConsole() {
     </Modal>
 
     <Modal title={testImageAccount ? `测试生图 · ${accountLabel(testImageAccount)}` : "测试生图"} open={testImageOpen} onCancel={() => testImageJob?.status !== "running" && setTestImageOpen(false)} width={780} footer={testImageJob ? <Button disabled={testImageJob.status === "running"} onClick={() => setTestImageOpen(false)}>关闭</Button> : <Space><Button onClick={() => setTestImageOpen(false)}>取消</Button><Button type="primary" loading={pending === "test-image"} onClick={() => void runTestImage()}>开始生成</Button></Space>}>
-      {testImageJob ? <div className="space-y-4"><Progress percent={testImageJob.percent} status={testImageJob.status === "failed" ? "exception" : testImageJob.status === "succeeded" ? "success" : "active"} /><Typography.Text>{testImageJob.message}</Typography.Text>{testImageJob.image_data_url ? <div className="flex justify-center rounded border border-slate-200 bg-slate-50 p-3"><Image src={testImageJob.image_data_url} alt="Adobe 测试生成结果" className="max-h-[420px] object-contain" /></div> : null}<Timeline items={testImageJob.events.map((event) => ({ children: `${event.message} · ${formatShanghaiDateTime(event.at)}` }))} /></div> : <Form form={testImageForm} layout="vertical"><Form.Item name="model" label="模型" rules={[{ required: true }]}><Select loading={modelsLoading} options={adobeModels.map((model) => ({ label: model.id, value: model.id }))} /></Form.Item><Form.Item name="quality" label="质量"><Select options={[{ label: "标准", value: "standard" }, { label: "高质量", value: "high" }]} /></Form.Item><Form.Item name="prompt" label="提示词" rules={[{ required: true }]}><Input.TextArea autoSize={{ minRows: 5, maxRows: 10 }} maxLength={1200} showCount /></Form.Item></Form>}
+      {testImageJob ? <div className="space-y-4"><Progress percent={testImageJob.percent} status={testImageJob.status === "failed" ? "exception" : testImageJob.status === "succeeded" ? "success" : "active"} /><Typography.Text>{testImageJob.message}</Typography.Text>{testImageJob.image_data_url ? <div className="flex justify-center rounded border border-slate-200 bg-slate-50 p-3"><Image src={testImageJob.image_data_url} alt="Adobe 测试生成结果" className="max-h-[420px] object-contain" /></div> : null}<Timeline items={testImageJob.events.map((event) => ({ children: `${event.message} · ${formatShanghaiDateTime(event.at)}` }))} /></div> : <Form form={testImageForm} layout="vertical"><Form.Item name="model" label="模型" rules={[{ required: true }]}><Select loading={modelsLoading} options={adobeModels.map((model) => ({ label: model.id, value: model.id }))} /></Form.Item><div className="grid grid-cols-2 gap-3"><Form.Item name="aspect_ratio" label="宽高比"><Select options={testImageAspectRatioOptions} /></Form.Item><Form.Item name="quality" label="质量"><Select options={[{ label: "标准", value: "standard" }, { label: "高质量", value: "high" }]} /></Form.Item></div><Form.Item name="prompt" label="提示词" rules={[{ required: true }]}><Input.TextArea autoSize={{ minRows: 5, maxRows: 10 }} maxLength={1200} showCount /></Form.Item></Form>}
     </Modal>
   </div>;
 }

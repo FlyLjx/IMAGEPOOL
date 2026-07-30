@@ -197,9 +197,10 @@ func (r *Runtime) handleAdminAccount(w http.ResponseWriter, req *http.Request, r
 	}
 	if len(parts) == 3 && parts[1] == "test-image" && parts[2] == "start" && req.Method == http.MethodPost {
 		var body struct {
-			Prompt  string `json:"prompt"`
-			Model   string `json:"model"`
-			Quality string `json:"quality"`
+			Prompt      string `json:"prompt"`
+			Model       string `json:"model"`
+			AspectRatio string `json:"aspect_ratio"`
+			Quality     string `json:"quality"`
 		}
 		if err := decodeInternalJSON(req, &body); err != nil {
 			writeInternalError(w, http.StatusBadRequest, "INVALID_REQUEST", err.Error(), false, requestID)
@@ -219,7 +220,7 @@ func (r *Runtime) handleAdminAccount(w http.ResponseWriter, req *http.Request, r
 			writeInternalError(w, http.StatusConflict, "ACCOUNT_NOT_READY", "Adobe account is not ready", false, requestID)
 			return
 		}
-		job, created, err := r.StartTestImageJob(account, body.Prompt, body.Model, body.Quality)
+		job, created, err := r.StartTestImageJob(account, body.Prompt, body.Model, body.AspectRatio, body.Quality)
 		if err != nil {
 			writeInternalError(w, http.StatusInternalServerError, "TEST_IMAGE_JOB_START_FAILED", err.Error(), true, requestID)
 			return

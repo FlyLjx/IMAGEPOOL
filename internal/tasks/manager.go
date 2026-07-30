@@ -71,6 +71,7 @@ type Task struct {
 	Prompt                 string           `json:"prompt,omitempty"`
 	Model                  string           `json:"model,omitempty"`
 	Size                   string           `json:"size,omitempty"`
+	AspectRatio            string           `json:"aspect_ratio,omitempty"`
 	Quality                string           `json:"quality,omitempty"`
 	ResponseFormat         string           `json:"response_format,omitempty"`
 	OutputFormat           string           `json:"output_format,omitempty"`
@@ -372,7 +373,7 @@ func (m *Manager) create(mode, ownerID, clientTaskID string, req images.Request,
 	m.seq++
 	id := fmt.Sprintf("img_%d_%d", time.Now().UnixNano(), m.seq)
 	now := time.Now()
-	task := &Task{ID: id, OwnerID: strings.TrimSpace(ownerID), ClientTaskID: clientTaskID, Mode: mode, Status: StatusQueued, Progress: "queued", ProgressPercent: 0, RealtimeStatus: "任务已提交", Prompt: req.Prompt, Model: publicTaskModel(req.Model), Size: strings.TrimSpace(req.Size), Quality: req.Quality, ResponseFormat: req.ResponseFormat, OutputFormat: req.OutputFormat, CallbackURL: strings.TrimSpace(req.CallbackURL), CreatedAt: now, UpdatedAt: now}
+	task := &Task{ID: id, OwnerID: strings.TrimSpace(ownerID), ClientTaskID: clientTaskID, Mode: mode, Status: StatusQueued, Progress: "queued", ProgressPercent: 0, RealtimeStatus: "任务已提交", Prompt: req.Prompt, Model: publicTaskModel(req.Model), Size: strings.TrimSpace(req.Size), AspectRatio: strings.TrimSpace(req.AspectRatio), Quality: req.Quality, ResponseFormat: req.ResponseFormat, OutputFormat: req.OutputFormat, CallbackURL: strings.TrimSpace(req.CallbackURL), CreatedAt: now, UpdatedAt: now}
 	appendLog(task, LogEntry{Time: now, Level: "info", Event: "submitted", Progress: "queued", Message: "任务已提交"})
 	m.tasks[id] = task
 	m.markDirtyLocked(id)

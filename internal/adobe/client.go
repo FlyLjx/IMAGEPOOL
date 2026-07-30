@@ -31,6 +31,7 @@ type ImageReference struct {
 type ImageGenerateRequest struct {
 	Prompt       string
 	Model        string
+	AspectRatio  string
 	Quality      string
 	OutputFormat string
 	References   []ImageReference
@@ -133,7 +134,12 @@ func validateImageGenerateRequest(request *ImageGenerateRequest) (Model, error) 
 		return Model{}, err
 	}
 	request.OutputFormat = outputFormat
-	return ResolveModel(request.Model)
+	model, err := ResolveRequestedModel(request.Model, request.AspectRatio)
+	if err != nil {
+		return Model{}, err
+	}
+	request.Model = model.ID
+	return model, nil
 }
 
 func normalizeAdobeOutputFormat(value string) (string, error) {

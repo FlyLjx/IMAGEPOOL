@@ -22,6 +22,7 @@ type ImageRequest struct {
 	Model          string              `json:"model"`
 	N              int                 `json:"n"`
 	Size           string              `json:"size"`
+	AspectRatio    string              `json:"aspect_ratio,omitempty"`
 	Quality        string              `json:"quality"`
 	ResponseFormat string              `json:"response_format"`
 	OutputFormat   string              `json:"output_format"`

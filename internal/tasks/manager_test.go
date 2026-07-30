@@ -313,10 +313,20 @@ func (s taskSvc) GenerateWithAccount(ctx context.Context, _ string, req images.R
 
 func TestSubmitCreatesUniqueTasksNoReuse(t *testing.T) {
 	m := NewManager(taskSvc{})
+	defer m.Close()
 	a := m.SubmitGeneration("same-client-id", images.Request{Prompt: "a"})
 	b := m.SubmitGeneration("same-client-id", images.Request{Prompt: "a"})
 	if a.ID == b.ID {
 		t.Fatal("duplicate client id reused task")
+	}
+}
+
+func TestSubmitPreservesAdobeAspectRatioAndPublicModel(t *testing.T) {
+	m := NewManager(taskSvc{})
+	defer m.Close()
+	task := m.SubmitGeneration("ratio", images.Request{Prompt: "draw", Model: "firefly-gpt-image-2k-16x9", AspectRatio: "16:9"})
+	if task.Model != "firefly-gpt-image-2k" || task.AspectRatio != "16:9" {
+		t.Fatalf("task=%#v", task)
 	}
 }
 

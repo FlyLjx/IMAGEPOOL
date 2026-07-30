@@ -21,6 +21,7 @@ type TestImageJob struct {
 	ID            string              `json:"id"`
 	AccountID     string              `json:"account_id"`
 	Model         string              `json:"model"`
+	AspectRatio   string              `json:"aspect_ratio,omitempty"`
 	Status        string              `json:"status"`
 	Stage         string              `json:"stage"`
 	Message       string              `json:"message"`
@@ -45,8 +46,8 @@ func newTestImageJobManager() *testImageJobManager {
 	return &testImageJobManager{jobs: map[string]*TestImageJob{}, byAccount: map[string]string{}, now: time.Now}
 }
 
-func (m *testImageJobManager) Start(accountID, model string) (TestImageJob, bool, error) {
-	accountID, model = strings.TrimSpace(accountID), strings.TrimSpace(model)
+func (m *testImageJobManager) Start(accountID, model, aspectRatio string) (TestImageJob, bool, error) {
+	accountID, model, aspectRatio = strings.TrimSpace(accountID), strings.TrimSpace(model), strings.TrimSpace(aspectRatio)
 	if accountID == "" || model == "" {
 		return TestImageJob{}, false, errors.New("account_id and model are required")
 	}
@@ -63,7 +64,7 @@ func (m *testImageJobManager) Start(accountID, model string) (TestImageJob, bool
 		return TestImageJob{}, false, err
 	}
 	now := m.now().UTC()
-	job := &TestImageJob{ID: id, AccountID: accountID, Model: model, Status: "running", Stage: "queued", Message: "测试生图任务已排队", Percent: 1, StartedAt: now, UpdatedAt: now}
+	job := &TestImageJob{ID: id, AccountID: accountID, Model: PublicModelID(model), AspectRatio: aspectRatio, Status: "running", Stage: "queued", Message: "测试生图任务已排队", Percent: 1, StartedAt: now, UpdatedAt: now}
 	job.Events = append(job.Events, TestImageJobEvent{Stage: job.Stage, Message: job.Message, Percent: job.Percent, At: now})
 	m.jobs[id], m.byAccount[accountID] = job, id
 	return cloneTestImageJob(job), true, nil
@@ -180,8 +181,13 @@ func testImageProgressMessage(stage string) string {
 	}
 }
 
-func (r *Runtime) StartTestImageJob(account Account, prompt, model, quality string) (TestImageJob, bool, error) {
-	job, created, err := r.testImageJobs.Start(account.AccountID, model)
+func (r *Runtime) StartTestImageJob(account Account, prompt, model, aspectRatio, quality string) (TestImageJob, bool, error) {
+	resolved, err := ResolveRequestedModel(model, aspectRatio)
+	if err != nil {
+		return TestImageJob{}, false, err
+	}
+	model, aspectRatio = resolved.ID, resolved.AspectRatio
+	job, created, err := r.testImageJobs.Start(account.AccountID, model, aspectRatio)
 	if err != nil || !created {
 		return job, created, err
 	}
@@ -189,7 +195,7 @@ func (r *Runtime) StartTestImageJob(account Account, prompt, model, quality stri
 		ctx, cancel := context.WithTimeout(context.Background(), time.Duration(r.config.GenerateTimeoutSecs+30)*time.Second)
 		defer cancel()
 		result, generateErr := r.GenerateImageWithAccount(ctx, account.AccountID, ImageGenerateRequest{
-			Prompt: prompt, Model: model, Quality: quality,
+			Prompt: prompt, Model: model, AspectRatio: aspectRatio, Quality: quality,
 			Progress: func(stage string, percent int, details map[string]any) {
 				r.testImageJobs.Update(jobID, stage, testImageProgressMessage(stage), percent, details)
 			},

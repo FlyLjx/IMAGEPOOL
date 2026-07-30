@@ -147,9 +147,10 @@ func (s *Service) Generate(ctx context.Context, req Request) (Response, error) {
 	req.ResponseFormat = responseFormat
 	req.OutputFormat, _ = normalizeOutputFormat(req.OutputFormat)
 	if adobeprovider.IsRequestedModel(req.Model) {
-		// Adobe model IDs already encode output resolution and aspect ratio.
+		// The resolved hidden Adobe variant already encodes resolution and ratio.
 		req.Size = ""
-		return s.generateAdobe(ctx, req)
+		response, err := s.generateAdobe(ctx, req)
+		return responseWithModel(response, publicModel), err
 	}
 	if req.N == 1 {
 		result, err := s.generateOne(ctx, req)
@@ -202,7 +203,7 @@ func (s *Service) generateAdobe(ctx context.Context, req Request) (Response, err
 		references = append(references, adobeprovider.ImageReference{Data: reference.Data, MIMEType: reference.MIMEType})
 	}
 	result, err := s.adobe.GenerateImage(ctx, adobeprovider.ImageGenerateRequest{
-		Prompt: req.Prompt, Model: req.Model, Quality: req.Quality, OutputFormat: req.OutputFormat, References: references,
+		Prompt: req.Prompt, Model: req.Model, AspectRatio: req.AspectRatio, Quality: req.Quality, OutputFormat: req.OutputFormat, References: references,
 		Progress: func(progress string, percent int, details map[string]any) {
 			if req.Progress != nil {
 				req.Progress(openaiweb.ProgressEvent{Progress: progress, Message: "Adobe Firefly image generation", Details: details})
@@ -931,10 +932,7 @@ func (r Response) Public() Response {
 }
 
 func PublicModel(model string) string {
-	if adobeprovider.IsRequestedModel(model) {
-		return strings.TrimSpace(model)
-	}
-	return PublicImageModel
+	return PublicModelName(model)
 }
 
 func imageMIMETypeFromBase64(encoded string) string {

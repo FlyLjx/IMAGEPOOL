@@ -130,6 +130,9 @@ func TestParseEditRequestSupportsMultipartImageArrayFields(t *testing.T) {
 	if err := writer.WriteField("prompt", "edit prompt"); err != nil {
 		t.Fatal(err)
 	}
+	if err := writer.WriteField("aspect_ratio", "16:9"); err != nil {
+		t.Fatal(err)
+	}
 	if err := writer.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -140,8 +143,8 @@ func TestParseEditRequestSupportsMultipartImageArrayFields(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if req.Prompt != "edit prompt" {
-		t.Fatalf("prompt=%q", req.Prompt)
+	if req.Prompt != "edit prompt" || req.AspectRatio != "16:9" {
+		t.Fatalf("prompt=%q aspect_ratio=%q", req.Prompt, req.AspectRatio)
 	}
 	if len(req.References) != 2 {
 		t.Fatalf("reference count=%d, want 2", len(req.References))
@@ -160,7 +163,7 @@ func TestParseEditRequestSupportsJSONImageAliases(t *testing.T) {
 	defer remote.Close()
 
 	server := newImageInputTestServer(t, 1)
-	body := fmt.Sprintf(`{"image_urls":[%q],"reference_images":[{"image_url":{"url":%q}}],"input_image":%q}`,
+	body := fmt.Sprintf(`{"aspect_ratio":"4:3","image_urls":[%q],"reference_images":[{"image_url":{"url":%q}}],"input_image":%q}`,
 		remote.URL+"/first.png",
 		remote.URL+"/second.png",
 		remote.URL+"/third.png",
@@ -173,6 +176,9 @@ func TestParseEditRequestSupportsJSONImageAliases(t *testing.T) {
 	}
 	if len(req.References) != 3 {
 		t.Fatalf("reference count=%d, want 3", len(req.References))
+	}
+	if req.AspectRatio != "4:3" {
+		t.Fatalf("aspect_ratio=%q", req.AspectRatio)
 	}
 	wantNames := []string{"first.png", "second.png", "third.png"}
 	for index, want := range wantNames {

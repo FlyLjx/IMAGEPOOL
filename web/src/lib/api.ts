@@ -323,6 +323,7 @@ export type ImageTask = {
   prompt?: string;
   model?: ImageModel;
   size?: string;
+  aspect_ratio?: string;
   quality?: string;
   response_format?: string;
   output_format?: string;
@@ -1344,6 +1345,7 @@ export type AdobeTestImageJob = {
   id: string;
   account_id: string;
   model: string;
+  aspect_ratio?: string;
   status: "running" | "succeeded" | "failed";
   stage: string;
   message: string;
@@ -1423,7 +1425,7 @@ export async function fetchAdobeTokenRefreshJob(jobId: string) {
   return httpRequest<{ item: AdobeTokenRefreshJob }>(`/api/adobe/token-refresh-jobs/${encodeURIComponent(jobId)}`);
 }
 
-export async function startAdobeAccountTestImage(accountId: string, input: { prompt: string; model: string; quality?: string }) {
+export async function startAdobeAccountTestImage(accountId: string, input: { prompt: string; model: string; aspect_ratio?: string; quality?: string }) {
   return httpRequest<{ item: AdobeTestImageJob; created: boolean }>(`/api/adobe/accounts/${encodeURIComponent(accountId)}/test-image/start`, {
     method: "POST",
     body: input,

@@ -798,6 +798,7 @@ func (s *Server) handleTaskGeneration(w http.ResponseWriter, r *http.Request) {
 		Prompt         string `json:"prompt"`
 		Model          string `json:"model"`
 		Size           string `json:"size"`
+		AspectRatio    string `json:"aspect_ratio"`
 		Quality        string `json:"quality"`
 		ResponseFormat string `json:"response_format"`
 		OutputFormat   string `json:"output_format"`
@@ -808,7 +809,7 @@ func (s *Server) handleTaskGeneration(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	req := images.Request{Prompt: body.Prompt, Model: body.Model, Size: body.Size, Quality: body.Quality, ResponseFormat: body.ResponseFormat, OutputFormat: body.OutputFormat, CallbackURL: body.CallbackURL, N: normalizedImageCount(body.N), OutputBaseURL: baseURL(r)}
+	req := images.Request{Prompt: body.Prompt, Model: body.Model, Size: body.Size, AspectRatio: body.AspectRatio, Quality: body.Quality, ResponseFormat: body.ResponseFormat, OutputFormat: body.OutputFormat, CallbackURL: body.CallbackURL, N: normalizedImageCount(body.N), OutputBaseURL: baseURL(r)}
 	if err := validateImageOutputOptions(req); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
@@ -2064,7 +2065,7 @@ func (s *Server) parseEditRequest(r *http.Request) (images.Request, string, erro
 			return images.Request{}, "", err
 		}
 		form := r.MultipartForm
-		req := images.Request{Prompt: formValue(form, "prompt"), Model: formValue(form, "model"), Size: formValue(form, "size"), Quality: formValue(form, "quality"), ResponseFormat: formValue(form, "response_format"), OutputFormat: formValue(form, "output_format"), CallbackURL: formValue(form, "callback_url")}
+		req := images.Request{Prompt: formValue(form, "prompt"), Model: formValue(form, "model"), Size: formValue(form, "size"), AspectRatio: formValue(form, "aspect_ratio"), Quality: formValue(form, "quality"), ResponseFormat: formValue(form, "response_format"), OutputFormat: formValue(form, "output_format"), CallbackURL: formValue(form, "callback_url")}
 		req.Async, _ = strconv.ParseBool(formValue(form, "async"))
 		if n, _ := strconv.Atoi(formValue(form, "n")); n > 0 {
 			req.N = n
@@ -2095,6 +2096,7 @@ func (s *Server) parseEditRequest(r *http.Request) (images.Request, string, erro
 		Model           string `json:"model"`
 		N               int    `json:"n"`
 		Size            string `json:"size"`
+		AspectRatio     string `json:"aspect_ratio"`
 		Quality         string `json:"quality"`
 		ResponseFormat  string `json:"response_format"`
 		OutputFormat    string `json:"output_format"`
@@ -2128,7 +2130,7 @@ func (s *Server) parseEditRequest(r *http.Request) (images.Request, string, erro
 	if err != nil {
 		return images.Request{}, "", err
 	}
-	return images.Request{Prompt: body.Prompt, Model: body.Model, N: body.N, Size: body.Size, Quality: body.Quality, ResponseFormat: body.ResponseFormat, OutputFormat: body.OutputFormat, Async: body.Async, CallbackURL: body.CallbackURL, References: refs}, body.ClientTaskID, nil
+	return images.Request{Prompt: body.Prompt, Model: body.Model, N: body.N, Size: body.Size, AspectRatio: body.AspectRatio, Quality: body.Quality, ResponseFormat: body.ResponseFormat, OutputFormat: body.OutputFormat, Async: body.Async, CallbackURL: body.CallbackURL, References: refs}, body.ClientTaskID, nil
 }
 
 func editMultipartImageFields(files map[string][]*multipart.FileHeader) []string {

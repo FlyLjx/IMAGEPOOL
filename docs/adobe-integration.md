@@ -1,6 +1,6 @@
 # Adobe 号池与反代线路
 
-Adobe 号池与 GPT 号池相互独立。GPT 账号继续使用 `/api/accounts`；Adobe 账号通过 `/api/adobe/accounts/import` 导入并保存在 PostgreSQL `adobe_accounts`。统一图片接口按模型分流：现有 `gpt-image-2` 走 ChatGPT Web，目录内精确的 `firefly-*` 模型走 Adobe。
+Adobe 号池与 GPT 号池相互独立。GPT 账号继续使用 `/api/accounts`；Adobe 账号通过 `/api/adobe/accounts/import` 导入并保存在 PostgreSQL `adobe_accounts`。统一图片接口按模型分流：现有 `gpt-image-2` 走 ChatGPT Web，9 个公开 `firefly-*` 基础模型及兼容的旧精确变体走 Adobe。
 
 本实现兼容原版 [`leik1000/adobe2api`](https://github.com/leik1000/adobe2api) 的 Token、Cookie Profile、请求头和 IMS Token 刷新流程。Adobe 生成不使用 Chromium、ARP、relay 或持久化租约。每次请求只通过一个短事务轮询选择可用账号，随后使用账号绑定线路直接请求 Adobe；可重试错误最多切换两个其他账号。
 
@@ -132,13 +132,35 @@ GET /api/adobe/token-refresh-jobs/{job_id}
 
 ## 统一接口
 
-- `GET /v1/models`：Adobe 开启时返回 72 个 `owned_by=adobe-firefly` 的正式模型。旧版 `firefly-nano-banana-pro-*` 仍可调用，但作为 `nano-banana-2` 的兼容别名不再出现在目录中。
+- `GET /v1/models`：Adobe 开启时返回 9 个 `owned_by=adobe-firefly` 的公开基础模型。
 - `POST /v1/images/generations`
 - `POST /v1/images/edits`
 - `POST /api/image-tasks/generations`
 - `POST /api/image-tasks/edits`
 
-公开模型目录只返回生图模型，服务不提供 `/v1/chat/completions`、`/v1/responses` 或 `/v1/messages`。客户端只需传 `model` 和 `prompt`；Adobe 分辨率与宽高比由模型名中的后缀确定，额外的 `size` 参数会被忽略。当前 Express 号池使用的 `/v2/3p-images/generate-async` 对 Nano Banana 与 GPT Image 均返回原生 PNG；IMAGE POOL 下载结果后按 `output_format=png|jpeg|jpg|webp` 本地转换，再进行 URL 缓存或 Base64 包装。GPT 号池原有格式处理不受影响。
+公开基础模型固定分辨率，宽高比通过 `aspect_ratio` 选择：
+
+- `firefly-nano-banana-{1k|2k|4k}`：`1:1`、`16:9`、`9:16`、`4:3`、`3:4`。
+- `firefly-nano-banana2-{1k|2k|4k}`：上述比例加 `1:8`、`1:4`、`4:1`、`8:1`。
+- `firefly-gpt-image-{1k|2k|4k}`：`1:1`、`5:4`、`9:16`、`21:9`、`16:9`、`3:2`、`4:3`、`4:5`、`3:4`、`2:3`。
+
+`aspect_ratio` 同时接受 `16:9`、`16x9` 和 `16/9`，等价比例会先约分匹配，例如 `7:3` 对应 `21:9`。缺失或不支持的比例使用同分辨率 `1:1`，不会选择最接近比例。旧版精确模型 ID（如 `firefly-gpt-image-2k-16x9`）继续可调用，精确 ID 内的比例优先，传入的 `aspect_ratio` 会被忽略。旧版 `firefly-nano-banana-pro-*` 也继续作为 Nano Banana 兼容别名，但不在 `/v1/models` 中显示。
+
+生成示例：
+
+```http
+POST /v1/images/generations
+Content-Type: application/json
+
+{
+  "model": "firefly-gpt-image-2k",
+  "prompt": "a product photo on a clean studio background",
+  "aspect_ratio": "16:9",
+  "output_format": "webp"
+}
+```
+
+公开模型目录只返回生图模型，服务不提供 `/v1/chat/completions`、`/v1/responses` 或 `/v1/messages`。Adobe 请求中的 `size` 参数会被忽略。当前 Express 号池使用的 `/v2/3p-images/generate-async` 对 Nano Banana 与 GPT Image 均返回原生 PNG；IMAGE POOL 下载结果后按 `output_format=png|jpeg|jpg|webp` 本地转换，再进行 URL 缓存或 Base64 包装。GPT 号池原有格式处理不受影响。
 
 Adobe 请求固定每次生成一张图片。公开 Adobe 图片请求支持 `Idempotency-Key`；相同用户、端点、有效请求参数和键会回放已完成响应，不重复扣减配额。
 

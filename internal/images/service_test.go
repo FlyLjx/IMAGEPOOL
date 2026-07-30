@@ -55,7 +55,7 @@ func TestGenerateRoutesFireflyModelsToAdobeBackend(t *testing.T) {
 	if adobe.request.Model != adobeprovider.DefaultModelID || adobe.request.OutputFormat != "jpeg" || len(adobe.request.References) != 1 || string(adobe.request.References[0].Data) != "reference" {
 		t.Fatalf("Adobe request=%#v", adobe.request)
 	}
-	if response.Model != adobeprovider.DefaultModelID || response.ConversationID != "job-1" || len(response.Data) != 1 || response.Data[0].B64JSON == "" || response.Data[0].Format != "jpeg" || response.Data[0].MimeType != "image/jpeg" {
+	if response.Model != "firefly-nano-banana-2k" || response.ConversationID != "job-1" || len(response.Data) != 1 || response.Data[0].B64JSON == "" || response.Data[0].Format != "jpeg" || response.Data[0].MimeType != "image/jpeg" {
 		t.Fatalf("response=%#v", response)
 	}
 	data, err := base64.StdEncoding.DecodeString(response.Data[0].B64JSON)
@@ -64,16 +64,35 @@ func TestGenerateRoutesFireflyModelsToAdobeBackend(t *testing.T) {
 	}
 }
 
+func TestGenerateResolvesNormalizedAdobeModelFromAspectRatio(t *testing.T) {
+	chatgpt := &fakeBackend{}
+	service := NewService(config.Default(), accounts.NewStore(nil, ""), chatgpt)
+	adobe := &fakeAdobeBackend{result: adobeprovider.ImageGenerateResult{Images: [][]byte{testPNGBytes(t)}}}
+	service.SetAdobeBackend(adobe)
+
+	response, err := service.Generate(context.Background(), Request{Prompt: "draw", Model: "firefly-gpt-image-2k", AspectRatio: "16x9", ResponseFormat: "b64_json"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if adobe.request.Model != "firefly-gpt-image-2k-16x9" || adobe.request.AspectRatio != "16x9" {
+		t.Fatalf("Adobe request=%#v", adobe.request)
+	}
+	if response.Model != "firefly-gpt-image-2k" || response.BackendModel != "firefly-gpt-image-2k" {
+		t.Fatalf("response=%#v", response)
+	}
+}
+
 func TestGenerateKeepsDefaultImageModelOnChatGPTBackend(t *testing.T) {
 	chatgpt := &fakeBackend{}
 	service := NewService(config.Default(), accounts.NewStore([]accounts.Account{{Email: "a", AccessToken: "token"}}, ""), chatgpt)
-	service.SetAdobeBackend(&fakeAdobeBackend{})
+	adobe := &fakeAdobeBackend{}
+	service.SetAdobeBackend(adobe)
 
-	if _, err := service.Generate(context.Background(), Request{Prompt: "draw", Model: PublicImageModel}); err != nil {
+	if _, err := service.Generate(context.Background(), Request{Prompt: "draw", Model: PublicImageModel, AspectRatio: "16:9"}); err != nil {
 		t.Fatal(err)
 	}
-	if chatgpt.calls != 1 {
-		t.Fatalf("ChatGPT backend calls=%d", chatgpt.calls)
+	if chatgpt.calls != 1 || adobe.calls != 0 {
+		t.Fatalf("ChatGPT backend calls=%d Adobe calls=%d", chatgpt.calls, adobe.calls)
 	}
 }
 
@@ -599,6 +618,21 @@ func TestGenerateInteractiveChallengePreservesAccounts(t *testing.T) {
 func TestListModelsFallback(t *testing.T) {
 	models, err := NewService(config.Default(), accounts.NewStore(nil, ""), &fakeBackend{}).ListModels(context.Background())
 	want := []string{"gpt-image-2"}
+	if err != nil || !reflect.DeepEqual(models, want) {
+		t.Fatalf("models=%#v want=%#v err=%v", models, want, err)
+	}
+}
+
+func TestListModelsIncludesOnlyNormalizedAdobeModels(t *testing.T) {
+	service := NewService(config.Default(), accounts.NewStore(nil, ""), &fakeBackend{})
+	service.SetAdobeBackend(&fakeAdobeBackend{})
+	models, err := service.ListModels(context.Background())
+	want := []string{
+		"gpt-image-2",
+		"firefly-gpt-image-1k", "firefly-gpt-image-2k", "firefly-gpt-image-4k",
+		"firefly-nano-banana-1k", "firefly-nano-banana-2k", "firefly-nano-banana-4k",
+		"firefly-nano-banana2-1k", "firefly-nano-banana2-2k", "firefly-nano-banana2-4k",
+	}
 	if err != nil || !reflect.DeepEqual(models, want) {
 		t.Fatalf("models=%#v want=%#v err=%v", models, want, err)
 	}
