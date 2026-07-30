@@ -144,7 +144,7 @@ GET /api/adobe/token-refresh-jobs/{job_id}
 - `firefly-nano-banana2-{1k|2k|4k}`：上述比例加 `1:8`、`1:4`、`4:1`、`8:1`。
 - `firefly-gpt-image-{1k|2k|4k}`：`1:1`、`5:4`、`9:16`、`21:9`、`16:9`、`3:2`、`4:3`、`4:5`、`3:4`、`2:3`。
 
-`aspect_ratio` 同时接受 `16:9`、`16x9` 和 `16/9`，等价比例会先约分匹配，例如 `7:3` 对应 `21:9`。缺少 `aspect_ratio` 时，后端从 `size=宽x高` 推导比例，兼容 New API、Sub2API 和 AI-PAI 只转发 `size` 的请求；`2048x1360`、`1360x2048` 等近似尺寸会分别归一成 `3:2`、`2:3`。显式 `aspect_ratio` 优先于 `size`。缺失或不支持的比例使用同分辨率 `1:1`，不会选择最接近比例。
+`aspect_ratio` 同时接受 `16:9`、`16x9` 和 `16/9`，等价比例会先约分匹配，例如 `7:3` 对应 `21:9`。缺少 `aspect_ratio` 时，后端从 `size=宽x高` 推导比例，兼容 New API、Sub2API 和 AI-PAI 只转发 `size` 的请求；`2048x1360`、`1360x2048` 等近似尺寸会分别归一成 `3:2`、`2:3`。显式 `aspect_ratio` 优先于 `size`；如果 `size` 计算出的比例不在当前模型支持列表中，则选择最接近的后台比例，避免 `1536x1024`、`1024x1536` 这类常用 OpenAI 尺寸回落到 `1:1`。无效或缺失参数才使用同分辨率 `1:1`。
 
 模型名中的 1K/2K/4K 分辨率始终优先，客户端像素尺寸只用于选择比例，不会直接覆盖 Adobe 最终提交尺寸。旧版精确模型 ID（如 `firefly-gpt-image-2k-16x9`）继续可调用，精确 ID 内的比例优先，请求中的 `aspect_ratio` 和 `size` 会被忽略。旧版 `firefly-nano-banana-pro-*` 也继续作为 Nano Banana 兼容别名，但不在 `/v1/models` 中显示。
 
@@ -164,7 +164,7 @@ Content-Type: application/json
 
 公开模型目录只返回生图模型，服务不提供 `/v1/chat/completions`、`/v1/responses` 或 `/v1/messages`。当前 Express 号池使用的 `/v2/3p-images/generate-async` 对 Nano Banana 与 GPT Image 均返回原生 PNG；IMAGE POOL 下载结果后按 `output_format=png|jpeg|jpg|webp` 本地转换，再进行 URL 缓存或 Base64 包装。GPT 号池原有格式处理不受影响。
 
-Adobe 请求固定每次生成一张图片。GPT Image 的分辨率和推理档位由模型名控制：1K/2K 使用快速 `detailLevel=1`，仅 4K 使用高质量 `detailLevel=5`；兼容接收的 `quality` 不再改变档位，避免 `quality=high` 将 1K/2K 请求触发上游长时间排队。公开 Adobe 图片请求支持 `Idempotency-Key`；相同用户、端点、有效请求参数和键会回放已完成响应，不重复扣减配额。
+Adobe 请求固定每次生成一张图片。GPT Image 的分辨率由模型名控制：1K/2K 固定使用快速 `detailLevel=1`，避免兼容请求里的 `quality=high` 将低分辨率任务触发上游长时间排队；4K 默认使用标准 `detailLevel=3`，仅显式 `quality=high`、`hd`、`4k` 或 `ultra` 时走高质量 `detailLevel=5`。公开 Adobe 图片请求支持 `Idempotency-Key`；相同用户、端点、有效请求参数和键会回放已完成响应，不重复扣减配额。
 
 管理页可用指定账号测试生图：
 

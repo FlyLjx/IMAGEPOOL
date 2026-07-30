@@ -2,6 +2,7 @@ package adobe
 
 import (
 	"fmt"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -55,7 +56,9 @@ func ResolveRequestedModel(id, aspectRatio string) (Model, error) {
 
 // ResolveRequestedModelWithSize uses size as an aspect-ratio fallback for
 // OpenAI-compatible clients that do not preserve aspect_ratio. The public model
-// ID remains authoritative for output resolution.
+// ID remains authoritative for output resolution. When size reduces to a ratio
+// that the selected Adobe family does not expose, the nearest supported ratio
+// is used so common OpenAI sizes such as 1536x1024 do not collapse to 1:1.
 func ResolveRequestedModelWithSize(id, aspectRatio, size string) (Model, error) {
 	id = strings.TrimSpace(id)
 	if model, ok := modelCatalog[id]; ok {
@@ -66,11 +69,20 @@ func ResolveRequestedModelWithSize(id, aspectRatio, size string) (Model, error) 
 	}
 	variants := publicModelVariants[id]
 	ratio := aspectRatioFromValue(aspectRatio)
-	if ratio == "" {
-		ratio = aspectRatioFromValue(size)
+	if ratio != "" {
+		if model, ok := variants[ratio]; ok {
+			return model, nil
+		}
+		return variants[aspectRatioKey("1:1")], nil
 	}
-	if model, ok := variants[ratio]; ok {
-		return model, nil
+	ratio = aspectRatioFromValue(size)
+	if ratio != "" {
+		if model, ok := variants[ratio]; ok {
+			return model, nil
+		}
+		if model, ok := nearestVariant(variants, ratio); ok {
+			return model, nil
+		}
 	}
 	return variants[aspectRatioKey("1:1")], nil
 }
@@ -172,21 +184,58 @@ func aspectRatioFromValue(value string) string {
 	return aspectRatioKey(value)
 }
 
+func nearestVariant(variants map[string]Model, target string) (Model, bool) {
+	targetWidth, targetHeight := aspectRatioParts(target)
+	if targetWidth <= 0 || targetHeight <= 0 {
+		return Model{}, false
+	}
+	keys := make([]string, 0, len(variants))
+	for ratio := range variants {
+		keys = append(keys, ratio)
+	}
+	sort.Strings(keys)
+	targetLog := math.Log(float64(targetWidth) / float64(targetHeight))
+	bestDistance := math.Inf(1)
+	var best Model
+	found := false
+	for _, ratio := range keys {
+		width, height := aspectRatioParts(ratio)
+		if width <= 0 || height <= 0 {
+			continue
+		}
+		distance := math.Abs(math.Log(float64(width)/float64(height)) - targetLog)
+		if !found || distance < bestDistance {
+			bestDistance = distance
+			best = variants[ratio]
+			found = true
+		}
+	}
+	return best, found
+}
+
 func aspectRatioKey(value string) string {
+	width, height := aspectRatioParts(value)
+	if width <= 0 || height <= 0 {
+		return ""
+	}
+	divisor := greatestCommonDivisor(width, height)
+	return fmt.Sprintf("%d:%d", width/divisor, height/divisor)
+}
+
+func aspectRatioParts(value string) (int, int) {
 	value = strings.ToLower(strings.TrimSpace(value))
 	value = strings.ReplaceAll(value, "x", ":")
 	value = strings.ReplaceAll(value, "/", ":")
 	parts := strings.Split(value, ":")
 	if len(parts) != 2 {
-		return ""
+		return 0, 0
 	}
 	width, widthErr := strconv.Atoi(strings.TrimSpace(parts[0]))
 	height, heightErr := strconv.Atoi(strings.TrimSpace(parts[1]))
 	if widthErr != nil || heightErr != nil || width <= 0 || height <= 0 {
-		return ""
+		return 0, 0
 	}
-	divisor := greatestCommonDivisor(width, height)
-	return fmt.Sprintf("%d:%d", width/divisor, height/divisor)
+	return width, height
 }
 
 func greatestCommonDivisor(left, right int) int {

@@ -30,7 +30,7 @@ import { useAuthGuard } from "@/lib/use-auth-guard";
 
 const DEFAULT_MODEL_OPTIONS = ["gpt-image-2"];
 const SIZE_OPTIONS = ["1024x1024", "1536x1024", "1024x1536"];
-const QUALITY_OPTIONS = ["auto", "low", "medium", "high"];
+const QUALITY_OPTIONS = ["auto", "standard", "low", "medium", "high"];
 const STANDARD_ADOBE_ASPECT_RATIOS = ["1:1", "16:9", "9:16", "4:3", "3:4"];
 const NANO2_ASPECT_RATIOS = [...STANDARD_ADOBE_ASPECT_RATIOS, "1:8", "1:4", "4:1", "8:1"];
 const GPT_IMAGE_ASPECT_RATIOS = ["1:1", "5:4", "9:16", "21:9", "16:9", "3:2", "4:3", "4:5", "3:4", "2:3"];
@@ -188,6 +188,12 @@ function ImageWorkspace() {
       setAspectRatio("1:1");
     }
   }, [aspectRatio, aspectRatioOptions, isAdobeModel]);
+
+  useEffect(() => {
+    if (model.startsWith("firefly-gpt-image-4k") && quality === "auto") {
+      setQuality("standard");
+    }
+  }, [model, quality]);
 
   const loadTasks = useCallback(async (silent = false) => {
     if (!silent) setIsLoading(true);
@@ -353,7 +359,7 @@ function ImageWorkspace() {
               {completedTasks.flatMap((task) => (task.data || []).map((item, index) => {
                 const src = imageSource(item);
                 if (!src) return null;
-                return <div key={`${task.id}-${index}`} className="overflow-hidden rounded-lg border border-slate-200 bg-slate-50"><Image src={src} alt={task.prompt || "生成图片"} className="block aspect-square !w-full object-cover" preview /><div className="flex items-center justify-between gap-2 border-t border-slate-200 bg-white px-3 py-2"><span className="truncate text-xs text-slate-500">{task.model || "gpt-image-2"}</span><Tooltip title="查看处理日志"><Button type="text" size="small" icon={<Clock3 className="size-4" />} onClick={() => openTaskStatus(task)} /></Tooltip></div></div>;
+                return <div key={`${task.id}-${index}`} className="overflow-hidden rounded-lg border border-slate-200 bg-slate-50"><div className="flex min-h-40 items-center justify-center"><Image src={src} alt={task.prompt || "生成图片"} className="block !h-auto !w-full object-contain" preview /></div><div className="flex items-center justify-between gap-2 border-t border-slate-200 bg-white px-3 py-2"><span className="truncate text-xs text-slate-500">{task.model || "gpt-image-2"}</span><Tooltip title="查看处理日志"><Button type="text" size="small" icon={<Clock3 className="size-4" />} onClick={() => openTaskStatus(task)} /></Tooltip></div></div>;
               }))}
             </div>
           </Image.PreviewGroup>

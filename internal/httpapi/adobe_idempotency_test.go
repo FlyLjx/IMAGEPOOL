@@ -57,6 +57,16 @@ func TestAdobeImageRequestHashUsesSizeAsAspectRatioFallback(t *testing.T) {
 	}
 }
 
+func TestAdobeImageRequestHashUsesNearestSizeVariant(t *testing.T) {
+	bySize := images.Request{Prompt: "draw", Model: "firefly-nano-banana-2k", Size: "1536x1024"}
+	byAspectRatio := bySize
+	byAspectRatio.Size = ""
+	byAspectRatio.AspectRatio = "4:3"
+	if imageRequestHash(bySize) != imageRequestHash(byAspectRatio) {
+		t.Fatal("Adobe size did not resolve to the nearest supported ratio")
+	}
+}
+
 func TestAdobeImageRequestHashUsesEffectiveVariant(t *testing.T) {
 	colon := images.Request{Prompt: "draw", Model: "firefly-gpt-image-2k", AspectRatio: "16:9"}
 	xAlias := colon

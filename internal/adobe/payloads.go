@@ -13,10 +13,7 @@ func imagePayload(model Model, prompt, quality string, sourceImageIDs []string) 
 		if err != nil {
 			return nil, err
 		}
-		detailLevel := 1
-		if strings.EqualFold(model.OutputResolution, "4K") {
-			detailLevel = 5
-		}
+		detailLevel := gptImageDetailLevel(model.OutputResolution, quality)
 		references := make([]map[string]any, 0, len(sourceImageIDs))
 		for _, id := range sourceImageIDs {
 			references = append(references, map[string]any{"id": id, "usage": "subject"})
@@ -54,6 +51,20 @@ func imagePayload(model Model, prompt, quality string, sourceImageIDs []string) 
 		"referenceBlobs": references, "generationMetadata": map[string]any{"module": module, "submodule": "ff-image-generate"},
 		"modelSpecificPayload": map[string]any{"aspectRatio": model.AspectRatio, "parameters": map[string]any{"addWatermark": false}},
 	}, nil
+}
+
+func gptImageDetailLevel(resolution, quality string) int {
+	if !strings.EqualFold(strings.TrimSpace(resolution), "4K") {
+		return 1
+	}
+	switch strings.ToLower(strings.TrimSpace(quality)) {
+	case "high", "hd", "4k", "ultra":
+		return 5
+	case "low", "fast":
+		return 1
+	default:
+		return 3
+	}
 }
 
 func gptImageSize(ratio, resolution string) (map[string]int, error) {

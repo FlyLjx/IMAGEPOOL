@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 0.1.49 - 2026-07-31
+
++ [修复] Adobe 从 OpenAI 风格 `size` 推导比例时，Nano 系列遇到 `1536x1024`、`1024x1536` 等 `3:2`/`2:3` 尺寸会选择最近的 `4:3`/`3:4` 后台变体，避免大部分请求回落到 `1:1`；图片工作台预览不再强制裁剪为正方形。
++ [优化] Firefly GPT Image 4K 默认使用标准推理档位 `detailLevel=3`，仅显式 `quality=high/hd/4k/ultra` 时走高质量 `detailLevel=5`；图片工作台切到 4K 时默认提交 `quality=standard`。
+
 ## 0.1.48 - 2026-07-30
 
 + [优化] Firefly GPT Image 的推理档位改由模型分辨率控制，1K/2K 使用快速 `detailLevel=1`，仅 4K 使用高质量 `detailLevel=5`，避免兼容请求中的 `quality=high` 将低分辨率任务送入慢队列。

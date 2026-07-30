@@ -91,6 +91,8 @@ func TestResolveRequestedModelUsesSizeAsAspectRatioFallback(t *testing.T) {
 		{"firefly-gpt-image-2k", "", "2048x1360", "firefly-gpt-image-2k-3x2"},
 		{"firefly-gpt-image-4k", "", "1360x2048", "firefly-gpt-image-4k-2x3"},
 		{"firefly-gpt-image-2k", "", "1792x1024", "firefly-gpt-image-2k-16x9"},
+		{"firefly-nano-banana-2k", "", "1536x1024", "firefly-nano-banana-2k-4x3"},
+		{"firefly-nano-banana2-2k", "", "1024x1536", "firefly-nano-banana2-2k-3x4"},
 		{"firefly-gpt-image-2k", "4:3", "3072x1728", "firefly-gpt-image-2k-4x3"},
 		{"firefly-gpt-image-2k", "2048x1360", "1024x1024", "firefly-gpt-image-2k-3x2"},
 	}

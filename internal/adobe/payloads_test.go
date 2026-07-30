@@ -2,23 +2,34 @@ package adobe
 
 import "testing"
 
-func TestGPTImagePayloadDetailLevelFollowsModelResolution(t *testing.T) {
-	models := map[string]int{
-		"firefly-gpt-image-1k-1x1":  1,
-		"firefly-gpt-image-2k-16x9": 1,
-		"firefly-gpt-image-4k-16x9": 5,
+func TestGPTImagePayloadDetailLevelFollowsResolutionAndQuality(t *testing.T) {
+	tests := []struct {
+		modelID  string
+		quality  string
+		expected int
+	}{
+		{"firefly-gpt-image-1k-1x1", "", 1},
+		{"firefly-gpt-image-1k-1x1", "high", 1},
+		{"firefly-gpt-image-2k-16x9", "high", 1},
+		{"firefly-gpt-image-4k-16x9", "", 3},
+		{"firefly-gpt-image-4k-16x9", "auto", 3},
+		{"firefly-gpt-image-4k-16x9", "standard", 3},
+		{"firefly-gpt-image-4k-16x9", "medium", 3},
+		{"firefly-gpt-image-4k-16x9", "low", 1},
+		{"firefly-gpt-image-4k-16x9", "high", 5},
+		{"firefly-gpt-image-4k-16x9", "hd", 5},
+		{"firefly-gpt-image-4k-16x9", "4k", 5},
+		{"firefly-gpt-image-4k-16x9", "ultra", 5},
 	}
-	for modelID, expected := range models {
-		model, _ := ResolveModel(modelID)
-		for _, quality := range []string{"", "auto", "low", "medium", "high", "hd", "4k", "ultra"} {
-			payload, err := imagePayload(model, "draw", quality, nil)
-			if err != nil {
-				t.Fatal(err)
-			}
-			settings := payload["generationSettings"].(map[string]any)
-			if settings["detailLevel"] != expected {
-				t.Fatalf("model=%q quality=%q settings=%#v", modelID, quality, settings)
-			}
+	for _, test := range tests {
+		model, _ := ResolveModel(test.modelID)
+		payload, err := imagePayload(model, "draw", test.quality, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		settings := payload["generationSettings"].(map[string]any)
+		if settings["detailLevel"] != test.expected {
+			t.Fatalf("model=%q quality=%q settings=%#v", test.modelID, test.quality, settings)
 		}
 	}
 }
