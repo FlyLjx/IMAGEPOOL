@@ -47,6 +47,7 @@ services:
       IMAGE_POOL_IMAGE_TAG: ${IMAGE_POOL_IMAGE_TAG:-latest}
       IMAGE_POOL_UPDATE_URL: http://image-pool-updater:8080/v1/update
       IMAGE_POOL_UPDATE_TOKEN: ${IMAGE_POOL_UPDATE_TOKEN:-image-pool-update-local-token}
+      IMAGE_POOL_MASTER_KEY: ${IMAGE_POOL_MASTER_KEY:-}
     labels:
       com.centurylinklabs.watchtower.enable: "true"
     volumes:

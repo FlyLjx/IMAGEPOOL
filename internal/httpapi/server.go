@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"imagepool/internal/accounts"
+	"imagepool/internal/adobe"
 	"imagepool/internal/auth"
 	"imagepool/internal/browsertransport"
 	"imagepool/internal/config"
@@ -30,14 +31,12 @@ import (
 	"imagepool/internal/oauthlogin"
 	"imagepool/internal/openaiweb"
 	"imagepool/internal/persistence"
-	"imagepool/internal/postprocess"
 	proxyservice "imagepool/internal/proxy"
 	"imagepool/internal/registration"
 	"imagepool/internal/searches"
 	"imagepool/internal/storage"
 	"imagepool/internal/systemstats"
 	"imagepool/internal/tasks"
-	"imagepool/internal/texts"
 	"imagepool/internal/updater"
 )
 
@@ -49,7 +48,6 @@ type Server struct {
 	auth            *auth.Service
 	accounts        *accounts.Store
 	images          *images.Service
-	texts           *texts.Service
 	searches        *searches.Service
 	storage         *storage.Service
 	system          *systemstats.Sampler
@@ -57,13 +55,13 @@ type Server struct {
 	static          *staticFiles
 	tasks           *tasks.Manager
 	callbacks       *callbackDispatcher
-	postprocess     *postprocess.Service
 	metrics         *metrics.Service
 	refresh         *accounts.RefreshManager
 	autoRefresh     *accounts.AutoRefreshScheduler
 	oauth           *oauthlogin.Service
 	debugClient     *openaiweb.ReloadableClient
 	register        *registration.Manager
+	adobe           *adobe.Runtime
 	updater         *updater.Service
 	state           persistence.Store
 	onConfigUpdated func(config.Config)
@@ -76,15 +74,15 @@ type stabilityResponse struct {
 
 const statusClientClosedRequest = 499
 
-func NewServer(cfg config.Config, accountStore *accounts.Store, imageService *images.Service, textService *texts.Service, searchService *searches.Service, storageService *storage.Service, taskManager *tasks.Manager, configUpdated ...func(config.Config)) *Server {
-	return newServer(cfg, accountStore, imageService, textService, searchService, storageService, taskManager, nil, registration.NewWorker(registration.WorkerOptions{}), configUpdated...)
+func NewServer(cfg config.Config, accountStore *accounts.Store, imageService *images.Service, searchService *searches.Service, storageService *storage.Service, taskManager *tasks.Manager, configUpdated ...func(config.Config)) *Server {
+	return newServer(cfg, accountStore, imageService, searchService, storageService, taskManager, nil, registration.NewWorker(registration.WorkerOptions{}), configUpdated...)
 }
 
-func NewServerWithPersistence(cfg config.Config, accountStore *accounts.Store, imageService *images.Service, textService *texts.Service, searchService *searches.Service, storageService *storage.Service, taskManager *tasks.Manager, state persistence.Store, configUpdated ...func(config.Config)) *Server {
-	return newServer(cfg, accountStore, imageService, textService, searchService, storageService, taskManager, state, registration.NewWorker(registration.WorkerOptions{}), configUpdated...)
+func NewServerWithPersistence(cfg config.Config, accountStore *accounts.Store, imageService *images.Service, searchService *searches.Service, storageService *storage.Service, taskManager *tasks.Manager, state persistence.Store, configUpdated ...func(config.Config)) *Server {
+	return newServer(cfg, accountStore, imageService, searchService, storageService, taskManager, state, registration.NewWorker(registration.WorkerOptions{}), configUpdated...)
 }
 
-func newServer(cfg config.Config, accountStore *accounts.Store, imageService *images.Service, textService *texts.Service, searchService *searches.Service, storageService *storage.Service, taskManager *tasks.Manager, state persistence.Store, registerWorker registration.Worker, configUpdated ...func(config.Config)) *Server {
+func newServer(cfg config.Config, accountStore *accounts.Store, imageService *images.Service, searchService *searches.Service, storageService *storage.Service, taskManager *tasks.Manager, state persistence.Store, registerWorker registration.Worker, configUpdated ...func(config.Config)) *Server {
 	cfg = cfg.Normalize()
 	var onConfigUpdated func(config.Config)
 	if len(configUpdated) > 0 {
@@ -102,7 +100,7 @@ func newServer(cfg config.Config, accountStore *accounts.Store, imageService *im
 	}
 	refreshManager := accounts.NewRefreshManager(accountStore, imageService, cfg.RefreshAccountConcurrency)
 	callbacks := newCallbackDispatcher()
-	server := &Server{cfg: cfg, retentionWake: make(chan struct{}, 1), auth: authService, accounts: accountStore, images: imageService, texts: textService, searches: searchService, storage: storageService, system: systemstats.New(cfg.ImageOutputDir), tags: tagStore, static: newStaticFiles(cfg.WebDistDir), tasks: taskManager, callbacks: callbacks, metrics: metricService, refresh: refreshManager, autoRefresh: accounts.NewAutoRefreshScheduler(accountStore, refreshManager, cfg.RefreshAccountIntervalMinutes), oauth: oauthlogin.New(), debugClient: openaiweb.NewReloadableClient(cfg), register: registerManager, updater: updater.NewFromEnvironment(), state: state, onConfigUpdated: onConfigUpdated}
+	server := &Server{cfg: cfg, retentionWake: make(chan struct{}, 1), auth: authService, accounts: accountStore, images: imageService, searches: searchService, storage: storageService, system: systemstats.New(cfg.ImageOutputDir), tags: tagStore, static: newStaticFiles(cfg.WebDistDir), tasks: taskManager, callbacks: callbacks, metrics: metricService, refresh: refreshManager, autoRefresh: accounts.NewAutoRefreshScheduler(accountStore, refreshManager, cfg.RefreshAccountIntervalMinutes), oauth: oauthlogin.New(), debugClient: openaiweb.NewReloadableClient(cfg), register: registerManager, updater: updater.NewFromEnvironment(), state: state, onConfigUpdated: onConfigUpdated}
 	if taskManager != nil {
 		taskManager.SetCompletionHook(func(task tasks.Task) {
 			if strings.TrimSpace(task.CallbackURL) != "" {
@@ -111,13 +109,6 @@ func newServer(cfg config.Config, accountStore *accounts.Store, imageService *im
 		})
 	}
 	return server
-}
-
-func (s *Server) SetPostprocess(service *postprocess.Service) {
-	if s == nil {
-		return
-	}
-	s.postprocess = service
 }
 
 func (s *Server) StartBackground(ctx context.Context) {
@@ -169,6 +160,12 @@ func (s *Server) cleanupExpiredImages(now time.Time) {
 	}
 	if removed > 0 {
 		log.Printf("image retention cleanup removed %d image(s), freed %d byte(s), retention=%d day(s)", removed, freedBytes, days)
+	}
+}
+
+func (s *Server) SetAdobeRuntime(runtime *adobe.Runtime) {
+	if s != nil {
+		s.adobe = runtime
 	}
 }
 
@@ -261,12 +258,6 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleImageEdit(w, r, false)
 	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/images/"):
 		s.handleStandardImageTask(w, r)
-	case r.Method == http.MethodPost && r.URL.Path == "/v1/chat/completions":
-		s.handleChatCompletions(w, r)
-	case r.Method == http.MethodPost && r.URL.Path == "/v1/responses":
-		s.handleResponses(w, r)
-	case r.Method == http.MethodPost && r.URL.Path == "/v1/messages":
-		s.handleAnthropicMessages(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/search":
 		s.handleSearch(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/api/debug/chatgpt-web":
@@ -279,6 +270,14 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleDashboard(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/api/diagnostics/scheduler":
 		s.handleSchedulerDiagnostics(w, r)
+	case strings.HasPrefix(r.URL.Path, "/api/adobe/"):
+		if s.adobe == nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": map[string]any{
+				"code": "ADOBE_DISABLED", "message": "Adobe integration is disabled", "retryable": false,
+			}})
+			return
+		}
+		s.adobe.ServeAdminHTTP(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/api/system/load":
 		w.Header().Set("Cache-Control", "no-store")
 		writeJSON(w, http.StatusOK, s.system.Sample())
@@ -334,8 +333,6 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleTaskList(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/api/image-tasks/history":
 		s.handleTaskHistory(w, r)
-	case r.Method == http.MethodGet && r.URL.Path == "/api/postprocess-tasks/history":
-		s.handlePostprocessTaskHistory(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/api/image-tasks/generations":
 		s.handleTaskGeneration(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/api/image-tasks/edits":
@@ -348,11 +345,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleAccountRecoveryLogs(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/api/accounts":
 		items := s.publicAccounts()
-		writeJSON(w, http.StatusOK, map[string]any{"items": items, "accounts": items})
+		writeJSON(w, http.StatusOK, map[string]any{"pool": "gpt", "items": items, "accounts": items})
 	case r.Method == http.MethodGet && r.URL.Path == "/api/accounts/summary":
 		summary := s.accounts.Summary()
 		active, _ := summary["active"].(int)
-		writeJSON(w, http.StatusOK, map[string]any{"summary": summary, "valid_account_count": active, "healthy": active > 0, "status": "ok"})
+		writeJSON(w, http.StatusOK, map[string]any{"pool": "gpt", "summary": summary, "valid_account_count": active, "healthy": active > 0, "status": "ok"})
 	case r.Method == http.MethodPost && r.URL.Path == "/api/accounts/refresh":
 		s.handleAccountRefresh(w, r)
 	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/accounts/refresh/progress/"):
@@ -509,6 +506,13 @@ func normalizedImageCount(n int) int {
 	return n
 }
 
+func requestImageUnits(model string, n int) int {
+	if adobe.IsRequestedModel(model) {
+		return 1
+	}
+	return normalizedImageCount(n)
+}
+
 func validateImageOutputOptions(req images.Request) error {
 	responseFormat := strings.ToLower(strings.TrimSpace(req.ResponseFormat))
 	if responseFormat != "" && responseFormat != "url" && responseFormat != "b64_json" {
@@ -610,22 +614,22 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, err)
 		return
 	}
-	cfg := s.currentConfig()
 	type modelItem struct {
-		id     string
-		owner  string
-		parent any
+		id          string
+		owner       string
+		description string
 	}
 	items := make([]modelItem, 0, len(models)+32)
 	for _, model := range models {
-		var parent any
-		if base, ok := images.SuperResolutionBaseModel(model); ok {
-			if !cfg.ImageSuperResolutionEnabled {
-				continue
+		ownedBy := "image-pool"
+		description := ""
+		if adobe.IsModel(model) {
+			ownedBy = "adobe-firefly"
+			if resolved, resolveErr := adobe.ResolveModel(model); resolveErr == nil {
+				description = resolved.Description
 			}
-			parent = base
 		}
-		items = append(items, modelItem{id: model, owner: "image-pool", parent: parent})
+		items = append(items, modelItem{id: model, owner: ownedBy, description: description})
 	}
 	seen := map[string]bool{}
 	data := make([]map[string]any, 0, len(items))
@@ -634,25 +638,16 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		seen[item.id] = true
-		data = append(data, map[string]any{"id": item.id, "object": "model", "created": 0, "owned_by": item.owner, "permission": []any{}, "root": item.id, "parent": item.parent})
+		data = append(data, map[string]any{"id": item.id, "object": "model", "created": 0, "owned_by": item.owner, "description": item.description, "permission": []any{}, "root": item.id, "parent": nil})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"object": "list",
 		"data":   data,
-		"features": map[string]any{
-			"image_super_resolution":           cfg.ImageSuperResolutionEnabled,
-			"image_super_resolution_available": s.postprocess != nil,
-			"image_restoration":                cfg.ImageRestorationEnabled,
-		},
 	})
 }
 
 func requestMetricImageModel(model string) string {
-	model = strings.TrimSpace(model)
-	if base, ok := images.SuperResolutionBaseModel(model); ok {
-		return base
-	}
-	return model
+	return strings.TrimSpace(model)
 }
 
 func (s *Server) handleImageGeneration(w http.ResponseWriter, r *http.Request) {
@@ -671,14 +666,21 @@ func (s *Server) handleImageGeneration(w http.ResponseWriter, r *http.Request) {
 	}
 	req.OutputBaseURL = baseURL(r)
 	metrics.SetModel(r.Context(), requestMetricImageModel(req.Model))
-	if err := s.consumeQuota(r, "/v1/images/generations", req.Model, 1, normalizedImageCount(req.N)); err != nil {
-		writeError(w, statusFromError(err), err)
+	idempotency, proceed := s.beginAdobeImageIdempotency(w, r, "/v1/images/generations", req)
+	if !proceed {
+		return
+	}
+	if err := s.consumeQuota(r, "/v1/images/generations", req.Model, 1, requestImageUnits(req.Model, req.N)); err != nil {
+		status := statusFromError(err)
+		s.writeAdobeIdempotentError(w, r, idempotency, status, err)
 		return
 	}
 	identity, _ := auth.IdentityFromContext(r.Context())
 	if req.Async {
 		task := s.tasks.SubmitGenerationForOwner(identity.ID, "", req)
-		writeJSON(w, http.StatusAccepted, standardImageTask(publicTask(task)))
+		payload := standardImageTask(publicTask(task))
+		s.completeAdobeIdempotency(r, idempotency, http.StatusAccepted, payload)
+		writeJSON(w, http.StatusAccepted, payload)
 		return
 	}
 	if req.Stream {
@@ -687,10 +689,13 @@ func (s *Server) handleImageGeneration(w http.ResponseWriter, r *http.Request) {
 	}
 	_, resp, err := s.tasks.RunGenerationForOwner(r.Context(), identity.ID, req)
 	if err != nil {
-		writeError(w, statusFromError(err), err)
+		status := statusFromError(err)
+		s.writeAdobeIdempotentError(w, r, idempotency, status, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, resp.MarshalForOpenAI())
+	payload := resp.MarshalForOpenAI()
+	s.completeAdobeIdempotency(r, idempotency, http.StatusOK, payload)
+	writeJSON(w, http.StatusOK, payload)
 }
 
 func (s *Server) handleImageEdit(w http.ResponseWriter, r *http.Request, asTask bool) {
@@ -713,200 +718,39 @@ func (s *Server) handleImageEdit(w http.ResponseWriter, r *http.Request, asTask 
 	if asTask {
 		endpoint = "/api/image-tasks/edits"
 	}
-	if err := s.consumeQuota(r, endpoint, req.Model, 1, normalizedImageCount(req.N)); err != nil {
-		writeError(w, statusFromError(err), err)
+	idempotency, proceed := s.beginAdobeImageIdempotency(w, r, endpoint, req)
+	if !proceed {
+		return
+	}
+	if err := s.consumeQuota(r, endpoint, req.Model, 1, requestImageUnits(req.Model, req.N)); err != nil {
+		status := statusFromError(err)
+		s.writeAdobeIdempotentError(w, r, idempotency, status, err)
 		return
 	}
 	asyncTask := asTask || req.Async
 	if asyncTask {
 		identity, _ := auth.IdentityFromContext(r.Context())
 		task := s.tasks.SubmitEditForOwner(identity.ID, clientTaskID, req)
+		var payload any
 		if asTask {
-			writeJSON(w, http.StatusAccepted, publicTask(task))
+			payload = publicTask(task)
 		} else {
-			writeJSON(w, http.StatusAccepted, standardImageTask(publicTask(task)))
+			payload = standardImageTask(publicTask(task))
 		}
+		s.completeAdobeIdempotency(r, idempotency, http.StatusAccepted, payload)
+		writeJSON(w, http.StatusAccepted, payload)
 		return
 	}
 	identity, _ := auth.IdentityFromContext(r.Context())
 	_, resp, err := s.tasks.RunEditForOwner(r.Context(), identity.ID, req)
 	if err != nil {
-		writeError(w, statusFromError(err), err)
+		status := statusFromError(err)
+		s.writeAdobeIdempotentError(w, r, idempotency, status, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, resp.MarshalForOpenAI())
-}
-
-func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
-	var body openaiweb.ChatRequest
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, err)
-		return
-	}
-	metrics.SetModel(r.Context(), body.Model)
-	if err := s.consumeQuota(r, "/v1/chat/completions", body.Model, 1, 0); err != nil {
-		writeError(w, statusFromError(err), err)
-		return
-	}
-	if body.Stream {
-		s.streamChatCompletion(w, r, body)
-		return
-	}
-	result, err := s.texts.Generate(r.Context(), body)
-	if err != nil {
-		writeError(w, statusFromError(err), err)
-		return
-	}
-	model := result.Model
-	if model == "" {
-		model = body.Model
-	}
-	if model == "" {
-		model = "auto"
-	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"id":      responseID("chatcmpl"),
-		"object":  "chat.completion",
-		"created": time.Now().Unix(),
-		"model":   model,
-		"choices": []any{map[string]any{
-			"index":         0,
-			"message":       map[string]any{"role": "assistant", "content": result.Text},
-			"finish_reason": "stop",
-		}},
-		"usage": roughUsage(body.Messages, result.Text),
-	})
-}
-
-func (s *Server) streamChatCompletion(w http.ResponseWriter, r *http.Request, body openaiweb.ChatRequest) {
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("X-Accel-Buffering", "no")
-	flusher, _ := w.(http.Flusher)
-	id := responseID("chatcmpl")
-	created := time.Now().Unix()
-	model := body.Model
-	if model == "" {
-		model = "auto"
-	}
-	sentRole := false
-	_, err := s.texts.Stream(r.Context(), body, func(delta openaiweb.ChatDelta) error {
-		payload := map[string]any{"id": id, "object": "chat.completion.chunk", "created": created, "model": model}
-		if !sentRole {
-			sentRole = true
-			payload["choices"] = []any{map[string]any{"index": 0, "delta": map[string]any{"role": "assistant", "content": delta.Delta}, "finish_reason": nil}}
-		} else {
-			payload["choices"] = []any{map[string]any{"index": 0, "delta": map[string]any{"content": delta.Delta}, "finish_reason": nil}}
-		}
-		writeSSE(w, payload)
-		if flusher != nil {
-			flusher.Flush()
-		}
-		return nil
-	})
-	if err != nil {
-		writeSSE(w, map[string]any{"error": openaiweb.PublicErrorMessage(err)})
-	} else {
-		writeSSE(w, map[string]any{"id": id, "object": "chat.completion.chunk", "created": created, "model": model, "choices": []any{map[string]any{"index": 0, "delta": map[string]any{}, "finish_reason": "stop"}}})
-	}
-	fmt.Fprint(w, "data: [DONE]\n\n")
-	if flusher != nil {
-		flusher.Flush()
-	}
-}
-
-func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
-	var body map[string]any
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, err)
-		return
-	}
-	req := openaiweb.ChatRequest{Model: strValue(body["model"]), Messages: responseMessages(body["input"], body["instructions"])}
-	metrics.SetModel(r.Context(), req.Model)
-	if err := s.consumeQuota(r, "/v1/responses", req.Model, 1, 0); err != nil {
-		writeError(w, statusFromError(err), err)
-		return
-	}
-	if truthyValue(body["stream"]) {
-		s.streamResponses(w, r, req)
-		return
-	}
-	result, err := s.texts.Generate(r.Context(), req)
-	if err != nil {
-		writeError(w, statusFromError(err), err)
-		return
-	}
-	writeJSON(w, http.StatusOK, responseObject(result.Model, result.Text, req.Messages))
-}
-
-func (s *Server) streamResponses(w http.ResponseWriter, r *http.Request, req openaiweb.ChatRequest) {
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("X-Accel-Buffering", "no")
-	flusher, _ := w.(http.Flusher)
-	id := responseID("resp")
-	model := req.Model
-	if model == "" {
-		model = "auto"
-	}
-	writeSSEEvent(w, "response.created", map[string]any{"type": "response.created", "response": map[string]any{"id": id, "object": "response", "status": "in_progress", "model": model}})
-	_, err := s.texts.Stream(r.Context(), req, func(delta openaiweb.ChatDelta) error {
-		writeSSEEvent(w, "response.output_text.delta", map[string]any{"type": "response.output_text.delta", "response_id": id, "output_index": 0, "content_index": 0, "delta": delta.Delta})
-		if flusher != nil {
-			flusher.Flush()
-		}
-		return nil
-	})
-	if err != nil {
-		writeSSEEvent(w, "error", map[string]any{"type": "error", "error": map[string]any{"message": openaiweb.PublicErrorMessage(err)}})
-	} else {
-		writeSSEEvent(w, "response.completed", map[string]any{"type": "response.completed", "response": map[string]any{"id": id, "object": "response", "status": "completed", "model": model}})
-	}
-	fmt.Fprint(w, "data: [DONE]\n\n")
-	if flusher != nil {
-		flusher.Flush()
-	}
-}
-
-func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Model    string                  `json:"model"`
-		System   any                     `json:"system"`
-		Messages []openaiweb.ChatMessage `json:"messages"`
-		Stream   bool                    `json:"stream"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, err)
-		return
-	}
-	metrics.SetModel(r.Context(), body.Model)
-	if err := s.consumeQuota(r, "/v1/messages", body.Model, 1, 0); err != nil {
-		writeError(w, statusFromError(err), err)
-		return
-	}
-	messages := []openaiweb.ChatMessage{}
-	if sys := messageContentText(body.System); strings.TrimSpace(sys) != "" {
-		messages = append(messages, openaiweb.ChatMessage{Role: "system", Content: sys})
-	}
-	messages = append(messages, body.Messages...)
-	req := openaiweb.ChatRequest{Model: body.Model, Messages: messages}
-	if body.Stream {
-		s.streamAnthropicMessages(w, r, req)
-		return
-	}
-	result, err := s.texts.Generate(r.Context(), req)
-	if err != nil {
-		writeError(w, statusFromError(err), err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"id":            responseID("msg"),
-		"type":          "message",
-		"role":          "assistant",
-		"model":         result.Model,
-		"content":       []any{map[string]any{"type": "text", "text": result.Text}},
-		"stop_reason":   "end_turn",
-		"stop_sequence": nil,
-		"usage":         map[string]any{"input_tokens": roughTextTokens(messagesText(req.Messages)), "output_tokens": roughTextTokens(result.Text)},
-	})
+	payload := resp.MarshalForOpenAI()
+	s.completeAdobeIdempotency(r, idempotency, http.StatusOK, payload)
+	writeJSON(w, http.StatusOK, payload)
 }
 
 func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
@@ -928,38 +772,6 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
-}
-
-func (s *Server) streamAnthropicMessages(w http.ResponseWriter, r *http.Request, req openaiweb.ChatRequest) {
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("X-Accel-Buffering", "no")
-	flusher, _ := w.(http.Flusher)
-	id := responseID("msg")
-	model := req.Model
-	if model == "" {
-		model = "auto"
-	}
-	writeSSEEvent(w, "message_start", map[string]any{"type": "message_start", "message": map[string]any{"id": id, "type": "message", "role": "assistant", "model": model, "content": []any{}, "stop_reason": nil, "usage": map[string]any{"input_tokens": roughTextTokens(messagesText(req.Messages)), "output_tokens": 0}}})
-	writeSSEEvent(w, "content_block_start", map[string]any{"type": "content_block_start", "index": 0, "content_block": map[string]any{"type": "text", "text": ""}})
-	var output string
-	_, err := s.texts.Stream(r.Context(), req, func(delta openaiweb.ChatDelta) error {
-		output += delta.Delta
-		writeSSEEvent(w, "content_block_delta", map[string]any{"type": "content_block_delta", "index": 0, "delta": map[string]any{"type": "text_delta", "text": delta.Delta}})
-		if flusher != nil {
-			flusher.Flush()
-		}
-		return nil
-	})
-	if err != nil {
-		writeSSEEvent(w, "error", map[string]any{"type": "error", "error": map[string]any{"message": openaiweb.PublicErrorMessage(err)}})
-	} else {
-		writeSSEEvent(w, "content_block_stop", map[string]any{"type": "content_block_stop", "index": 0})
-		writeSSEEvent(w, "message_delta", map[string]any{"type": "message_delta", "delta": map[string]any{"stop_reason": "end_turn"}, "usage": map[string]any{"output_tokens": roughTextTokens(output)}})
-		writeSSEEvent(w, "message_stop", map[string]any{"type": "message_stop"})
-	}
-	if flusher != nil {
-		flusher.Flush()
-	}
 }
 
 func (s *Server) streamImage(w http.ResponseWriter, r *http.Request, req images.Request) {
@@ -990,14 +802,13 @@ func (s *Server) handleTaskGeneration(w http.ResponseWriter, r *http.Request) {
 		ResponseFormat string `json:"response_format"`
 		OutputFormat   string `json:"output_format"`
 		CallbackURL    string `json:"callback_url"`
-		HDRepair       bool   `json:"hd_repair"`
 		N              int    `json:"n"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	req := images.Request{Prompt: body.Prompt, Model: body.Model, Size: body.Size, Quality: body.Quality, ResponseFormat: body.ResponseFormat, OutputFormat: body.OutputFormat, CallbackURL: body.CallbackURL, HDRepair: body.HDRepair, N: normalizedImageCount(body.N), OutputBaseURL: baseURL(r)}
+	req := images.Request{Prompt: body.Prompt, Model: body.Model, Size: body.Size, Quality: body.Quality, ResponseFormat: body.ResponseFormat, OutputFormat: body.OutputFormat, CallbackURL: body.CallbackURL, N: normalizedImageCount(body.N), OutputBaseURL: baseURL(r)}
 	if err := validateImageOutputOptions(req); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
@@ -1007,13 +818,20 @@ func (s *Server) handleTaskGeneration(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	metrics.SetModel(r.Context(), requestMetricImageModel(req.Model))
-	if err := s.consumeQuota(r, "/api/image-tasks/generations", body.Model, 1, normalizedImageCount(body.N)); err != nil {
-		writeError(w, statusFromError(err), err)
+	idempotency, proceed := s.beginAdobeImageIdempotency(w, r, "/api/image-tasks/generations", req)
+	if !proceed {
+		return
+	}
+	if err := s.consumeQuota(r, "/api/image-tasks/generations", body.Model, 1, requestImageUnits(body.Model, body.N)); err != nil {
+		status := statusFromError(err)
+		s.writeAdobeIdempotentError(w, r, idempotency, status, err)
 		return
 	}
 	identity, _ := auth.IdentityFromContext(r.Context())
 	task := s.tasks.SubmitGenerationForOwner(identity.ID, body.ClientTaskID, req)
-	writeJSON(w, http.StatusAccepted, publicTask(task))
+	payload := publicTask(task)
+	s.completeAdobeIdempotency(r, idempotency, http.StatusAccepted, payload)
+	writeJSON(w, http.StatusAccepted, payload)
 }
 func (s *Server) handleTaskEdit(w http.ResponseWriter, r *http.Request) {
 	s.handleImageEdit(w, r, true)
@@ -1121,14 +939,39 @@ func (s *Server) handleTaskItem(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleAccountImport(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Tokens   []string           `json:"tokens"`
-		Accounts []accounts.Account `json:"accounts"`
+		Pool                  string            `json:"pool"`
+		Tokens                []string          `json:"tokens"`
+		Accounts              []json.RawMessage `json:"accounts"`
+		Schema                string            `json:"schema"`
+		RegistrationContextID json.RawMessage   `json:"registration_context_id"`
+		RouteAffinity         json.RawMessage   `json:"route_affinity"`
+		Credentials           json.RawMessage   `json:"credentials"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	items := append([]accounts.Account(nil), body.Accounts...)
+	if pool := strings.TrimSpace(body.Pool); pool != "" && !strings.EqualFold(pool, "gpt") {
+		writeError(w, http.StatusBadRequest, errors.New("Adobe accounts must be imported through /api/adobe/accounts/import"))
+		return
+	}
+	if isAdobeAccountPayload(body.Schema, body.RegistrationContextID, body.RouteAffinity, body.Credentials) {
+		writeError(w, http.StatusBadRequest, errors.New("Adobe account data is not accepted by the GPT account pool"))
+		return
+	}
+	items := make([]accounts.Account, 0, len(body.Accounts)+len(body.Tokens))
+	for _, raw := range body.Accounts {
+		if isAdobeAccountJSON(raw) {
+			writeError(w, http.StatusBadRequest, errors.New("Adobe account data is not accepted by the GPT account pool"))
+			return
+		}
+		var item accounts.Account
+		if err := json.Unmarshal(raw, &item); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		items = append(items, item)
+	}
 	for _, token := range body.Tokens {
 		if token = strings.TrimSpace(token); token != "" {
 			items = append(items, accounts.Account{AccessToken: token})
@@ -1143,7 +986,27 @@ func (s *Server) handleAccountImport(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"added": added, "skipped": skipped, "refreshed": refreshed, "errors": issues, "items": s.publicAccounts()})
+	writeJSON(w, http.StatusOK, map[string]any{"pool": "gpt", "added": added, "skipped": skipped, "refreshed": refreshed, "errors": issues, "items": s.publicAccounts()})
+}
+
+func isAdobeAccountJSON(raw json.RawMessage) bool {
+	var value struct {
+		Schema                string          `json:"schema"`
+		RegistrationContextID json.RawMessage `json:"registration_context_id"`
+		RouteAffinity         json.RawMessage `json:"route_affinity"`
+		Credentials           json.RawMessage `json:"credentials"`
+		CookieJar             json.RawMessage `json:"cookie_jar"`
+	}
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return false
+	}
+	return isAdobeAccountPayload(value.Schema, value.RegistrationContextID, value.RouteAffinity, value.Credentials) ||
+		len(value.CookieJar) > 0
+}
+
+func isAdobeAccountPayload(schema string, registrationContextID, routeAffinity, credentials json.RawMessage) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(schema)), "adobe") ||
+		len(registrationContextID) > 0 || len(routeAffinity) > 0 || len(credentials) > 0
 }
 
 func (s *Server) importAccountsAndValidate(items []accounts.Account) (added, skipped, refreshed int, issues []map[string]string, err error) {
@@ -1457,20 +1320,45 @@ func exportFileName(token string, index int) string {
 func (s *Server) handleExternalAccountsSummary(w http.ResponseWriter, r *http.Request) {
 	summary := s.accounts.Summary()
 	active, _ := summary["active"].(int)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "valid_account_count": active, "healthy": active > 0, "status": "ok", "summary": summary})
+	writeJSON(w, http.StatusOK, map[string]any{"pool": "gpt", "ok": true, "valid_account_count": active, "healthy": active > 0, "status": "ok", "summary": summary})
 }
 
 func (s *Server) handleExternalAccountsImport(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Tokens   []string           `json:"tokens"`
-		Accounts []accounts.Account `json:"accounts"`
-		Refresh  bool               `json:"refresh"`
+		Pool                  string            `json:"pool"`
+		Tokens                []string          `json:"tokens"`
+		Accounts              []json.RawMessage `json:"accounts"`
+		Refresh               bool              `json:"refresh"`
+		Schema                string            `json:"schema"`
+		RegistrationContextID json.RawMessage   `json:"registration_context_id"`
+		RouteAffinity         json.RawMessage   `json:"route_affinity"`
+		Credentials           json.RawMessage   `json:"credentials"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	items := append([]accounts.Account(nil), body.Accounts...)
+	if pool := strings.TrimSpace(body.Pool); pool != "" && !strings.EqualFold(pool, "gpt") {
+		writeError(w, http.StatusBadRequest, errors.New("Adobe accounts must be imported through /api/adobe/accounts/import"))
+		return
+	}
+	if isAdobeAccountPayload(body.Schema, body.RegistrationContextID, body.RouteAffinity, body.Credentials) {
+		writeError(w, http.StatusBadRequest, errors.New("Adobe account data is not accepted by the GPT account pool"))
+		return
+	}
+	items := make([]accounts.Account, 0, len(body.Accounts)+len(body.Tokens))
+	for _, raw := range body.Accounts {
+		if isAdobeAccountJSON(raw) {
+			writeError(w, http.StatusBadRequest, errors.New("Adobe account data is not accepted by the GPT account pool"))
+			return
+		}
+		var item accounts.Account
+		if err := json.Unmarshal(raw, &item); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		items = append(items, item)
+	}
 	for _, token := range body.Tokens {
 		if token = strings.TrimSpace(token); token != "" {
 			items = append(items, accounts.Account{AccessToken: token, SourceType: "external_api"})
@@ -1487,7 +1375,7 @@ func (s *Server) handleExternalAccountsImport(w http.ResponseWriter, r *http.Req
 	}
 	summary := s.accounts.Summary()
 	active, _ := summary["active"].(int)
-	response := map[string]any{"ok": true, "added": added, "skipped": skipped, "refreshed": refreshed, "errors": issues, "valid_account_count": active, "healthy": active > 0, "status": "ok", "items": s.publicAccounts()}
+	response := map[string]any{"pool": "gpt", "ok": true, "added": added, "skipped": skipped, "refreshed": refreshed, "errors": issues, "valid_account_count": active, "healthy": active > 0, "status": "ok", "items": s.publicAccounts()}
 	writeJSON(w, http.StatusOK, response)
 }
 
@@ -1532,6 +1420,14 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		callSummary = s.metrics.SummaryRange(start, end)
 	}
 	callSummary["today"] = s.metrics.TodaySummary()
+	adobeSummary := adobe.Summary{}
+	if s.adobe != nil {
+		if summary, err := s.adobe.Summary(r.Context()); err == nil {
+			adobeSummary = summary
+		} else {
+			adobeSummary.Enabled = true
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"app":          cfg.AppName,
 		"version":      "go-image-pool",
@@ -1539,6 +1435,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		"system":       s.system.Sample(),
 		"storage":      map[string]any{"backend": storageStats, "health": mergeDashboardStorageHealth(storageHealth, accountSummary["total"], len(userKeys))},
 		"accounts":     accountSummary,
+		"adobe":        adobeSummary,
 		"auth_keys":    map[string]any{"users": len(userKeys), "enabled_users": enabledUsers},
 		"calls":        callSummary,
 		"tasks": map[string]any{
@@ -2169,8 +2066,6 @@ func (s *Server) parseEditRequest(r *http.Request) (images.Request, string, erro
 		form := r.MultipartForm
 		req := images.Request{Prompt: formValue(form, "prompt"), Model: formValue(form, "model"), Size: formValue(form, "size"), Quality: formValue(form, "quality"), ResponseFormat: formValue(form, "response_format"), OutputFormat: formValue(form, "output_format"), CallbackURL: formValue(form, "callback_url")}
 		req.Async, _ = strconv.ParseBool(formValue(form, "async"))
-		req.HDRepair, _ = strconv.ParseBool(formValue(form, "hd_repair"))
-		req.SuperResolution, _ = strconv.ParseBool(formValue(form, "super_resolution"))
 		if n, _ := strconv.Atoi(formValue(form, "n")); n > 0 {
 			req.N = n
 		}
@@ -2205,8 +2100,6 @@ func (s *Server) parseEditRequest(r *http.Request) (images.Request, string, erro
 		OutputFormat    string `json:"output_format"`
 		Async           bool   `json:"async"`
 		CallbackURL     string `json:"callback_url"`
-		HDRepair        bool   `json:"hd_repair"`
-		SuperResolution bool   `json:"super_resolution"`
 		Image           any    `json:"image"`
 		Images          any    `json:"images"`
 		ImageURL        any    `json:"image_url"`
@@ -2235,7 +2128,7 @@ func (s *Server) parseEditRequest(r *http.Request) (images.Request, string, erro
 	if err != nil {
 		return images.Request{}, "", err
 	}
-	return images.Request{Prompt: body.Prompt, Model: body.Model, N: body.N, Size: body.Size, Quality: body.Quality, ResponseFormat: body.ResponseFormat, OutputFormat: body.OutputFormat, Async: body.Async, CallbackURL: body.CallbackURL, HDRepair: body.HDRepair, SuperResolution: body.SuperResolution, References: refs}, body.ClientTaskID, nil
+	return images.Request{Prompt: body.Prompt, Model: body.Model, N: body.N, Size: body.Size, Quality: body.Quality, ResponseFormat: body.ResponseFormat, OutputFormat: body.OutputFormat, Async: body.Async, CallbackURL: body.CallbackURL, References: refs}, body.ClientTaskID, nil
 }
 
 func editMultipartImageFields(files map[string][]*multipart.FileHeader) []string {
@@ -2381,162 +2274,6 @@ func formValue(form *multipart.Form, key string) string {
 
 func responseID(prefix string) string {
 	return fmt.Sprintf("%s-%d", prefix, time.Now().UnixNano())
-}
-
-func writeSSE(w http.ResponseWriter, payload any) {
-	fmt.Fprintf(w, "data: %s\n\n", mustJSON(payload))
-}
-
-func writeSSEEvent(w http.ResponseWriter, event string, payload any) {
-	if event != "" {
-		fmt.Fprintf(w, "event: %s\n", event)
-	}
-	writeSSE(w, payload)
-}
-
-func strValue(v any) string {
-	if v == nil {
-		return ""
-	}
-	if s, ok := v.(string); ok {
-		return s
-	}
-	return fmt.Sprint(v)
-}
-
-func truthyValue(v any) bool {
-	b, _ := v.(bool)
-	return b
-}
-
-func responseMessages(input any, instructions any) []openaiweb.ChatMessage {
-	messages := []openaiweb.ChatMessage{}
-	if sys := strings.TrimSpace(messageContentText(instructions)); sys != "" {
-		messages = append(messages, openaiweb.ChatMessage{Role: "system", Content: sys})
-	}
-	switch v := input.(type) {
-	case string:
-		if strings.TrimSpace(v) != "" {
-			messages = append(messages, openaiweb.ChatMessage{Role: "user", Content: v})
-		}
-	case []any:
-		pending := []any{}
-		flush := func() {
-			if len(pending) > 0 {
-				messages = append(messages, openaiweb.ChatMessage{Role: "user", Content: append([]any(nil), pending...)})
-				pending = nil
-			}
-		}
-		for _, item := range v {
-			obj, ok := item.(map[string]any)
-			if !ok {
-				continue
-			}
-			if role := strings.TrimSpace(strValue(obj["role"])); role != "" {
-				flush()
-				messages = append(messages, openaiweb.ChatMessage{Role: role, Content: obj["content"]})
-				continue
-			}
-			pending = append(pending, obj)
-		}
-		flush()
-	case map[string]any:
-		role := strings.TrimSpace(strValue(v["role"]))
-		if role == "" {
-			role = "user"
-		}
-		if content, ok := v["content"]; ok {
-			messages = append(messages, openaiweb.ChatMessage{Role: role, Content: content})
-		} else {
-			messages = append(messages, openaiweb.ChatMessage{Role: role, Content: []any{v}})
-		}
-	}
-	if len(messages) == 0 {
-		messages = append(messages, openaiweb.ChatMessage{Role: "user", Content: ""})
-	}
-	return messages
-}
-
-func messageContentText(content any) string {
-	switch v := content.(type) {
-	case nil:
-		return ""
-	case string:
-		return v
-	case []any:
-		var b strings.Builder
-		for _, item := range v {
-			switch x := item.(type) {
-			case string:
-				b.WriteString(x)
-			case map[string]any:
-				if text := strValue(x["text"]); text != "" {
-					b.WriteString(text)
-				} else if text := strValue(x["content"]); text != "" {
-					b.WriteString(text)
-				}
-			}
-		}
-		return b.String()
-	case map[string]any:
-		if text := strValue(v["text"]); text != "" {
-			return text
-		}
-		return messageContentText(v["content"])
-	default:
-		return fmt.Sprint(v)
-	}
-}
-
-func messagesText(messages []openaiweb.ChatMessage) string {
-	var b strings.Builder
-	for _, msg := range messages {
-		b.WriteString(messageContentText(msg.Content))
-		b.WriteByte('\n')
-	}
-	return b.String()
-}
-
-func roughTextTokens(text string) int {
-	text = strings.TrimSpace(text)
-	if text == "" {
-		return 0
-	}
-	tokens := len([]rune(text)) / 4
-	if tokens < 1 {
-		tokens = 1
-	}
-	return tokens
-}
-
-func roughUsage(messages []openaiweb.ChatMessage, output string) map[string]any {
-	in := roughTextTokens(messagesText(messages))
-	out := roughTextTokens(output)
-	return map[string]any{"prompt_tokens": in, "completion_tokens": out, "total_tokens": in + out}
-}
-
-func responseObject(model, text string, messages []openaiweb.ChatMessage) map[string]any {
-	if model == "" {
-		model = "auto"
-	}
-	inputTokens := roughTextTokens(messagesText(messages))
-	outputTokens := roughTextTokens(text)
-	return map[string]any{
-		"id":          responseID("resp"),
-		"object":      "response",
-		"created_at":  time.Now().Unix(),
-		"status":      "completed",
-		"model":       model,
-		"output_text": text,
-		"output": []any{map[string]any{
-			"id":      responseID("msg"),
-			"type":    "message",
-			"status":  "completed",
-			"role":    "assistant",
-			"content": []any{map[string]any{"type": "output_text", "text": text, "annotations": []any{}}},
-		}},
-		"usage": map[string]any{"input_tokens": inputTokens, "output_tokens": outputTokens, "total_tokens": inputTokens + outputTokens},
-	}
 }
 
 func firstTasks(items []tasks.Task, limit int) []tasks.Task {

@@ -13,18 +13,11 @@ const endpointOptions = [
   { label: "图片编辑", value: "/v1/images/edits" },
   { label: "异步图片生成", value: "/api/image-tasks/generations" },
   { label: "异步图片编辑", value: "/api/image-tasks/edits" },
-  { label: "Chat Completions", value: "/v1/chat/completions" },
-  { label: "Responses", value: "/v1/responses" },
-  { label: "Messages", value: "/v1/messages" },
   { label: "搜索", value: "/v1/search" },
 ];
 
 const defaultModelSuggestions = [
   "gpt-image-2",
-  "auto",
-  "gpt-5",
-  "gpt-5-mini",
-  "gpt-5-5-thinking",
 ];
 
 function emptyLimits(): UserKey["limits"] {
@@ -222,7 +215,7 @@ export function UserKeysCard() {
       >
         <Space direction="vertical" size={16} className="w-full">
           <Typography.Text type="secondary">
-            为普通用户创建专用密钥；普通用户只能进入画图页，不能查看设置和号池。
+            为普通用户创建专用密钥；普通用户只能进入画图页，不能查看设置、GPT 号池或 Adobe 号池。
           </Typography.Text>
 
           {revealedKey ? (

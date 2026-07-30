@@ -345,7 +345,7 @@ export default function DebugPage() {
                 className="w-full"
                 value={selectedToken}
                 loading={isLoadingAccounts}
-                placeholder="选择当前号池账号，或使用匿名链路"
+                placeholder="选择当前 GPT 号池账号，或使用匿名链路"
                 optionFilterProp="label"
                 onChange={setSelectedToken}
                 options={[

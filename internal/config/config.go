@@ -38,12 +38,6 @@ type Config struct {
 	ImageAccountPrecheckTimeoutSecs     float64      `json:"image_account_precheck_timeout_secs"`
 	ImageCheckBeforeHitEnabled          bool         `json:"image_check_before_hit_enabled"`
 	ImageSettleEnabled                  bool         `json:"image_settle_enabled"`
-	ImageSuperResolutionEnabled         bool         `json:"image_super_resolution_enabled"`
-	ImageRestorationEnabled             bool         `json:"image_restoration_enabled"`
-	ImagePostprocessWorker              string       `json:"image_postprocess_worker"`
-	ImageSuperResolutionModel           string       `json:"image_super_resolution_model"`
-	ImageRestorationModel               string       `json:"image_restoration_model"`
-	ImagePostprocessTimeoutSecs         float64      `json:"image_postprocess_timeout_secs"`
 	MaxImageAttempts                    int          `json:"max_image_attempts"`
 	RequestTimeoutSecs                  float64      `json:"request_timeout_secs"`
 	SearchModel                         string       `json:"search_model"`
@@ -53,8 +47,19 @@ type Config struct {
 	RefreshAccountConcurrency           int          `json:"refresh_account_concurrency"`
 	Proxy                               string       `json:"proxy"`
 	ProxyRuntime                        ProxyRuntime `json:"proxy_runtime"`
+	Adobe                               AdobeConfig  `json:"adobe"`
 	Models                              []string     `json:"models"`
 	sourcePath                          string
+}
+
+type AdobeConfig struct {
+	Enabled                   bool `json:"enabled"`
+	GenerateTimeoutSecs       int  `json:"generate_timeout_secs"`
+	RouteHealthIntervalSecs   int  `json:"route_health_interval_secs"`
+	RouteFailureThreshold     int  `json:"route_failure_threshold"`
+	RouteCooldownSecs         int  `json:"route_cooldown_secs"`
+	IdempotencyTTLHours       int  `json:"idempotency_ttl_hours"`
+	TokenRefreshIntervalHours int  `json:"token_refresh_interval_hours"`
 }
 
 type ProxyRuntime struct {
@@ -110,12 +115,6 @@ func Default() Config {
 		ImageAccountPrecheckTimeoutSecs:     75,
 		ImageCheckBeforeHitEnabled:          true,
 		ImageSettleEnabled:                  true,
-		ImageSuperResolutionEnabled:         false,
-		ImageRestorationEnabled:             false,
-		ImagePostprocessWorker:              "../postprocess/worker.mjs",
-		ImageSuperResolutionModel:           "../postprocess/models/realesr-general-x4v3.onnx",
-		ImageRestorationModel:               "../postprocess/models/scunet-color-real-gan.onnx",
-		ImagePostprocessTimeoutSecs:         180,
 		MaxImageAttempts:                    3,
 		RequestTimeoutSecs:                  120,
 		SearchModel:                         "gpt-5-5",
@@ -124,7 +123,15 @@ func Default() Config {
 		RefreshAccountIntervalMinutes:       60,
 		RefreshAccountConcurrency:           8,
 		ProxyRuntime:                        ProxyRuntime{Enabled: true, EgressMode: "direct", ResetSessionStatusCodes: []int{403}, Clearance: ClearanceRuntime{Enabled: false, Mode: "none", Browser: "chrome", TimeoutSec: 60, RefreshInterval: 3600}},
-		Models:                              []string{"gpt-image-2"},
+		Adobe: AdobeConfig{
+			GenerateTimeoutSecs:       300,
+			RouteHealthIntervalSecs:   60,
+			RouteFailureThreshold:     3,
+			RouteCooldownSecs:         300,
+			IdempotencyTTLHours:       24,
+			TokenRefreshIntervalHours: 15,
+		},
+		Models: []string{"gpt-image-2"},
 	}
 }
 
@@ -165,32 +172,9 @@ func Load(path string) (Config, error) {
 	if !filepath.IsAbs(cfg.WebDistDir) {
 		cfg.WebDistDir = filepath.Clean(filepath.Join(base, cfg.WebDistDir))
 	}
-	if !filepath.IsAbs(cfg.ImagePostprocessWorker) {
-		cfg.ImagePostprocessWorker = resolveBundledPath(base, cfg.ImagePostprocessWorker)
-	}
-	if !filepath.IsAbs(cfg.ImageSuperResolutionModel) {
-		cfg.ImageSuperResolutionModel = resolveBundledPath(base, cfg.ImageSuperResolutionModel)
-	}
-	if !filepath.IsAbs(cfg.ImageRestorationModel) {
-		cfg.ImageRestorationModel = resolveBundledPath(base, cfg.ImageRestorationModel)
-	}
 	cfg = cfg.Normalize()
 	cfg.sourcePath = filepath.Clean(path)
 	return cfg, nil
-}
-
-func resolveBundledPath(configDir, value string) string {
-	configured := filepath.Clean(filepath.Join(configDir, value))
-	if _, err := os.Stat(configured); err == nil {
-		return configured
-	}
-	// Older settings saves persisted paths relative to the application root
-	// after they had already been resolved from the configs directory.
-	applicationRelative := filepath.Clean(filepath.Join(filepath.Dir(configDir), value))
-	if _, err := os.Stat(applicationRelative); err == nil {
-		return applicationRelative
-	}
-	return configured
 }
 
 func LoadIfExists(path string) (Config, error) {
@@ -341,21 +325,6 @@ func (c Config) Normalize() Config {
 	if c.ImageAccountPrecheckTimeoutSecs > 180 {
 		c.ImageAccountPrecheckTimeoutSecs = 180
 	}
-	if strings.TrimSpace(c.ImagePostprocessWorker) == "" {
-		c.ImagePostprocessWorker = d.ImagePostprocessWorker
-	}
-	if strings.TrimSpace(c.ImageSuperResolutionModel) == "" {
-		c.ImageSuperResolutionModel = d.ImageSuperResolutionModel
-	}
-	if strings.TrimSpace(c.ImageRestorationModel) == "" {
-		c.ImageRestorationModel = d.ImageRestorationModel
-	}
-	if c.ImagePostprocessTimeoutSecs <= 0 {
-		c.ImagePostprocessTimeoutSecs = d.ImagePostprocessTimeoutSecs
-	}
-	if c.ImagePostprocessTimeoutSecs > 1800 {
-		c.ImagePostprocessTimeoutSecs = 1800
-	}
 	if c.MaxImageAttempts <= 0 {
 		c.MaxImageAttempts = d.MaxImageAttempts
 	}
@@ -385,6 +354,7 @@ func (c Config) Normalize() Config {
 		c.ProxyRuntime = d.ProxyRuntime
 	}
 	c.ProxyRuntime = normalizeProxyRuntime(c.ProxyRuntime, c.Proxy)
+	c.Adobe = normalizeAdobe(c.Adobe, d.Adobe)
 	if len(c.Models) == 0 {
 		c.Models = append([]string(nil), d.Models...)
 	}
@@ -405,6 +375,27 @@ func (c Config) Normalize() Config {
 	return c
 }
 
+func normalizeAdobe(value, defaults AdobeConfig) AdobeConfig {
+	if value.GenerateTimeoutSecs <= 0 {
+		value.GenerateTimeoutSecs = defaults.GenerateTimeoutSecs
+	}
+	if value.RouteHealthIntervalSecs <= 0 {
+		value.RouteHealthIntervalSecs = defaults.RouteHealthIntervalSecs
+	}
+	if value.RouteFailureThreshold <= 0 {
+		value.RouteFailureThreshold = defaults.RouteFailureThreshold
+	}
+	if value.RouteCooldownSecs <= 0 {
+		value.RouteCooldownSecs = defaults.RouteCooldownSecs
+	}
+	if value.IdempotencyTTLHours <= 0 {
+		value.IdempotencyTTLHours = defaults.IdempotencyTTLHours
+	}
+	if value.TokenRefreshIntervalHours <= 0 || value.TokenRefreshIntervalHours > 24 {
+		value.TokenRefreshIntervalHours = defaults.TokenRefreshIntervalHours
+	}
+	return value
+}
 func proxyRuntimeEmpty(value ProxyRuntime) bool {
 	return !value.Enabled && value.EgressMode == "" && value.ProxyURL == "" && value.ResourceProxyURL == "" && !value.SkipSSLVerify && len(value.ResetSessionStatusCodes) == 0 && !value.Clearance.Enabled && value.Clearance.Mode == "" && value.Clearance.CFCookies == "" && value.Clearance.CFClearance == "" && value.Clearance.UserAgent == "" && value.Clearance.Browser == "" && value.Clearance.FlareSolverrURL == "" && value.Clearance.TimeoutSec == 0 && value.Clearance.RefreshInterval == 0 && !value.Clearance.WarmUpOnStart
 }

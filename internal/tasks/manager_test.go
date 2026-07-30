@@ -431,24 +431,6 @@ func TestRunGenerationCreatesTrackedTask(t *testing.T) {
 	}
 }
 
-func TestRunGenerationPreservesSuperResolutionModelVariant(t *testing.T) {
-	m := NewManager(taskSvc{})
-	task, result, err := m.RunGenerationForOwner(context.Background(), "user-a", images.Request{
-		Prompt: "a",
-		Model:  "gpt-image-2-2k",
-		Size:   "1024x1536",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if task.Model != "gpt-image-2-2k" || result.BackendModel != "gpt-image-2-2k" {
-		t.Fatalf("2K model variant was not preserved: task=%q backend=%q", task.Model, result.BackendModel)
-	}
-	if task.Size != "1368x2048" || !task.SuperResolution {
-		t.Fatalf("task size=%q super_resolution=%t", task.Size, task.SuperResolution)
-	}
-}
-
 func TestFailedTaskKeepsAttemptStatistics(t *testing.T) {
 	m := NewManager(failedAttemptTaskSvc{})
 	task, _, err := m.RunGenerationForOwner(context.Background(), "user-a", images.Request{Prompt: "draw"})

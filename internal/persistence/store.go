@@ -116,11 +116,109 @@ CREATE INDEX IF NOT EXISTS image_pool_collection_items_created_at_idx
 CREATE INDEX IF NOT EXISTS image_pool_collection_items_status_idx
   ON image_pool_collection_items(collection, (value->>'status'), updated_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS image_pool_collection_items_owner_created_at_idx
-  ON image_pool_collection_items(collection, (COALESCE(value->>'owner_id', '')), (NULLIF(value->>'created_at', '')) DESC NULLS LAST, updated_at DESC, id DESC);`)
+  ON image_pool_collection_items(collection, (COALESCE(value->>'owner_id', '')), (NULLIF(value->>'created_at', '')) DESC NULLS LAST, updated_at DESC, id DESC);
+
+CREATE TABLE IF NOT EXISTS adobe_routes (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  proxy_url_encrypted TEXT NOT NULL,
+  kind TEXT NOT NULL DEFAULT 'proxy',
+  region TEXT NOT NULL DEFAULT 'auto',
+  priority INTEGER NOT NULL DEFAULT 100,
+  enabled BOOLEAN NOT NULL DEFAULT TRUE,
+  health_status TEXT NOT NULL DEFAULT 'unknown',
+  consecutive_failures INTEGER NOT NULL DEFAULT 0,
+  cooldown_until TIMESTAMPTZ,
+  last_checked_at TIMESTAMPTZ,
+  last_error TEXT NOT NULL DEFAULT '',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS adobe_routes_dispatch_idx ON adobe_routes(enabled,health_status,priority,cooldown_until);
+
+CREATE TABLE IF NOT EXISTS adobe_accounts (
+  account_id TEXT PRIMARY KEY,
+  profile_id TEXT NOT NULL UNIQUE,
+  state TEXT NOT NULL,
+  registration_id TEXT NOT NULL,
+  captured_at TIMESTAMPTZ NOT NULL,
+  email TEXT NOT NULL DEFAULT '',
+  display_name TEXT NOT NULL DEFAULT '',
+  cookie_jar_encrypted TEXT NOT NULL,
+  access_token_encrypted TEXT NOT NULL,
+  token_expires_at TIMESTAMPTZ,
+  client_context JSONB NOT NULL DEFAULT '{}'::jsonb,
+  route_id TEXT REFERENCES adobe_routes(id) ON DELETE SET NULL,
+  browser_profile_ref TEXT NOT NULL,
+  session_version BIGINT NOT NULL DEFAULT 1,
+  last_verified_at TIMESTAMPTZ,
+  last_used_at TIMESTAMPTZ,
+  consecutive_failures INTEGER NOT NULL DEFAULT 0,
+  cooldown_until TIMESTAMPTZ,
+  last_error_code TEXT NOT NULL DEFAULT '',
+  last_error TEXT NOT NULL DEFAULT '',
+  credits_total DOUBLE PRECISION,
+  credits_used DOUBLE PRECISION,
+  credits_available DOUBLE PRECISION,
+  credits_available_until TEXT NOT NULL DEFAULT '',
+  credits_updated_at TIMESTAMPTZ,
+  credits_error TEXT NOT NULL DEFAULT '',
+  route_version BIGINT NOT NULL DEFAULT 1,
+  capabilities JSONB NOT NULL DEFAULT '["image.firefly"]'::jsonb,
+  disabled BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS adobe_accounts_route_idx ON adobe_accounts(route_id);
+
+CREATE TABLE IF NOT EXISTS adobe_idempotency_requests (
+  scope TEXT NOT NULL,
+  idempotency_key TEXT NOT NULL,
+  request_hash TEXT NOT NULL,
+  status TEXT NOT NULL,
+  response_status INTEGER,
+  response_body JSONB,
+  upstream_job_id TEXT NOT NULL DEFAULT '',
+  expires_at TIMESTAMPTZ NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY(scope,idempotency_key)
+);
+CREATE INDEX IF NOT EXISTS adobe_idempotency_expiry_idx ON adobe_idempotency_requests(expires_at);`)
 	if err != nil {
 		return fmt.Errorf("migrate PostgreSQL schema: %w", err)
 	}
+	// Keep upgrades from earlier development builds idempotent and remove the
+	// retired registration and generation-reservation schema.
+	_, err = p.pool.Exec(ctx, `
+DROP TABLE IF EXISTS adobe_leases;
+DROP TABLE IF EXISTS adobe_registration_contexts;
+ALTER TABLE adobe_routes ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'proxy';
+ALTER TABLE adobe_accounts ADD COLUMN IF NOT EXISTS last_used_at TIMESTAMPTZ;
+ALTER TABLE adobe_accounts ADD COLUMN IF NOT EXISTS credits_total DOUBLE PRECISION;
+ALTER TABLE adobe_accounts ADD COLUMN IF NOT EXISTS credits_used DOUBLE PRECISION;
+ALTER TABLE adobe_accounts ADD COLUMN IF NOT EXISTS credits_available DOUBLE PRECISION;
+ALTER TABLE adobe_accounts ADD COLUMN IF NOT EXISTS credits_available_until TEXT NOT NULL DEFAULT '';
+ALTER TABLE adobe_accounts ADD COLUMN IF NOT EXISTS credits_updated_at TIMESTAMPTZ;
+ALTER TABLE adobe_accounts ADD COLUMN IF NOT EXISTS credits_error TEXT NOT NULL DEFAULT '';
+ALTER TABLE adobe_accounts DROP COLUMN IF EXISTS arp_session_id_encrypted;
+ALTER TABLE adobe_accounts DROP COLUMN IF EXISTS arp_captured_at;
+ALTER TABLE adobe_accounts DROP COLUMN IF EXISTS max_concurrent_generations;
+ALTER TABLE adobe_accounts DROP COLUMN IF EXISTS active_leases;
+CREATE INDEX IF NOT EXISTS adobe_accounts_round_robin_idx ON adobe_accounts(state,disabled,cooldown_until,last_used_at);`)
+	if err != nil {
+		return fmt.Errorf("upgrade Adobe PostgreSQL schema: %w", err)
+	}
 	return nil
+}
+
+// DB exposes the shared pool to domain repositories that need transactions
+// and row-level locking rather than JSON document persistence.
+func (p *Postgres) DB() *pgxpool.Pool {
+	if p == nil {
+		return nil
+	}
+	return p.pool
 }
 
 func (p *Postgres) Load(ctx context.Context, key string, dst any) error {

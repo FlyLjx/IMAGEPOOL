@@ -15,7 +15,6 @@ import {
   RefreshCw,
   UsersRound,
   Webhook,
-  WandSparkles,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -137,7 +136,6 @@ function OperationsOverview({ scheduler, system, summary }: { scheduler: Schedul
   const activeTasks = scheduler.tasks.active_tasks ?? queuedTasks + runningTasks;
   const queuePercent = percent(queuedTasks, scheduler.tasks.queue_capacity);
   const workerPercent = percent(runningTasks, scheduler.tasks.worker_limit);
-  const postprocessPercent = percent(scheduler.postprocess.queue_depth, scheduler.postprocess.queue_capacity);
   const cpuPercent = loadPercent(system.cpu.usage_percent);
   const memoryPercent = loadPercent(system.memory.usage_percent);
   const diskPercent = loadPercent(system.disk.usage_percent);
@@ -171,16 +169,6 @@ function OperationsOverview({ scheduler, system, summary }: { scheduler: Schedul
       detail: `排队 ${queuedTasks} · 处理 ${runningTasks} · 通道 ${scheduler.tasks.queue_depth}/${scheduler.tasks.queue_capacity}`,
       progress: Math.max(queuePercent, workerPercent),
       color: "#0ea5e9",
-    },
-    {
-      key: "postprocess",
-      title: "高清队列",
-      icon: WandSparkles,
-      iconClass: "bg-violet-50 text-violet-600",
-      value: scheduler.postprocess.enabled ? `${scheduler.postprocess.queue_depth}/${scheduler.postprocess.queue_capacity}` : "关闭",
-      detail: `已处理 ${scheduler.postprocess.processed}，失败 ${scheduler.postprocess.failed}`,
-      progress: postprocessPercent,
-      color: "#8b5cf6",
     },
     {
       key: "callbacks",
@@ -887,7 +875,7 @@ function DashboardContent() {
         <Card title="今日模型使用">
           <EntryBars items={sortedEntries(todayModelEntries)} />
         </Card>
-        <Card title="GPT账号类型">
+        <Card title="GPT 账号类型">
           <EntryBars items={sortedEntries(data.accounts.by_type)} />
         </Card>
       </section>

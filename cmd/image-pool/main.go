@@ -13,16 +13,15 @@ import (
 	"time"
 
 	"imagepool/internal/accounts"
+	"imagepool/internal/adobe"
 	"imagepool/internal/config"
 	"imagepool/internal/httpapi"
 	"imagepool/internal/images"
 	"imagepool/internal/openaiweb"
 	"imagepool/internal/persistence"
-	"imagepool/internal/postprocess"
 	"imagepool/internal/searches"
 	"imagepool/internal/storage"
 	"imagepool/internal/tasks"
-	"imagepool/internal/texts"
 )
 
 func main() {
@@ -36,10 +35,11 @@ func main() {
 	applyEnvironmentOverrides(&cfg)
 	setTimezone(cfg.Timezone)
 	var state persistence.Store
+	var postgres *persistence.Postgres
 	if cfg.StorageBackend == "postgres" || cfg.StorageBackend == "postgresql" {
-		postgres, openErr := persistence.OpenPostgres(context.Background(), cfg.DatabaseURL)
-		if openErr != nil {
-			log.Fatalf("connect PostgreSQL: %v", openErr)
+		postgres, err = persistence.OpenPostgres(context.Background(), cfg.DatabaseURL)
+		if err != nil {
+			log.Fatalf("connect PostgreSQL: %v", err)
 		}
 		state = postgres
 		defer state.Close()
@@ -63,11 +63,7 @@ func main() {
 
 	webClient := openaiweb.NewReloadableClient(cfg)
 	storageService := storage.NewService(cfg)
-	postprocessService := postprocess.New(cfg, state)
-	defer postprocessService.Close()
 	imageService := images.NewService(cfg, store, webClient, storageService)
-	imageService.SetPostprocessor(postprocessService)
-	textService := texts.NewService(cfg, store, webClient)
 	searchService := searches.NewService(cfg, store, webClient)
 	taskManager := tasks.NewManager(imageService)
 	if state != nil {
@@ -77,14 +73,28 @@ func main() {
 	configUpdated := func(next config.Config) {
 		setTimezone(next.Timezone)
 		imageService.UpdateConfig(next)
-		postprocessService.UpdateConfig(next)
 		webClient.UpdateConfig(next)
 	}
-	handler := httpapi.NewServer(cfg, store, imageService, textService, searchService, storageService, taskManager, configUpdated)
+	handler := httpapi.NewServer(cfg, store, imageService, searchService, storageService, taskManager, configUpdated)
 	if state != nil {
-		handler = httpapi.NewServerWithPersistence(cfg, store, imageService, textService, searchService, storageService, taskManager, state, configUpdated)
+		handler = httpapi.NewServerWithPersistence(cfg, store, imageService, searchService, storageService, taskManager, state, configUpdated)
 	}
-	handler.SetPostprocess(postprocessService)
+	adobeRuntime, err := adobe.NewRuntime(postgres, cfg.Adobe)
+	if err != nil {
+		log.Fatalf("initialize Adobe runtime: %v", err)
+	}
+	if adobeRuntime != nil {
+		if err := adobeRuntime.Start(context.Background()); err != nil {
+			log.Fatalf("start Adobe runtime: %v", err)
+		}
+		handler.SetAdobeRuntime(adobeRuntime)
+		imageService.SetAdobeBackend(adobeRuntime)
+		defer func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = adobeRuntime.Close(ctx)
+		}()
+	}
 	defer handler.Close()
 
 	srv := &http.Server{

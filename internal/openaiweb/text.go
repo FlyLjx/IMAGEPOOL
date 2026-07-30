@@ -23,6 +23,8 @@ type ChatRequest struct {
 	Prompt   string        `json:"prompt,omitempty"`
 	Messages []ChatMessage `json:"messages,omitempty"`
 	Stream   bool          `json:"stream,omitempty"`
+	Size     string        `json:"size,omitempty"`
+	Quality  string        `json:"quality,omitempty"`
 }
 
 type ChatDelta struct {

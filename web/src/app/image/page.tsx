@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Button, Card, Checkbox, Empty, Image, Input, Modal, Progress, Select, Tag, Tooltip, Typography } from "antd";
+import { Button, Card, Empty, Image, Input, Modal, Progress, Select, Tag, Tooltip, Typography } from "antd";
 import {
   CheckCircle2,
   CircleAlert,
@@ -152,8 +152,6 @@ function ImageWorkspace() {
   const [isLoadingModels, setIsLoadingModels] = useState(false);
   const [size, setSize] = useState(SIZE_OPTIONS[0]);
   const [quality, setQuality] = useState("auto");
-	const [restorationAvailable, setRestorationAvailable] = useState(false);
-	const [hdRepair, setHDRepair] = useState(false);
   const [references, setReferences] = useState<File[]>([]);
   const [tasks, setTasks] = useState<ImageTask[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -199,7 +197,6 @@ function ImageWorkspace() {
       setIsLoadingModels(true);
       try {
         const result = await fetchModels();
-				setRestorationAvailable(Boolean(result.features?.image_restoration));
         const ids = uniqueModelIDs((result.data || []).map((item) => item.id));
         if (active && ids.length > 0) {
           setModelOptions(ids);
@@ -266,8 +263,8 @@ function ImageWorkspace() {
     try {
       const clientTaskID = newClientTaskID();
       const task = references.length > 0
-				? await createImageEditTask(clientTaskID, references, cleanPrompt, model, size, quality, undefined, "b64_json", hdRepair)
-				: await createImageGenerationTask(clientTaskID, cleanPrompt, model, size, quality, undefined, "b64_json", hdRepair);
+				? await createImageEditTask(clientTaskID, references, cleanPrompt, model, size, quality, undefined, "b64_json")
+				: await createImageGenerationTask(clientTaskID, cleanPrompt, model, size, quality, undefined, "b64_json");
       setTasks((current) => [task, ...current.filter((item) => item.id !== task.id)]);
       toast.success(references.length > 0 ? "参考图任务已提交" : "生图任务已提交");
     } catch (error) {
@@ -299,13 +296,6 @@ function ImageWorkspace() {
               <label className="text-sm font-medium text-slate-700">尺寸<Select className="mt-1.5 w-full" value={size} options={SIZE_OPTIONS.map((value) => ({ value, label: value }))} onChange={setSize} /></label>
               <label className="text-sm font-medium text-slate-700">质量<Select className="mt-1.5 w-full" value={quality} options={QUALITY_OPTIONS.map((value) => ({ value, label: value }))} onChange={setQuality} /></label>
             </div>
-						{restorationAvailable ? (
-							<div className="flex items-center border-y border-slate-100 py-3">
-								<Checkbox checked={hdRepair} onChange={(event) => setHDRepair(event.target.checked)}>
-									高清修复
-								</Checkbox>
-							</div>
-						) : null}
             <div>
               <div className="mb-2 flex items-center justify-between gap-3"><label className="text-sm font-medium text-slate-700">参考图</label><span className="text-xs text-slate-400">可选，添加后将以图生图方式处理</span></div>
               <input ref={fileInput} className="hidden" type="file" accept="image/*" multiple onChange={(event) => addReferences(event.target.files)} />

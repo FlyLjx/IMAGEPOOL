@@ -151,20 +151,17 @@ export type ChatGPTWebDebugResponse = {
 };
 
 export type AccountListResponse = {
+  pool?: "gpt";
   items: Account[];
 };
 
 type ModelListResponse = {
   object: string;
   data: Model[];
-  features?: {
-    image_super_resolution?: boolean;
-    image_super_resolution_available?: boolean;
-    image_restoration?: boolean;
-  };
 };
 
 export type AccountMutationResponse = {
+  pool?: "gpt";
   items: Account[];
   added?: number;
   updated?: number;
@@ -237,9 +234,6 @@ export type SettingsConfig = {
   image_parallel_generation?: boolean;
   image_settle_enabled?: boolean;
   image_check_before_hit_enabled?: boolean;
-	image_super_resolution_enabled?: boolean;
-	image_restoration_enabled?: boolean;
-	image_postprocess_timeout_secs?: number | string;
   image_settle_secs?: number | string;
   image_timeout_retry_secs?: number | string;
   auto_remove_invalid_accounts?: boolean;
@@ -506,39 +500,6 @@ export type DashboardTodayCalls = {
   recent_failed?: DashboardRecentFailedCall[];
 };
 
-export type PostprocessTask = {
-  id: string;
-  parent_task_id?: string;
-  owner_id?: string;
-  status: "queued" | "running" | "success" | "skipped" | "error";
-  model?: string;
-  requested_size?: string;
-  hd_repair?: boolean;
-  super_resolution?: boolean;
-  force_super_resolution?: boolean;
-  restored?: boolean;
-  super_resolved?: boolean;
-  skipped?: boolean;
-  input_bytes?: number;
-  output_bytes?: number;
-  input_image_path?: string;
-  output_image_path?: string;
-  created_at: string;
-  started_at?: string;
-  finished_at?: string;
-  updated_at: string;
-  duration_ms?: number;
-  error?: string;
-};
-
-export type PostprocessTaskListResponse = {
-  items: PostprocessTask[];
-  page: number;
-  page_size: number;
-  total: number;
-  has_more: boolean;
-};
-
 export type DashboardAccountSummary = {
   total: number;
   cumulative_total?: number;
@@ -674,22 +635,6 @@ export type SchedulerDiagnostics = {
     accepting: boolean;
   };
   gpt: SchedulerPoolStats;
-  postprocess: {
-    enabled: boolean;
-    super_resolution_enabled: boolean;
-    restoration_enabled: boolean;
-    queue_depth: number;
-    queue_capacity: number;
-    active_workers: number;
-    worker_limit: number;
-    worker_running: boolean;
-    processed: number;
-    failed: number;
-    restored: number;
-    super_resolved: number;
-    skipped: number;
-    last_error?: string;
-  };
   callbacks: {
     delivered: number;
     failed: number;
@@ -856,7 +801,7 @@ export async function debugChatGPTWeb(payload: ChatGPTWebDebugPayload) {
 export async function createAccounts(tokens: string[], accounts: AccountImportPayload[] = []) {
   return httpRequest<AccountMutationResponse>("/api/accounts", {
     method: "POST",
-    body: { tokens, accounts },
+    body: { pool: "gpt", tokens, accounts },
   });
 }
 
@@ -987,7 +932,7 @@ export async function editImage(files: File | File[], prompt: string, model?: Im
   );
 }
 
-export async function createImageGenerationTask(clientTaskId: string, prompt: string, model?: ImageModel, size?: string, quality = "auto", outputFormat?: string, responseFormat = "b64_json", hdRepair = false) {
+export async function createImageGenerationTask(clientTaskId: string, prompt: string, model?: ImageModel, size?: string, quality = "auto", outputFormat?: string, responseFormat = "b64_json") {
   return httpRequest<ImageTask>("/api/image-tasks/generations", {
     method: "POST",
     body: {
@@ -998,7 +943,6 @@ export async function createImageGenerationTask(clientTaskId: string, prompt: st
       quality,
       ...(responseFormat ? { response_format: responseFormat } : {}),
       ...(outputFormat ? { output_format: outputFormat } : {}),
-		hd_repair: hdRepair,
     },
   });
 }
@@ -1012,7 +956,6 @@ export async function createImageEditTask(
   quality = "auto",
   outputFormat?: string,
   responseFormat = "b64_json",
-	hdRepair = false,
 ) {
   const formData = new FormData();
   const uploadFiles = Array.isArray(files) ? files : [files];
@@ -1035,8 +978,6 @@ export async function createImageEditTask(
   if (outputFormat) {
     formData.append("output_format", outputFormat);
   }
-	formData.append("hd_repair", String(hdRepair));
-
   return httpRequest<ImageTask>("/api/image-tasks/edits", {
     method: "POST",
     body: formData,
@@ -1063,14 +1004,6 @@ export async function fetchImageTaskHistory(options: { page?: number; pageSize?:
   }
   params.set("_t", String(Date.now()));
   return httpRequest<ImageTaskListResponse>(`/api/image-tasks/history?${params.toString()}`);
-}
-
-export async function fetchPostprocessTaskHistory(options: { page?: number; pageSize?: number } = {}) {
-  const params = new URLSearchParams();
-  params.set("page", String(options.page || 1));
-  params.set("page_size", String(options.pageSize || 50));
-  params.set("_t", String(Date.now()));
-  return httpRequest<PostprocessTaskListResponse>(`/api/postprocess-tasks/history?${params.toString()}`);
 }
 
 export async function fetchImageTaskStatus(taskId: string, compact = false) {
@@ -1343,4 +1276,164 @@ export async function resetOutlookPool(scope: "all" | "failed" | "unused" = "all
     method: "POST",
     body: { scope },
   });
+}
+
+export type AdobeRoute = {
+  id: string;
+  name: string;
+  kind: "direct" | "proxy";
+  region: string;
+  priority: number;
+  enabled: boolean;
+  health_status: string;
+  consecutive_failures: number;
+  cooldown_until?: string;
+  last_checked_at?: string;
+  last_error?: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type AdobeAccount = {
+  account_id: string;
+  source: "token" | "cookie" | string;
+  refreshable: boolean;
+  state: string;
+  email: string;
+  display_name: string;
+  route_affinity: string;
+  token_expires_at?: string;
+  last_verified_at?: string;
+  last_used_at?: string;
+  consecutive_failures: number;
+  cooldown_until?: string;
+  last_error_code?: string;
+  last_error?: string;
+  credits_total?: number;
+  credits_used?: number;
+  credits_available?: number;
+  credits_available_until?: string;
+  credits_updated_at?: string;
+  credits_error?: string;
+  disabled: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
+export type AdobeTokenRefreshJob = {
+  id: string;
+  status: "running" | "succeeded" | "partial" | "failed";
+  total: number;
+  completed: number;
+  refreshed_count: number;
+  failed_count: number;
+  percent: number;
+  message: string;
+  started_at: string;
+  updated_at: string;
+  finished_at?: string;
+  events: Array<{
+    account_id?: string;
+    status: string;
+    message: string;
+    at: string;
+  }>;
+};
+
+export type AdobeTestImageJob = {
+  id: string;
+  account_id: string;
+  model: string;
+  status: "running" | "succeeded" | "failed";
+  stage: string;
+  message: string;
+  percent: number;
+  upstream_job_id?: string;
+  image_data_url?: string;
+  error?: string;
+  started_at: string;
+  updated_at: string;
+  finished_at?: string;
+  events: Array<{
+    stage: string;
+    message: string;
+    percent: number;
+    at: string;
+  }>;
+};
+
+export async function fetchAdobeRoutes() {
+  return httpRequest<{ items: AdobeRoute[] }>("/api/adobe/routes");
+}
+
+export async function createAdobeRoute(input: { name: string; kind: "direct" | "proxy"; proxy_url: string; region: string; priority: number }) {
+  return httpRequest<{ item: AdobeRoute }>("/api/adobe/routes", { method: "POST", body: input });
+}
+
+export async function testAdobeRoute(routeId: string) {
+  return httpRequest<{ item: AdobeRoute; ok: boolean }>(`/api/adobe/routes/${encodeURIComponent(routeId)}/test`, { method: "POST", body: {} });
+}
+
+export async function setAdobeRouteEnabled(routeId: string, enabled: boolean) {
+  return httpRequest<{ item: AdobeRoute }>(`/api/adobe/routes/${encodeURIComponent(routeId)}`, { method: "PATCH", body: { enabled } });
+}
+
+export async function deleteAdobeRoute(routeId: string) {
+  return httpRequest<void>(`/api/adobe/routes/${encodeURIComponent(routeId)}`, { method: "DELETE" });
+}
+
+export async function fetchAdobeAccounts() {
+  return httpRequest<{ items: AdobeAccount[] }>("/api/adobe/accounts");
+}
+
+export async function refreshAdobeAccountCredits(accountId: string) {
+  return httpRequest<{ item: AdobeAccount; status: "ok" }>(`/api/adobe/accounts/${encodeURIComponent(accountId)}/refresh-credits`, {
+    method: "POST",
+    body: {},
+  });
+}
+
+export async function deleteAdobeAccount(accountId: string) {
+  return httpRequest<void>(`/api/adobe/accounts/${encodeURIComponent(accountId)}`, { method: "DELETE" });
+}
+
+export async function importAdobeAccount(bundle: unknown) {
+  return httpRequest<{
+    item?: AdobeAccount;
+    items: AdobeAccount[];
+    status: "ok" | "partial" | "failed";
+    total: number;
+    imported_count: number;
+    failed_count: number;
+    failures?: Array<{ index: number; name?: string; error: string }>;
+  }>("/api/adobe/accounts/import", {
+    method: "POST",
+    body: bundle,
+  });
+}
+
+export async function startAdobeTokenRefresh(accountIds: string[] = []) {
+  return httpRequest<{ item: AdobeTokenRefreshJob }>("/api/adobe/accounts/refresh-token/start", {
+    method: "POST",
+    body: { account_ids: accountIds },
+  });
+}
+
+export async function fetchAdobeTokenRefreshJob(jobId: string) {
+  return httpRequest<{ item: AdobeTokenRefreshJob }>(`/api/adobe/token-refresh-jobs/${encodeURIComponent(jobId)}`);
+}
+
+export async function startAdobeAccountTestImage(accountId: string, input: { prompt: string; model: string; quality?: string }) {
+  return httpRequest<{ item: AdobeTestImageJob; created: boolean }>(`/api/adobe/accounts/${encodeURIComponent(accountId)}/test-image/start`, {
+    method: "POST",
+    body: input,
+  });
+}
+
+export async function fetchAdobeTestImageJob(jobId: string) {
+  return httpRequest<{ item: AdobeTestImageJob }>(`/api/adobe/test-image-jobs/${encodeURIComponent(jobId)}`);
+}
+
+export async function setAdobeAccountDisabled(accountId: string, disabled: boolean) {
+  return httpRequest<{ item: AdobeAccount }>(`/api/adobe/accounts/${encodeURIComponent(accountId)}/disable`, { method: "POST", body: { disabled } });
 }

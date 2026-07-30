@@ -115,7 +115,7 @@ export function RegisterCard() {
                   disabled={config.enabled}
                   options={[
                     { value: "total", label: "注册总数" },
-                    { value: "quota", label: "号池剩余额度" },
+                    { value: "quota", label: "GPT 号池剩余额度" },
                     { value: "available", label: "可用账号数量" },
                   ]}
                 />

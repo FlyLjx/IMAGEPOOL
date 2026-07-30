@@ -294,3 +294,29 @@ func TestParseEditRequestLimitsRemoteBodyReadDuration(t *testing.T) {
 		t.Fatal("remote body was never opened")
 	}
 }
+
+func TestValidatePublicReferenceSourceRejectsLocalNetworks(t *testing.T) {
+	for _, source := range []string{
+		"http://localhost/image.png",
+		"http://127.0.0.1/image.png",
+		"http://10.0.0.1/image.png",
+		"http://169.254.169.254/latest/meta-data/",
+		"http://[::1]/image.png",
+	} {
+		if err := validatePublicReferenceSource(source); err == nil {
+			t.Fatalf("source %q was accepted", source)
+		}
+	}
+}
+
+func TestValidatePublicReferenceSourceAllowsPublicAndInlineImages(t *testing.T) {
+	for _, source := range []string{
+		"https://example.com/image.png",
+		"data:image/png;base64,iVBORw0KGgo=",
+		"iVBORw0KGgo=",
+	} {
+		if err := validatePublicReferenceSource(source); err != nil {
+			t.Fatalf("source %q: %v", source, err)
+		}
+	}
+}

@@ -31,7 +31,6 @@ import (
 	"imagepool/internal/searches"
 	"imagepool/internal/storage"
 	"imagepool/internal/tasks"
-	"imagepool/internal/texts"
 	"imagepool/internal/updater"
 )
 
@@ -77,18 +76,6 @@ func (apiBackend) DownloadImageFor(context.Context, accounts.Account, string) ([
 func (apiBackend) ListModels(ctx context.Context, token string) ([]string, error) {
 	return []string{"gpt-5-5"}, nil
 }
-func (apiBackend) GenerateText(ctx context.Context, account accounts.Account, req openaiweb.ChatRequest) (openaiweb.ChatResult, error) {
-	return openaiweb.ChatResult{Text: "hello", Model: req.Model, AccountEmail: account.Email, ConversationID: "conv-text"}, nil
-}
-func (apiBackend) StreamText(ctx context.Context, account accounts.Account, req openaiweb.ChatRequest, emit func(openaiweb.ChatDelta) error) (string, error) {
-	if err := emit(openaiweb.ChatDelta{Delta: "he", ConversationID: "conv-text"}); err != nil {
-		return "", err
-	}
-	if err := emit(openaiweb.ChatDelta{Delta: "llo", ConversationID: "conv-text"}); err != nil {
-		return "", err
-	}
-	return "conv-text", nil
-}
 func (apiBackend) Search(ctx context.Context, account accounts.Account, req openaiweb.SearchRequest) (openaiweb.SearchResult, error) {
 	return openaiweb.SearchResult{Answer: "search answer", Sources: []openaiweb.SearchSource{{Title: "Example", URL: "https://example.com"}}, AccountEmail: account.Email, Model: req.Model}, nil
 }
@@ -102,12 +89,11 @@ func newTestServerWithBackend(cfg config.Config, backend *validatingAPIBackend, 
 	store := accounts.NewStore([]accounts.Account{{Email: "a", AccessToken: "tok", CreatedAt: 1}}, "")
 	storageSvc := storage.NewService(cfg)
 	svc := images.NewService(cfg, store, backend, storageSvc)
-	textSvc := texts.NewService(cfg, store, backend)
 	searchSvc := searches.NewService(cfg, store, backend)
 	worker := func(_ context.Context, _ registration.Config, index int) (accounts.Account, error) {
 		return accounts.Account{Email: "registered-" + strconv.Itoa(index) + "@example.test", AccessToken: "registered-" + strconv.Itoa(index), Status: "正常"}, nil
 	}
-	return newServer(cfg, store, svc, textSvc, searchSvc, storageSvc, tasks.NewManager(svc), nil, worker, updated...)
+	return newServer(cfg, store, svc, searchSvc, storageSvc, tasks.NewManager(svc), nil, worker, updated...)
 }
 
 func testServer(t *testing.T) http.Handler {
@@ -146,76 +132,33 @@ func TestHealthAndAuth(t *testing.T) {
 	}
 }
 
-func TestModelsOnlyExpose2KWhenSuperResolutionIsEnabled(t *testing.T) {
-	tests := []struct {
-		name        string
-		enabled     bool
-		want2KModel bool
-	}{
-		{name: "disabled by default", enabled: false, want2KModel: false},
-		{name: "enabled", enabled: true, want2KModel: true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			cfg := config.Default()
-			cfg.APIKeys = []string{"k"}
-			cfg.ImageSuperResolutionEnabled = tt.enabled
-			srv := httptest.NewServer(newTestServer(cfg))
-			defer srv.Close()
-
-			request, _ := http.NewRequest(http.MethodGet, srv.URL+"/v1/models", nil)
-			request.Header.Set("Authorization", "Bearer k")
-			response, err := http.DefaultClient.Do(request)
-			if err != nil {
-				t.Fatal(err)
+func TestValidateImageOutputOptionsAcceptsAdobeAndGPTFormats(t *testing.T) {
+	for _, model := range []string{"firefly-nano-banana2-1k-1x1", "gpt-image-2"} {
+		for _, outputFormat := range []string{"", "auto", "png", "jpg", "jpeg", "webp"} {
+			if err := validateImageOutputOptions(images.Request{Model: model, OutputFormat: outputFormat}); err != nil {
+				t.Fatalf("model=%q output_format=%q: %v", model, outputFormat, err)
 			}
-			defer response.Body.Close()
-			var payload struct {
-				Data []struct {
-					ID string `json:"id"`
-				} `json:"data"`
-				Features struct {
-					SuperResolution bool `json:"image_super_resolution"`
-				} `json:"features"`
-			}
-			if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
-				t.Fatal(err)
-			}
-			has2KModel := false
-			for _, model := range payload.Data {
-				if model.ID == "gpt-image-2-2k" {
-					has2KModel = true
-				}
-			}
-			if response.StatusCode != http.StatusOK || payload.Features.SuperResolution != tt.enabled || has2KModel != tt.want2KModel {
-				t.Fatalf("status=%d enabled=%t models=%#v", response.StatusCode, payload.Features.SuperResolution, payload.Data)
-			}
-		})
+		}
 	}
 }
 
-func TestPostprocessTaskHistoryEndpoint(t *testing.T) {
-	srv := httptest.NewServer(testServer(t))
-	defer srv.Close()
-	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/postprocess-tasks/history?page=1&page_size=20", nil)
-	req.Header.Set("Authorization", "Bearer k")
-	response, err := http.DefaultClient.Do(req)
+func TestAdobeEndpointsReportDisabledInsteadOfNotFound(t *testing.T) {
+	handler := testServer(t)
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	request, _ := http.NewRequest(http.MethodGet, server.URL+"/api/adobe/routes", nil)
+	request.Header.Set("Authorization", "Bearer k")
+	response, err := http.DefaultClient.Do(request)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer response.Body.Close()
-	var payload struct {
-		Items    []any `json:"items"`
-		Page     int   `json:"page"`
-		PageSize int   `json:"page_size"`
-		Total    int   `json:"total"`
+	body, _ := io.ReadAll(response.Body)
+	if response.StatusCode != http.StatusServiceUnavailable || !strings.Contains(string(body), "ADOBE_DISABLED") {
+		t.Fatalf("status=%d body=%s", response.StatusCode, body)
 	}
-	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
-		t.Fatal(err)
-	}
-	if response.StatusCode != http.StatusOK || payload.Items == nil || payload.Page != 1 || payload.PageSize != 20 || payload.Total != 0 {
-		t.Fatalf("status=%d payload=%#v", response.StatusCode, payload)
-	}
+
 }
 
 func TestStabilityHealthEndpointIsPublicAndNoStore(t *testing.T) {
@@ -790,7 +733,7 @@ func TestCallLogsUseLogTypeAndDetailShape(t *testing.T) {
 func TestAccountImageTestCreatesTrackedTask(t *testing.T) {
 	srv := httptest.NewServer(testServer(t))
 	defer srv.Close()
-	request, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/accounts/test-image", strings.NewReader(`{"access_token":"tok","model":"gpt-image-2-2k","prompt":"custom test prompt"}`))
+	request, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/accounts/test-image", strings.NewReader(`{"access_token":"tok","model":"gpt-image-2","size":"1024x1024","prompt":"custom test prompt"}`))
 	request.Header.Set("Authorization", "Bearer k")
 	response, err := http.DefaultClient.Do(request)
 	if err != nil {
@@ -823,7 +766,7 @@ func TestAccountImageTestCreatesTrackedTask(t *testing.T) {
 	if tasksResponse.StatusCode != http.StatusOK || len(taskPayload.Items) != 1 || taskPayload.Items[0].Status != tasks.StatusSucceeded {
 		t.Fatalf("task status=%d payload=%#v", tasksResponse.StatusCode, taskPayload)
 	}
-	if taskPayload.Items[0].Prompt != "custom test prompt" || taskPayload.Items[0].Model != "gpt-image-2-2k" || taskPayload.Items[0].Size != "2048x2048" || !taskPayload.Items[0].SuperResolution {
+	if taskPayload.Items[0].Prompt != "custom test prompt" || taskPayload.Items[0].Model != "gpt-image-2" || taskPayload.Items[0].Size != "1024x1024" {
 		t.Fatalf("test image model options were not preserved: %#v", taskPayload.Items[0])
 	}
 	if taskPayload.Items[0].ResponseFormat != "url" || len(taskPayload.Items[0].Data) != 1 || !strings.HasPrefix(taskPayload.Items[0].Data[0].URL, srv.URL+"/images/") {
@@ -891,6 +834,67 @@ func TestAccountImportRemovesInvalidTokens(t *testing.T) {
 	}
 }
 
+func TestGPTAccountImportRejectsAdobeDataBeforePersistence(t *testing.T) {
+	cfg := config.Default()
+	cfg.AuthKeyFile = filepath.Join(t.TempDir(), "auth-keys.json")
+	cfg.ImageOutputDir = filepath.Join(t.TempDir(), "images")
+	cfg.CallLogFile = filepath.Join(t.TempDir(), "calls.json")
+	cfg.ImageTagsFile = filepath.Join(t.TempDir(), "tags.json")
+	cfg.RegisterFile = filepath.Join(t.TempDir(), "register.json")
+	backend := &validatingAPIBackend{}
+	srv := httptest.NewServer(newTestServerWithBackend(cfg, backend))
+	defer srv.Close()
+
+	requests := []string{
+		`{"pool":"adobe","tokens":["must-not-be-written"]}`,
+		`{"pool":"gpt","accounts":[{"access_token":"must-not-be-written","route_affinity":"route_adobe_1","credentials":{"cookie_jar":[]}}]}`,
+		`{"schema":"account-session-bundle/v1","registration_context_id":"ctx_1","route_affinity":"route_adobe_1","credentials":{"access_token":"must-not-be-written","cookie_jar":[]}}`,
+	}
+	for _, requestBody := range requests {
+		request, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/accounts", strings.NewReader(requestBody))
+		request.Header.Set("Authorization", "Bearer k")
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response.Body.Close()
+		if response.StatusCode != http.StatusBadRequest {
+			t.Fatalf("status=%d body=%s", response.StatusCode, requestBody)
+		}
+	}
+	externalRequest, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/external/accounts/import", strings.NewReader(requests[1]))
+	externalRequest.Header.Set("Authorization", "Bearer k")
+	externalResponse, err := http.DefaultClient.Do(externalRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	externalResponse.Body.Close()
+	if externalResponse.StatusCode != http.StatusBadRequest {
+		t.Fatalf("external import status=%d", externalResponse.StatusCode)
+	}
+	if backend.readinessCheckCount() != 0 {
+		t.Fatalf("Adobe payload reached GPT validation: checks=%d", backend.readinessCheckCount())
+	}
+
+	request, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/accounts", nil)
+	request.Header.Set("Authorization", "Bearer k")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	var payload struct {
+		Pool  string           `json:"pool"`
+		Items []map[string]any `json:"items"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Pool != "gpt" || len(payload.Items) != 1 {
+		t.Fatalf("payload=%#v", payload)
+	}
+}
+
 func TestTaskEndpointDoesNotReuseClientTaskID(t *testing.T) {
 	srv := httptest.NewServer(testServer(t))
 	defer srv.Close()
@@ -912,55 +916,26 @@ func TestTaskEndpointDoesNotReuseClientTaskID(t *testing.T) {
 	}
 }
 
-func TestChatCompletionsEndpoint(t *testing.T) {
+func TestChatEndpointsAreNotExposed(t *testing.T) {
 	srv := httptest.NewServer(testServer(t))
 	defer srv.Close()
-	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/v1/chat/completions", strings.NewReader(`{"model":"auto","messages":[{"role":"user","content":"hi"}]}`))
-	req.Header.Set("Authorization", "Bearer k")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	var payload map[string]any
-	json.NewDecoder(resp.Body).Decode(&payload)
-	choices, _ := payload["choices"].([]any)
-	if resp.StatusCode != 200 || len(choices) != 1 {
-		t.Fatalf("status=%d payload=%#v", resp.StatusCode, payload)
-	}
-}
 
-func TestResponsesEndpoint(t *testing.T) {
-	srv := httptest.NewServer(testServer(t))
-	defer srv.Close()
-	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/v1/responses", strings.NewReader(`{"model":"auto","input":"hi"}`))
-	req.Header.Set("Authorization", "Bearer k")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
+	tests := []string{
+		"/v1/chat/completions",
+		"/v1/responses",
+		"/v1/messages",
 	}
-	defer resp.Body.Close()
-	var payload map[string]any
-	json.NewDecoder(resp.Body).Decode(&payload)
-	if resp.StatusCode != 200 || payload["output_text"] != "hello" {
-		t.Fatalf("status=%d payload=%#v", resp.StatusCode, payload)
-	}
-}
-
-func TestAnthropicMessagesEndpoint(t *testing.T) {
-	srv := httptest.NewServer(testServer(t))
-	defer srv.Close()
-	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/v1/messages", strings.NewReader(`{"model":"auto","messages":[{"role":"user","content":"hi"}]}`))
-	req.Header.Set("Authorization", "Bearer k")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	var payload map[string]any
-	json.NewDecoder(resp.Body).Decode(&payload)
-	if resp.StatusCode != 200 || payload["type"] != "message" {
-		t.Fatalf("status=%d payload=%#v", resp.StatusCode, payload)
+	for _, path := range tests {
+		request, _ := http.NewRequest(http.MethodPost, srv.URL+path, strings.NewReader(`{"model":"auto"}`))
+		request.Header.Set("Authorization", "Bearer k")
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			t.Fatalf("%s: %v", path, err)
+		}
+		response.Body.Close()
+		if response.StatusCode != http.StatusNotFound {
+			t.Fatalf("path=%s status=%d", path, response.StatusCode)
+		}
 	}
 }
 

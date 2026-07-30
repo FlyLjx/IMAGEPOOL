@@ -23,9 +23,9 @@ import (
 	"github.com/deepteams/webp"
 
 	"imagepool/internal/accounts"
+	adobeprovider "imagepool/internal/adobe"
 	"imagepool/internal/config"
 	"imagepool/internal/openaiweb"
-	"imagepool/internal/postprocess"
 	"imagepool/internal/storage"
 )
 
@@ -41,7 +41,11 @@ type Service struct {
 	store   *accounts.Store
 	backend openaiweb.Backend
 	storage *storage.Service
-	post    *postprocess.Service
+	adobe   AdobeBackend
+}
+
+type AdobeBackend interface {
+	GenerateImage(context.Context, adobeprovider.ImageGenerateRequest) (adobeprovider.ImageGenerateResult, error)
 }
 
 type accountInfoBackend interface {
@@ -76,6 +80,7 @@ type Data struct {
 
 type Response struct {
 	Created        int64                  `json:"created"`
+	Model          string                 `json:"model,omitempty"`
 	Data           []Data                 `json:"data"`
 	Usage          *Usage                 `json:"usage,omitempty"`
 	AccountEmail   string                 `json:"account_email,omitempty"`
@@ -103,11 +108,10 @@ func (s *Service) UpdateConfig(cfg config.Config) {
 	s.cfgMu.Unlock()
 }
 
-func (s *Service) SetPostprocessor(service *postprocess.Service) {
-	if s == nil {
-		return
+func (s *Service) SetAdobeBackend(backend AdobeBackend) {
+	if s != nil {
+		s.adobe = backend
 	}
-	s.post = service
 }
 
 func (s *Service) currentConfig() config.Config {
@@ -142,6 +146,11 @@ func (s *Service) Generate(ctx context.Context, req Request) (Response, error) {
 	}
 	req.ResponseFormat = responseFormat
 	req.OutputFormat, _ = normalizeOutputFormat(req.OutputFormat)
+	if adobeprovider.IsRequestedModel(req.Model) {
+		// Adobe model IDs already encode output resolution and aspect ratio.
+		req.Size = ""
+		return s.generateAdobe(ctx, req)
+	}
 	if req.N == 1 {
 		result, err := s.generateOne(ctx, req)
 		response := responseWithModel(responseFromResult(result), publicModel)
@@ -182,6 +191,37 @@ func (s *Service) Generate(ctx context.Context, req Request) (Response, error) {
 		}
 	}
 	return withEstimatedUsage(responseWithModel(combined, publicModel), req), nil
+}
+
+func (s *Service) generateAdobe(ctx context.Context, req Request) (Response, error) {
+	if s.adobe == nil {
+		return Response{}, fmt.Errorf("Adobe image provider is disabled")
+	}
+	references := make([]adobeprovider.ImageReference, 0, len(req.References))
+	for _, reference := range req.References {
+		references = append(references, adobeprovider.ImageReference{Data: reference.Data, MIMEType: reference.MIMEType})
+	}
+	result, err := s.adobe.GenerateImage(ctx, adobeprovider.ImageGenerateRequest{
+		Prompt: req.Prompt, Model: req.Model, Quality: req.Quality, OutputFormat: req.OutputFormat, References: references,
+		Progress: func(progress string, percent int, details map[string]any) {
+			if req.Progress != nil {
+				req.Progress(openaiweb.ProgressEvent{Progress: progress, Message: "Adobe Firefly image generation", Details: details})
+			}
+		},
+	})
+	converted := openaiweb.ImageResult{BackendModel: req.Model, ConversationID: result.UpstreamJobID}
+	for _, image := range result.Images {
+		converted.B64JSON = append(converted.B64JSON, base64.StdEncoding.EncodeToString(image))
+	}
+	if err != nil {
+		return responseFromResult(converted), err
+	}
+	// Express returns PNG; shared finalization applies output_format locally.
+	converted, err = s.finalizeResult(ctx, accounts.Account{}, converted, req)
+	if err != nil {
+		return responseFromResult(converted), err
+	}
+	return responseFromResult(converted), nil
 }
 
 func (s *Service) CheckAccount(ctx context.Context, token string) (accounts.AccountCheckResult, error) {
@@ -285,6 +325,9 @@ func (s *Service) GenerateWithAccount(ctx context.Context, token string, req Req
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if adobeprovider.IsRequestedModel(req.Model) {
+		return Response{}, errors.New("GenerateWithAccount only accepts OpenAI Web accounts")
+	}
 	req, publicModel := PrepareModelRequest(req)
 	account, ok := s.store.Get(token)
 	if !ok {
@@ -296,7 +339,7 @@ func (s *Service) GenerateWithAccount(ctx context.Context, token string, req Req
 	if err != nil {
 		return Response{}, err
 	}
-	taskCtx, cancel := s.taskContext(ctx, req)
+	taskCtx, cancel := s.taskContext(ctx)
 	defer cancel()
 	released := false
 	release := func() {
@@ -352,15 +395,12 @@ func (s *Service) GenerateWithAccount(ctx context.Context, token string, req Req
 	return withEstimatedUsage(response, req), nil
 }
 
-func (s *Service) taskContext(parent context.Context, req Request) (context.Context, context.CancelFunc) {
+func (s *Service) taskContext(parent context.Context) (context.Context, context.CancelFunc) {
 	if parent == nil {
 		parent = context.Background()
 	}
 	cfg := s.currentConfig()
 	timeout := time.Duration(cfg.ImageTaskTimeoutSecs * float64(time.Second))
-	if cfg.ImageSuperResolutionEnabled || req.SuperResolution || (cfg.ImageRestorationEnabled && req.HDRepair) {
-		timeout += time.Duration(cfg.ImagePostprocessTimeoutSecs * float64(time.Second))
-	}
 	if timeout <= 0 {
 		return context.WithCancel(parent)
 	}
@@ -403,7 +443,7 @@ func (s *Service) generateOne(ctx context.Context, req Request) (openaiweb.Image
 		}
 		exclude[account.AccessToken] = true
 		if taskCtx == nil {
-			taskCtx, cancelTask = s.taskContext(ctx, req)
+			taskCtx, cancelTask = s.taskContext(ctx)
 		}
 		log := openaiweb.AttemptLog{Attempt: len(attempts) + 1, AccountEmail: account.Email, Status: "running"}
 		account, err = s.prepareAccountForDispatch(account, req)
@@ -612,7 +652,6 @@ func (s *Service) resultAsBase64(ctx context.Context, account accounts.Account, 
 	out.URLs = nil
 	out.B64JSON = make([]string, 0, len(dataItems))
 	for _, data := range dataItems {
-		data = s.postprocessImage(ctx, data, req)
 		if outputFormat != "" {
 			var err error
 			data, err = convertImageDataFormat(data, outputFormat)
@@ -670,7 +709,6 @@ func (s *Service) cacheResult(ctx context.Context, account accounts.Account, res
 			log.Printf("image cache decode b64_json failed: %v", err)
 			continue
 		}
-		data = s.postprocessImage(ctx, data, req)
 		if outputFormat != "" {
 			data, err = convertImageDataFormat(data, outputFormat)
 			if err != nil {
@@ -714,7 +752,6 @@ func (s *Service) cacheResult(ctx context.Context, account accounts.Account, res
 			urls = append(urls, remoteURL)
 			continue
 		}
-		data = s.postprocessImage(ctx, data, req)
 		if outputFormat != "" {
 			data, err = convertImageDataFormat(data, outputFormat)
 			if err != nil {
@@ -734,29 +771,6 @@ func (s *Service) cacheResult(ctx context.Context, account accounts.Account, res
 	result.URLs = urls
 	result.B64JSON = nil
 	return result, nil
-}
-
-func (s *Service) postprocessImage(ctx context.Context, data []byte, req Request) []byte {
-	if s == nil || s.post == nil || len(data) == 0 {
-		return data
-	}
-	result := s.post.Process(ctx, data, postprocess.Options{
-		ParentTaskID:    req.TaskID,
-		OwnerID:         req.OwnerID,
-		Model:           req.PublicModel,
-		RequestedSize:   req.Size,
-		HDRepair:        req.HDRepair,
-		SuperResolution: req.SuperResolution,
-		Progress: func(stage, message string, details map[string]any) {
-			if req.Progress != nil {
-				req.Progress(openaiweb.ProgressEvent{Progress: stage, Message: message, Details: details})
-			}
-		},
-	})
-	if result.Error != "" {
-		log.Printf("image postprocess fallback: %s", result.Error)
-	}
-	return result.Data
 }
 
 func imageURL(baseURL, rel string) string {
@@ -829,13 +843,18 @@ func isCacheDownloadAuthenticationFailure(err error) bool {
 
 func (s *Service) ListModels(ctx context.Context) ([]string, error) {
 	base := []string{PublicImageModel}
+	if s.adobe != nil {
+		for _, model := range adobeprovider.Models() {
+			base = append(base, model.ID)
+		}
+	}
 	account, err := s.store.SelectForImage(nil)
 	if err != nil {
-		return ExpandSuperResolutionModels(base), nil
+		return base, nil
 	}
 	account, err = s.ensureBrowserIdentity(account)
 	if err != nil {
-		return ExpandSuperResolutionModels(base), nil
+		return base, nil
 	}
 	var upstream []string
 	if backend, ok := s.backend.(accountModelsForBackend); ok {
@@ -844,23 +863,28 @@ func (s *Service) ListModels(ctx context.Context) ([]string, error) {
 		upstream, err = s.backend.ListModels(ctx, account.AccessToken)
 	}
 	if err != nil {
-		return ExpandSuperResolutionModels(base), nil
+		return base, nil
+	}
+	allowed := make(map[string]bool, len(base))
+	for _, model := range base {
+		allowed[model] = true
 	}
 	seen := map[string]bool{}
 	out := []string{}
 	for _, list := range [][]string{upstream, base} {
 		for _, model := range list {
-			if model == PublicImageModel && !seen[model] {
+			if allowed[model] && !seen[model] {
 				seen[model] = true
 				out = append(out, model)
 			}
 		}
 	}
-	return ExpandSuperResolutionModels(out), nil
+	return out, nil
 }
 
 func responseWithModel(response Response, model string) Response {
 	model = PublicModelName(model)
+	response.Model = model
 	response.BackendModel = model
 	if response.ImageRoute != nil {
 		route := make(map[string]any, len(response.ImageRoute))
@@ -874,7 +898,7 @@ func responseWithModel(response Response, model string) Response {
 }
 
 func responseFromResult(result openaiweb.ImageResult) Response {
-	resp := Response{Created: time.Now().Unix(), AccountEmail: result.AccountEmail, ConversationID: result.ConversationID, BackendModel: result.BackendModel, Attempts: result.Attempts}
+	resp := Response{Created: time.Now().Unix(), Model: PublicModel(result.BackendModel), AccountEmail: result.AccountEmail, ConversationID: result.ConversationID, BackendModel: result.BackendModel, Attempts: result.Attempts}
 	for _, url := range result.URLs {
 		mimeType := imageMIMETypeFromURL(url)
 		resp.Data = append(resp.Data, Data{URL: url, MimeType: mimeType, Format: imageFormatFromMIMEType(mimeType)})
@@ -893,6 +917,7 @@ func (r Response) Public() Response {
 	publicModel := PublicModelName(r.BackendModel)
 	r.AccountEmail = ""
 	r.BackendModel = publicModel
+	r.Model = publicModel
 	r.Attempts = nil
 	if r.ImageRoute != nil {
 		route := make(map[string]any, len(r.ImageRoute))
@@ -903,6 +928,13 @@ func (r Response) Public() Response {
 		r.ImageRoute = route
 	}
 	return r
+}
+
+func PublicModel(model string) string {
+	if adobeprovider.IsRequestedModel(model) {
+		return strings.TrimSpace(model)
+	}
+	return PublicImageModel
 }
 
 func imageMIMETypeFromBase64(encoded string) string {

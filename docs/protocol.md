@@ -28,21 +28,30 @@ Go 版当前保留 Python 项目的普通 Image-2 反代链路，核心请求顺
    - `GET /backend-api/files/{file_id}/download`
    - `GET /backend-api/conversation/{conversation_id}/attachment/{attachment_id}/download`
 
-账号池策略：
+GPT 账号池策略：
 
 - 账号按 `created_at` 倒序选择，最新账号优先。
-- `token_revoked` / `token invalidated`：直接从号池删除并切换下一个账号。
+- `token_revoked` / `token invalidated`：直接从 GPT 号池删除并切换下一个账号。
 - `no available free image quota`：标记为图片额度耗尽，保留给后续刷新确认。
 - 生图超时、普通 `image generation failed`：不删号，记录失败并切换账号重试。
 - 工具消息返回 `server_timeout`、`interrupted` 等终态：立即切换账号，不再继续盲轮询。
+
+Adobe 账号池策略：
+
+- 仅目录内精确的 `firefly-*` 模型进入 Adobe 号池；GPT 模型路径保持不变。
+- Adobe 模型只接受图片生成、图片编辑和异步图片任务接口；模型名后缀固定分辨率与宽高比，客户端 `size` 不参与 Adobe 请求。
+- Adobe Express 3P 模型目前返回原生 PNG；提交固定请求 `x-accept-mimetype: image/png`，下载后按 `output_format=png|jpeg|jpg|webp` 本地转换，再进行 URL 缓存或 Base64 包装。GPT 号池的格式处理保持不变。
+- 按 `last_used_at` 轮询可用账号，选择时只更新最近使用时间，不创建持久化生成租约。
+- 每个 Adobe 账号固定绑定一条直连或代理线路，Token 刷新与生图共用该线路。
+- 认证失效、额度耗尽和可重试上游错误会记录账号状态并切换下一账号。
 - 图片 SSE 的响应头、无字节空闲窗口均为 60 秒；同一次已提交生图从流到会话轮询共用 300 秒预算。收到恢复 token 后优先走恢复流，轮询从 3 秒开始并退避到 10 秒。
 - 客户端重复 `client_task_id` 不复用任务，每次提交都会创建新任务 ID。
 
 协议测试覆盖：models endpoint、sentinel prepare/finalize、conversation prepare、SSE start、conversation polling、download URL 解析。
 
-## 文本 conversation 逆向链路
+## 内部文本 conversation 链路
 
-文本 `/v1/chat/completions`、`/v1/responses`、`/v1/messages` 共用 ChatGPT Web conversation SSE：
+公开 API 不提供 `/v1/chat/completions`、`/v1/responses` 或 `/v1/messages`。搜索服务内部复用 ChatGPT Web conversation SSE：
 
 1. `GET /` 预热并提取 PoW 资源。
 2. `POST /backend-api/sentinel/chat-requirements/prepare`

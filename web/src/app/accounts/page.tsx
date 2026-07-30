@@ -533,7 +533,7 @@ function AccountsPageContent() {
     setIsLoadingModels(true);
     try {
       const data = await fetchModels();
-      setAvailableModels(Array.isArray(data.data) ? data.data : []);
+      setAvailableModels(Array.isArray(data.data) ? data.data.filter((model) => model.owned_by !== "adobe-firefly") : []);
     } catch (error) {
       const message = error instanceof Error ? error.message : "加载模型列表失败";
       toast.error(message);
@@ -1343,10 +1343,10 @@ function AccountsPageContent() {
         <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
           <div className="space-y-1">
             <div className="text-xs font-semibold tracking-[0.18em] text-slate-400 uppercase">
-              Account Pool
+              GPT Account Pool
             </div>
-            <h1 className="text-2xl font-semibold tracking-tight text-slate-950">号池管理</h1>
-            <p className="text-sm text-slate-500">管理账号状态、额度、Codex 使用率和批量刷新任务。</p>
+            <h1 className="text-2xl font-semibold tracking-tight text-slate-950">GPT 号池</h1>
+            <p className="text-sm text-slate-500">管理 ChatGPT 与 Codex 账号状态、额度和批量刷新任务。</p>
           </div>
 
           <Space wrap>
@@ -1652,7 +1652,7 @@ function AccountsPageContent() {
         </Row>
         <AntCard size="small">
           <div className="mb-3 text-sm font-medium text-slate-700">
-              系统可用模型
+            GPT 可用模型
             <span className="ml-1 text-slate-400">({availableModels.length})</span>
           </div>
           <div className="flex flex-wrap gap-2">

@@ -17,10 +17,77 @@ import (
 	"time"
 
 	"imagepool/internal/accounts"
+	adobeprovider "imagepool/internal/adobe"
 	"imagepool/internal/config"
 	"imagepool/internal/openaiweb"
 	"imagepool/internal/storage"
 )
+
+type fakeAdobeBackend struct {
+	calls   int
+	request adobeprovider.ImageGenerateRequest
+	result  adobeprovider.ImageGenerateResult
+	err     error
+}
+
+func (f *fakeAdobeBackend) GenerateImage(_ context.Context, request adobeprovider.ImageGenerateRequest) (adobeprovider.ImageGenerateResult, error) {
+	f.calls++
+	f.request = request
+	return f.result, f.err
+}
+
+func TestGenerateRoutesFireflyModelsToAdobeBackend(t *testing.T) {
+	chatgpt := &fakeBackend{}
+	service := NewService(config.Default(), accounts.NewStore(nil, ""), chatgpt)
+	adobe := &fakeAdobeBackend{result: adobeprovider.ImageGenerateResult{Images: [][]byte{testPNGBytes(t)}, UpstreamJobID: "job-1"}}
+	service.SetAdobeBackend(adobe)
+
+	response, err := service.Generate(context.Background(), Request{
+		Prompt: "draw", Model: adobeprovider.DefaultModelID, Size: "1024x1024", ResponseFormat: "b64_json", OutputFormat: "jpeg",
+		References: []openaiweb.ImageInput{{Data: []byte("reference"), MIMEType: "image/png"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if adobe.calls != 1 || chatgpt.calls != 0 {
+		t.Fatalf("adobe calls=%d chatgpt calls=%d", adobe.calls, chatgpt.calls)
+	}
+	if adobe.request.Model != adobeprovider.DefaultModelID || adobe.request.OutputFormat != "jpeg" || len(adobe.request.References) != 1 || string(adobe.request.References[0].Data) != "reference" {
+		t.Fatalf("Adobe request=%#v", adobe.request)
+	}
+	if response.Model != adobeprovider.DefaultModelID || response.ConversationID != "job-1" || len(response.Data) != 1 || response.Data[0].B64JSON == "" || response.Data[0].Format != "jpeg" || response.Data[0].MimeType != "image/jpeg" {
+		t.Fatalf("response=%#v", response)
+	}
+	data, err := base64.StdEncoding.DecodeString(response.Data[0].B64JSON)
+	if err != nil || len(data) < 3 || !bytes.Equal(data[:3], []byte{0xff, 0xd8, 0xff}) {
+		t.Fatalf("Adobe jpeg bytes=%x err=%v", data[:min(len(data), 8)], err)
+	}
+}
+
+func TestGenerateKeepsDefaultImageModelOnChatGPTBackend(t *testing.T) {
+	chatgpt := &fakeBackend{}
+	service := NewService(config.Default(), accounts.NewStore([]accounts.Account{{Email: "a", AccessToken: "token"}}, ""), chatgpt)
+	service.SetAdobeBackend(&fakeAdobeBackend{})
+
+	if _, err := service.Generate(context.Background(), Request{Prompt: "draw", Model: PublicImageModel}); err != nil {
+		t.Fatal(err)
+	}
+	if chatgpt.calls != 1 {
+		t.Fatalf("ChatGPT backend calls=%d", chatgpt.calls)
+	}
+}
+
+func TestGenerateNeverRoutesUnknownFireflyModelToChatGPT(t *testing.T) {
+	chatgpt := &fakeBackend{}
+	service := NewService(config.Default(), accounts.NewStore([]accounts.Account{{Email: "a", AccessToken: "token"}}, ""), chatgpt)
+	adobe := &fakeAdobeBackend{err: errors.New("invalid Adobe image model")}
+	service.SetAdobeBackend(adobe)
+
+	_, err := service.Generate(context.Background(), Request{Prompt: "draw", Model: "firefly-unknown-model"})
+	if err == nil || adobe.calls != 1 || chatgpt.calls != 0 {
+		t.Fatalf("err=%v adobe calls=%d chatgpt calls=%d", err, adobe.calls, chatgpt.calls)
+	}
+}
 
 type fakeBackend struct {
 	mu              sync.Mutex
@@ -531,31 +598,9 @@ func TestGenerateInteractiveChallengePreservesAccounts(t *testing.T) {
 
 func TestListModelsFallback(t *testing.T) {
 	models, err := NewService(config.Default(), accounts.NewStore(nil, ""), &fakeBackend{}).ListModels(context.Background())
-	want := []string{"gpt-image-2", "gpt-image-2-2k"}
+	want := []string{"gpt-image-2"}
 	if err != nil || !reflect.DeepEqual(models, want) {
 		t.Fatalf("models=%#v want=%#v err=%v", models, want, err)
-	}
-}
-
-func TestGenerateUsesBaseUpstreamModelFor2KVariant(t *testing.T) {
-	store := accounts.NewStore([]accounts.Account{{AccessToken: "token", CreatedAt: 1}}, "")
-	backend := &fakeBackend{}
-	response, err := NewService(config.Default(), store, backend).Generate(context.Background(), Request{
-		Prompt: "draw",
-		Model:  "gpt-image-2-2k",
-		Size:   "1024x1536",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	backend.mu.Lock()
-	request := backend.lastRequest
-	backend.mu.Unlock()
-	if request.Model != "gpt-image-2" || request.Size != "1368x2048" || !request.SuperResolution {
-		t.Fatalf("upstream request=%#v", request)
-	}
-	if response.BackendModel != "gpt-image-2-2k" {
-		t.Fatalf("response model=%q", response.BackendModel)
 	}
 }
 

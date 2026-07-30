@@ -94,7 +94,7 @@ func (s *Service) list(baseURL, startDate, endDate string, includeDimensions boo
 	}
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil || d == nil || d.IsDir() {
-			if d != nil && d.IsDir() && (d.Name() == ".thumbnails" || d.Name() == ".postprocess-comparisons") {
+			if d != nil && d.IsDir() && d.Name() == ".thumbnails" {
 				return filepath.SkipDir
 			}
 			return err
@@ -332,9 +332,6 @@ func (s *Service) CleanupOlderThan(cutoff time.Time) (removed int, freedBytes in
 			return nil
 		}
 		freedBytes += info.Size()
-		if strings.HasPrefix(rel, ".postprocess-comparisons/") {
-			return nil
-		}
 		_ = os.Remove(s.thumbnailPath(rel))
 		removed++
 		removedPaths = append(removedPaths, rel)

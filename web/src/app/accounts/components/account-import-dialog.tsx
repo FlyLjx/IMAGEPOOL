@@ -594,12 +594,12 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
           onClick={() => setOpen(true)}
           disabled={disabled}
         >
-          导入
+          导入 GPT 账号
       </AntButton>
       <Modal
         title={
           method === "menu"
-            ? "导入账户"
+            ? "导入 GPT 账号"
             : method === "token"
               ? "导入 Access Token"
               : method === "session"
@@ -608,7 +608,7 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
                   ? "导入 Codex 认证 JSON"
                 : method === "oauth"
                   ? "OAuth 登录已有账号"
-                  : "导入账户"
+                  : "导入 GPT 账号"
         }
         open={open}
         onCancel={() => handleOpenChange(false)}
@@ -642,7 +642,7 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
       >
         <div className="mb-5 rounded-xl border border-slate-100 bg-slate-50 px-4 py-3 text-sm leading-6 text-slate-500">
           {method === "menu"
-            ? "选择一种导入方式。导入成功后会自动拉取邮箱、类型和额度。"
+            ? "选择一种 GPT 账号导入方式。导入成功后会自动拉取邮箱、类型和额度。"
             : method === "token"
               ? "支持手动粘贴或从 TXT 文件导入，一行一个 Token。"
             : method === "session"

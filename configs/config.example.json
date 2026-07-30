@@ -27,12 +27,6 @@
   "image_account_precheck_timeout_secs": 75,
   "image_check_before_hit_enabled": true,
   "image_settle_enabled": true,
-  "image_super_resolution_enabled": false,
-  "image_restoration_enabled": false,
-  "image_postprocess_worker": "../postprocess/worker.mjs",
-  "image_super_resolution_model": "../postprocess/models/realesr-general-x4v3.onnx",
-  "image_restoration_model": "../postprocess/models/scunet-color-real-gan.onnx",
-  "image_postprocess_timeout_secs": 180,
   "max_image_attempts": 3,
   "request_timeout_secs": 120,
   "refresh_account_interval_minute": 60,
@@ -56,6 +50,15 @@
       "refresh_interval": 3600,
       "warm_up_on_start": false
     }
+  },
+  "adobe": {
+    "enabled": false,
+    "generate_timeout_secs": 300,
+    "route_health_interval_secs": 60,
+    "route_failure_threshold": 3,
+    "route_cooldown_secs": 300,
+    "idempotency_ttl_hours": 24,
+    "token_refresh_interval_hours": 15
   },
   "models": ["gpt-image-2"]
 }
