@@ -24,7 +24,6 @@ function statusTag(status: PostprocessTask["status"]) {
 function operationTags(item: PostprocessTask) {
   return (
     <Space size={[4, 4]} wrap>
-      {item.super_resolution ? <Tag color={item.force_super_resolution ? "purple" : "blue"}>{item.force_super_resolution ? "强制超分" : "超分检查"}</Tag> : null}
       {item.hd_repair ? <Tag color="cyan">高清修复</Tag> : null}
     </Space>
   );
@@ -34,14 +33,11 @@ function resultTag(item: PostprocessTask) {
   if (item.status === "error") {
     return <Tag color="red">处理失败</Tag>;
   }
-  if (item.super_resolved && item.restored) {
-    return <Tag color="green">已超分并修复</Tag>;
-  }
-  if (item.super_resolved) {
-    return <Tag color="green">已超分</Tag>;
-  }
   if (item.restored) {
     return <Tag color="cyan">已修复</Tag>;
+  }
+  if (item.status === "success") {
+    return <Tag color="green">已处理</Tag>;
   }
   if (item.status === "skipped" || item.skipped) {
     return <Tag>无需处理</Tag>;
@@ -80,7 +76,7 @@ function PostprocessTasksContent() {
       setItems(data.items);
       setTotal(data.total);
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "加载超分记录失败");
+      toast.error(error instanceof Error ? error.message : "加载修复记录失败");
     } finally {
       setIsLoading(false);
     }
@@ -101,7 +97,7 @@ function PostprocessTasksContent() {
   const summary = useMemo(() => ({
     total,
     active: items.filter((item) => item.status === "queued" || item.status === "running").length,
-    completed: items.filter((item) => item.super_resolved || item.restored).length,
+    completed: items.filter((item) => item.status === "success" || item.restored).length,
     failed: items.filter((item) => item.status === "error").length,
   }), [items, total]);
 
@@ -161,7 +157,7 @@ function PostprocessTasksContent() {
   return (
     <div className="dashboard-console">
       <section className="flex items-center justify-between gap-4 rounded-lg border border-slate-200 bg-white px-5 py-5 shadow-sm">
-        <Typography.Title level={2} className="!mb-0 !text-2xl">超分列表</Typography.Title>
+        <Typography.Title level={2} className="!mb-0 !text-2xl">修复记录</Typography.Title>
         <Button icon={<RefreshCw className="size-4" />} onClick={() => void load(true)}>刷新</Button>
       </section>
 
@@ -202,7 +198,7 @@ function PostprocessTasksContent() {
       </Card>
 
       <Modal
-        title="超分前后对比"
+        title="处理前后对比"
         open={Boolean(compareTask)}
         onCancel={() => setCompareTask(null)}
         footer={null}
@@ -213,13 +209,13 @@ function PostprocessTasksContent() {
           <div className="grid gap-4 md:grid-cols-2">
             <section className="overflow-hidden rounded-md border border-slate-200 bg-slate-50">
               <div className="flex items-center justify-between border-b border-slate-200 bg-white px-3 py-2">
-                <strong className="text-sm text-slate-800">超分前</strong>
+                <strong className="text-sm text-slate-800">处理前</strong>
                 <span className="font-mono text-xs text-slate-500">{formatBytes(compareTask.input_bytes)}</span>
               </div>
               <div className="flex h-[440px] items-center justify-center p-3">
                 <Image
                   src={comparisonImageURL(compareTask.input_image_path)}
-                  alt="超分前图片"
+                  alt="处理前图片"
                   className="!max-h-[416px] !w-auto !max-w-full object-contain"
                   preview={{ mask: "查看原图" }}
                 />
@@ -227,13 +223,13 @@ function PostprocessTasksContent() {
             </section>
             <section className="overflow-hidden rounded-md border border-slate-200 bg-slate-50">
               <div className="flex items-center justify-between border-b border-slate-200 bg-white px-3 py-2">
-                <strong className="text-sm text-slate-800">超分后</strong>
+                <strong className="text-sm text-slate-800">处理后</strong>
                 <span className="font-mono text-xs text-slate-500">{formatBytes(compareTask.output_bytes)}</span>
               </div>
               <div className="flex h-[440px] items-center justify-center p-3">
                 <Image
                   src={comparisonImageURL(compareTask.output_image_path)}
-                  alt="超分后图片"
+                  alt="处理后图片"
                   className="!max-h-[416px] !w-auto !max-w-full object-contain"
                   preview={{ mask: "查看原图" }}
                 />

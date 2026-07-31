@@ -138,15 +138,14 @@ func TestLoadMigratesSavedPostprocessPathsFromApplicationRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 	worker := filepath.Join(root, "postprocess", "worker.mjs")
-	superModel := filepath.Join(postprocessDir, "super.onnx")
 	restorationModel := filepath.Join(postprocessDir, "restore.onnx")
-	for _, path := range []string{worker, superModel, restorationModel} {
+	for _, path := range []string{worker, restorationModel} {
 		if err := os.WriteFile(path, []byte("fixture"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
 	configPath := filepath.Join(configDir, "config.json")
-	data := `{"image_postprocess_worker":"postprocess/worker.mjs","image_super_resolution_model":"postprocess/models/super.onnx","image_restoration_model":"postprocess/models/restore.onnx"}`
+	data := `{"image_postprocess_worker":"postprocess/worker.mjs","image_restoration_model":"postprocess/models/restore.onnx"}`
 	if err := os.WriteFile(configPath, []byte(data), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -154,7 +153,7 @@ func TestLoadMigratesSavedPostprocessPathsFromApplicationRoot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.ImagePostprocessWorker != worker || cfg.ImageSuperResolutionModel != superModel || cfg.ImageRestorationModel != restorationModel {
-		t.Fatalf("postprocess paths=%q %q %q", cfg.ImagePostprocessWorker, cfg.ImageSuperResolutionModel, cfg.ImageRestorationModel)
+	if cfg.ImagePostprocessWorker != worker || cfg.ImageRestorationModel != restorationModel {
+		t.Fatalf("postprocess paths=%q %q", cfg.ImagePostprocessWorker, cfg.ImageRestorationModel)
 	}
 }

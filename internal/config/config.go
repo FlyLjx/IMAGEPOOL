@@ -38,10 +38,8 @@ type Config struct {
 	ImageAccountPrecheckTimeoutSecs     float64      `json:"image_account_precheck_timeout_secs"`
 	ImageCheckBeforeHitEnabled          bool         `json:"image_check_before_hit_enabled"`
 	ImageSettleEnabled                  bool         `json:"image_settle_enabled"`
-	ImageSuperResolutionEnabled         bool         `json:"image_super_resolution_enabled"`
 	ImageRestorationEnabled             bool         `json:"image_restoration_enabled"`
 	ImagePostprocessWorker              string       `json:"image_postprocess_worker"`
-	ImageSuperResolutionModel           string       `json:"image_super_resolution_model"`
 	ImageRestorationModel               string       `json:"image_restoration_model"`
 	ImagePostprocessTimeoutSecs         float64      `json:"image_postprocess_timeout_secs"`
 	MaxImageAttempts                    int          `json:"max_image_attempts"`
@@ -110,10 +108,8 @@ func Default() Config {
 		ImageAccountPrecheckTimeoutSecs:     75,
 		ImageCheckBeforeHitEnabled:          true,
 		ImageSettleEnabled:                  true,
-		ImageSuperResolutionEnabled:         false,
 		ImageRestorationEnabled:             false,
 		ImagePostprocessWorker:              "../postprocess/worker.mjs",
-		ImageSuperResolutionModel:           "../postprocess/models/realesr-general-x4v3.onnx",
 		ImageRestorationModel:               "../postprocess/models/scunet-color-real-gan.onnx",
 		ImagePostprocessTimeoutSecs:         180,
 		MaxImageAttempts:                    3,
@@ -167,9 +163,6 @@ func Load(path string) (Config, error) {
 	}
 	if !filepath.IsAbs(cfg.ImagePostprocessWorker) {
 		cfg.ImagePostprocessWorker = resolveBundledPath(base, cfg.ImagePostprocessWorker)
-	}
-	if !filepath.IsAbs(cfg.ImageSuperResolutionModel) {
-		cfg.ImageSuperResolutionModel = resolveBundledPath(base, cfg.ImageSuperResolutionModel)
 	}
 	if !filepath.IsAbs(cfg.ImageRestorationModel) {
 		cfg.ImageRestorationModel = resolveBundledPath(base, cfg.ImageRestorationModel)
@@ -343,9 +336,6 @@ func (c Config) Normalize() Config {
 	}
 	if strings.TrimSpace(c.ImagePostprocessWorker) == "" {
 		c.ImagePostprocessWorker = d.ImagePostprocessWorker
-	}
-	if strings.TrimSpace(c.ImageSuperResolutionModel) == "" {
-		c.ImageSuperResolutionModel = d.ImageSuperResolutionModel
 	}
 	if strings.TrimSpace(c.ImageRestorationModel) == "" {
 		c.ImageRestorationModel = d.ImageRestorationModel

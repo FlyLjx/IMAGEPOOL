@@ -14,7 +14,7 @@ import {
   Switch,
   Typography,
 } from "antd";
-import { ImageUpscale, LoaderCircle, PlugZap, Save, ShieldCheck, WandSparkles } from "lucide-react";
+import { LoaderCircle, PlugZap, Save, ShieldCheck, WandSparkles } from "lucide-react";
 import { toast } from "sonner";
 
 import { testProxy, type ProxyTestResult } from "@/lib/api";
@@ -283,22 +283,7 @@ export function ConfigCard() {
 
         <Divider />
 				<SectionTitle title="图片后处理" description="独立队列运行，开关仅影响新提交的图片任务。" />
-				<div className="grid gap-3 md:grid-cols-2">
-					<div className="flex min-h-20 items-center justify-between gap-4 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
-						<Space>
-							<ImageUpscale className="size-4 text-emerald-600" />
-							<div>
-								<Typography.Text strong>自动超分</Typography.Text>
-								<div className="text-xs text-slate-400">Real-ESRGAN</div>
-							</div>
-						</Space>
-						<Switch
-							checked={Boolean(config.image_super_resolution_enabled)}
-							loading={postprocessSaving.image_super_resolution_enabled}
-							disabled={isSavingConfig}
-							onChange={(checked) => void setPostprocessEnabled("image_super_resolution_enabled", checked)}
-						/>
-					</div>
+				<div className="grid gap-3 md:grid-cols-1">
 					<div className="flex min-h-20 items-center justify-between gap-4 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
 						<Space>
 							<WandSparkles className="size-4 text-sky-600" />

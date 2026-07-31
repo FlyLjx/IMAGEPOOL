@@ -158,8 +158,6 @@ type ModelListResponse = {
   object: string;
   data: Model[];
   features?: {
-    image_super_resolution?: boolean;
-    image_super_resolution_available?: boolean;
     image_restoration?: boolean;
   };
 };
@@ -237,7 +235,6 @@ export type SettingsConfig = {
   image_parallel_generation?: boolean;
   image_settle_enabled?: boolean;
   image_check_before_hit_enabled?: boolean;
-	image_super_resolution_enabled?: boolean;
 	image_restoration_enabled?: boolean;
 	image_postprocess_timeout_secs?: number | string;
   image_settle_secs?: number | string;
@@ -514,10 +511,7 @@ export type PostprocessTask = {
   model?: string;
   requested_size?: string;
   hd_repair?: boolean;
-  super_resolution?: boolean;
-  force_super_resolution?: boolean;
   restored?: boolean;
-  super_resolved?: boolean;
   skipped?: boolean;
   input_bytes?: number;
   output_bytes?: number;
@@ -676,7 +670,6 @@ export type SchedulerDiagnostics = {
   gpt: SchedulerPoolStats;
   postprocess: {
     enabled: boolean;
-    super_resolution_enabled: boolean;
     restoration_enabled: boolean;
     queue_depth: number;
     queue_capacity: number;
@@ -686,7 +679,6 @@ export type SchedulerDiagnostics = {
     processed: number;
     failed: number;
     restored: number;
-    super_resolved: number;
     skipped: number;
     last_error?: string;
   };

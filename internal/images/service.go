@@ -358,7 +358,7 @@ func (s *Service) taskContext(parent context.Context, req Request) (context.Cont
 	}
 	cfg := s.currentConfig()
 	timeout := time.Duration(cfg.ImageTaskTimeoutSecs * float64(time.Second))
-	if cfg.ImageSuperResolutionEnabled || req.SuperResolution || (cfg.ImageRestorationEnabled && req.HDRepair) {
+	if cfg.ImageRestorationEnabled && req.HDRepair {
 		timeout += time.Duration(cfg.ImagePostprocessTimeoutSecs * float64(time.Second))
 	}
 	if timeout <= 0 {
@@ -741,12 +741,11 @@ func (s *Service) postprocessImage(ctx context.Context, data []byte, req Request
 		return data
 	}
 	result := s.post.Process(ctx, data, postprocess.Options{
-		ParentTaskID:    req.TaskID,
-		OwnerID:         req.OwnerID,
-		Model:           req.PublicModel,
-		RequestedSize:   req.Size,
-		HDRepair:        req.HDRepair,
-		SuperResolution: req.SuperResolution,
+		ParentTaskID:  req.TaskID,
+		OwnerID:       req.OwnerID,
+		Model:         req.PublicModel,
+		RequestedSize: req.Size,
+		HDRepair:      req.HDRepair,
 		Progress: func(stage, message string, details map[string]any) {
 			if req.Progress != nil {
 				req.Progress(openaiweb.ProgressEvent{Progress: stage, Message: message, Details: details})
@@ -831,11 +830,11 @@ func (s *Service) ListModels(ctx context.Context) ([]string, error) {
 	base := []string{PublicImageModel}
 	account, err := s.store.SelectForImage(nil)
 	if err != nil {
-		return ExpandSuperResolutionModels(base), nil
+		return ExpandPublicModels(base), nil
 	}
 	account, err = s.ensureBrowserIdentity(account)
 	if err != nil {
-		return ExpandSuperResolutionModels(base), nil
+		return ExpandPublicModels(base), nil
 	}
 	var upstream []string
 	if backend, ok := s.backend.(accountModelsForBackend); ok {
@@ -844,7 +843,7 @@ func (s *Service) ListModels(ctx context.Context) ([]string, error) {
 		upstream, err = s.backend.ListModels(ctx, account.AccessToken)
 	}
 	if err != nil {
-		return ExpandSuperResolutionModels(base), nil
+		return ExpandPublicModels(base), nil
 	}
 	seen := map[string]bool{}
 	out := []string{}
@@ -856,7 +855,7 @@ func (s *Service) ListModels(ctx context.Context) ([]string, error) {
 			}
 		}
 	}
-	return ExpandSuperResolutionModels(out), nil
+	return ExpandPublicModels(out), nil
 }
 
 func responseWithModel(response Response, model string) Response {

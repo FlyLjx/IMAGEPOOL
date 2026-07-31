@@ -146,51 +146,32 @@ func TestHealthAndAuth(t *testing.T) {
 	}
 }
 
-func TestModelsOnlyExpose2KWhenSuperResolutionIsEnabled(t *testing.T) {
-	tests := []struct {
-		name        string
-		enabled     bool
-		want2KModel bool
-	}{
-		{name: "disabled by default", enabled: false, want2KModel: false},
-		{name: "enabled", enabled: true, want2KModel: true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			cfg := config.Default()
-			cfg.APIKeys = []string{"k"}
-			cfg.ImageSuperResolutionEnabled = tt.enabled
-			srv := httptest.NewServer(newTestServer(cfg))
-			defer srv.Close()
+func TestModelsExposeBaseImageModel(t *testing.T) {
+	cfg := config.Default()
+	cfg.APIKeys = []string{"k"}
+	srv := httptest.NewServer(newTestServer(cfg))
+	defer srv.Close()
 
-			request, _ := http.NewRequest(http.MethodGet, srv.URL+"/v1/models", nil)
-			request.Header.Set("Authorization", "Bearer k")
-			response, err := http.DefaultClient.Do(request)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer response.Body.Close()
-			var payload struct {
-				Data []struct {
-					ID string `json:"id"`
-				} `json:"data"`
-				Features struct {
-					SuperResolution bool `json:"image_super_resolution"`
-				} `json:"features"`
-			}
-			if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
-				t.Fatal(err)
-			}
-			has2KModel := false
-			for _, model := range payload.Data {
-				if model.ID == "gpt-image-2-2k" {
-					has2KModel = true
-				}
-			}
-			if response.StatusCode != http.StatusOK || payload.Features.SuperResolution != tt.enabled || has2KModel != tt.want2KModel {
-				t.Fatalf("status=%d enabled=%t models=%#v", response.StatusCode, payload.Features.SuperResolution, payload.Data)
-			}
-		})
+	request, _ := http.NewRequest(http.MethodGet, srv.URL+"/v1/models", nil)
+	request.Header.Set("Authorization", "Bearer k")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	var payload struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+		Features struct {
+			Restoration bool `json:"image_restoration"`
+		} `json:"features"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusOK || len(payload.Data) != 1 || payload.Data[0].ID != "gpt-image-2" {
+		t.Fatalf("status=%d models=%#v", response.StatusCode, payload.Data)
 	}
 }
 
@@ -790,7 +771,7 @@ func TestCallLogsUseLogTypeAndDetailShape(t *testing.T) {
 func TestAccountImageTestCreatesTrackedTask(t *testing.T) {
 	srv := httptest.NewServer(testServer(t))
 	defer srv.Close()
-	request, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/accounts/test-image", strings.NewReader(`{"access_token":"tok","model":"gpt-image-2-2k","prompt":"custom test prompt"}`))
+	request, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/accounts/test-image", strings.NewReader(`{"access_token":"tok","model":"gpt-image-2","prompt":"custom test prompt"}`))
 	request.Header.Set("Authorization", "Bearer k")
 	response, err := http.DefaultClient.Do(request)
 	if err != nil {
@@ -823,7 +804,7 @@ func TestAccountImageTestCreatesTrackedTask(t *testing.T) {
 	if tasksResponse.StatusCode != http.StatusOK || len(taskPayload.Items) != 1 || taskPayload.Items[0].Status != tasks.StatusSucceeded {
 		t.Fatalf("task status=%d payload=%#v", tasksResponse.StatusCode, taskPayload)
 	}
-	if taskPayload.Items[0].Prompt != "custom test prompt" || taskPayload.Items[0].Model != "gpt-image-2-2k" || taskPayload.Items[0].Size != "2048x2048" || !taskPayload.Items[0].SuperResolution {
+	if taskPayload.Items[0].Prompt != "custom test prompt" || taskPayload.Items[0].Model != "gpt-image-2" {
 		t.Fatalf("test image model options were not preserved: %#v", taskPayload.Items[0])
 	}
 	if taskPayload.Items[0].ResponseFormat != "url" || len(taskPayload.Items[0].Data) != 1 || !strings.HasPrefix(taskPayload.Items[0].Data[0].URL, srv.URL+"/images/") {

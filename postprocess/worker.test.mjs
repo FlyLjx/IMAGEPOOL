@@ -77,9 +77,6 @@ test("SCUNet restores images larger than one tile without changing dimensions", 
     output_path: outputPath,
     requested_size: `${width}x${height}`,
     restore: true,
-    super_resolution: false,
-    force_super_resolution: false,
-    super_model: path.resolve("models/realesr-general-x4v3.onnx"),
     restoration_model: path.resolve("models/scunet-color-real-gan.onnx"),
   });
 

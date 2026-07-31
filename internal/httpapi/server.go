@@ -618,14 +618,7 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	}
 	items := make([]modelItem, 0, len(models)+32)
 	for _, model := range models {
-		var parent any
-		if base, ok := images.SuperResolutionBaseModel(model); ok {
-			if !cfg.ImageSuperResolutionEnabled {
-				continue
-			}
-			parent = base
-		}
-		items = append(items, modelItem{id: model, owner: "image-pool", parent: parent})
+		items = append(items, modelItem{id: model, owner: "image-pool"})
 	}
 	seen := map[string]bool{}
 	data := make([]map[string]any, 0, len(items))
@@ -640,19 +633,13 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 		"object": "list",
 		"data":   data,
 		"features": map[string]any{
-			"image_super_resolution":           cfg.ImageSuperResolutionEnabled,
-			"image_super_resolution_available": s.postprocess != nil,
-			"image_restoration":                cfg.ImageRestorationEnabled,
+			"image_restoration": cfg.ImageRestorationEnabled,
 		},
 	})
 }
 
 func requestMetricImageModel(model string) string {
-	model = strings.TrimSpace(model)
-	if base, ok := images.SuperResolutionBaseModel(model); ok {
-		return base
-	}
-	return model
+	return strings.TrimSpace(model)
 }
 
 func (s *Server) handleImageGeneration(w http.ResponseWriter, r *http.Request) {
@@ -2170,7 +2157,6 @@ func (s *Server) parseEditRequest(r *http.Request) (images.Request, string, erro
 		req := images.Request{Prompt: formValue(form, "prompt"), Model: formValue(form, "model"), Size: formValue(form, "size"), Quality: formValue(form, "quality"), ResponseFormat: formValue(form, "response_format"), OutputFormat: formValue(form, "output_format"), CallbackURL: formValue(form, "callback_url")}
 		req.Async, _ = strconv.ParseBool(formValue(form, "async"))
 		req.HDRepair, _ = strconv.ParseBool(formValue(form, "hd_repair"))
-		req.SuperResolution, _ = strconv.ParseBool(formValue(form, "super_resolution"))
 		if n, _ := strconv.Atoi(formValue(form, "n")); n > 0 {
 			req.N = n
 		}
@@ -2206,7 +2192,6 @@ func (s *Server) parseEditRequest(r *http.Request) (images.Request, string, erro
 		Async           bool   `json:"async"`
 		CallbackURL     string `json:"callback_url"`
 		HDRepair        bool   `json:"hd_repair"`
-		SuperResolution bool   `json:"super_resolution"`
 		Image           any    `json:"image"`
 		Images          any    `json:"images"`
 		ImageURL        any    `json:"image_url"`
@@ -2235,7 +2220,7 @@ func (s *Server) parseEditRequest(r *http.Request) (images.Request, string, erro
 	if err != nil {
 		return images.Request{}, "", err
 	}
-	return images.Request{Prompt: body.Prompt, Model: body.Model, N: body.N, Size: body.Size, Quality: body.Quality, ResponseFormat: body.ResponseFormat, OutputFormat: body.OutputFormat, Async: body.Async, CallbackURL: body.CallbackURL, HDRepair: body.HDRepair, SuperResolution: body.SuperResolution, References: refs}, body.ClientTaskID, nil
+	return images.Request{Prompt: body.Prompt, Model: body.Model, N: body.N, Size: body.Size, Quality: body.Quality, ResponseFormat: body.ResponseFormat, OutputFormat: body.OutputFormat, Async: body.Async, CallbackURL: body.CallbackURL, HDRepair: body.HDRepair, References: refs}, body.ClientTaskID, nil
 }
 
 func editMultipartImageFields(files map[string][]*multipart.FileHeader) []string {

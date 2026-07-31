@@ -76,7 +76,6 @@ type Task struct {
 	OutputFormat           string           `json:"output_format,omitempty"`
 	CallbackURL            string           `json:"callback_url,omitempty"`
 	HDRepair               bool             `json:"hd_repair,omitempty"`
-	SuperResolution        bool             `json:"super_resolution,omitempty"`
 	CreatedAt              time.Time        `json:"created_at"`
 	StartedAt              *time.Time       `json:"started_at,omitempty"`
 	FinishedAt             *time.Time       `json:"finished_at,omitempty"`
@@ -374,9 +373,7 @@ func (m *Manager) create(mode, ownerID, clientTaskID string, req images.Request,
 	m.seq++
 	id := fmt.Sprintf("img_%d_%d", time.Now().UnixNano(), m.seq)
 	now := time.Now()
-	publicSize := images.SuperResolutionTargetSize(req.Model, req.Size)
-	_, variantSuperResolution := images.SuperResolutionBaseModel(req.Model)
-	task := &Task{ID: id, OwnerID: strings.TrimSpace(ownerID), ClientTaskID: clientTaskID, Mode: mode, Status: StatusQueued, Progress: "queued", ProgressPercent: 0, RealtimeStatus: "任务已提交", Prompt: req.Prompt, Model: publicTaskModel(req.Model), Size: publicSize, Quality: req.Quality, ResponseFormat: req.ResponseFormat, OutputFormat: req.OutputFormat, CallbackURL: strings.TrimSpace(req.CallbackURL), HDRepair: req.HDRepair, SuperResolution: req.SuperResolution || variantSuperResolution, CreatedAt: now, UpdatedAt: now}
+	task := &Task{ID: id, OwnerID: strings.TrimSpace(ownerID), ClientTaskID: clientTaskID, Mode: mode, Status: StatusQueued, Progress: "queued", ProgressPercent: 0, RealtimeStatus: "任务已提交", Prompt: req.Prompt, Model: publicTaskModel(req.Model), Size: strings.TrimSpace(req.Size), Quality: req.Quality, ResponseFormat: req.ResponseFormat, OutputFormat: req.OutputFormat, CallbackURL: strings.TrimSpace(req.CallbackURL), HDRepair: req.HDRepair, CreatedAt: now, UpdatedAt: now}
 	appendLog(task, LogEntry{Time: now, Level: "info", Event: "submitted", Progress: "queued", Message: "任务已提交"})
 	m.tasks[id] = task
 	m.markDirtyLocked(id)
@@ -421,18 +418,6 @@ func (m *Manager) runWith(ctx context.Context, id string, req images.Request, ge
 	result, err := generate(ctx, req)
 	internalResult := result
 	result = publicImageResponse(result)
-	if _, ok := images.SuperResolutionBaseModel(req.Model); ok {
-		result.BackendModel = req.Model
-		if result.ImageRoute != nil {
-			route := make(map[string]any, len(result.ImageRoute))
-			for key, value := range result.ImageRoute {
-				route[key] = value
-			}
-			route["backend_model"] = req.Model
-			result.ImageRoute = route
-		}
-	}
-
 	defer m.notifyCompletion(id)
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1163,8 +1148,6 @@ func progressPercent(progress string) int {
 		return 91
 	case "restoring_image":
 		return 94
-	case "super_resolving":
-		return 97
 	case "postprocess_complete":
 		return 99
 	case "succeeded", "success":

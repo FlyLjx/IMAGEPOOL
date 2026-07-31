@@ -61,7 +61,6 @@ function normalizeConfig(config: SettingsConfig): SettingsConfig {
     image_account_precheck_timeout_secs: Number(config.image_account_precheck_timeout_secs || 75),
     image_settle_enabled: Boolean(config.image_settle_enabled !== false),
     image_check_before_hit_enabled: Boolean(config.image_check_before_hit_enabled !== false),
-		image_super_resolution_enabled: Boolean(config.image_super_resolution_enabled),
 		image_restoration_enabled: Boolean(config.image_restoration_enabled),
 		image_postprocess_timeout_secs: Math.min(1800, Math.max(30, Number(config.image_postprocess_timeout_secs) || 180)),
     image_settle_secs: Number(config.image_settle_secs || 2.0),
@@ -114,7 +113,7 @@ function normalizeConfig(config: SettingsConfig): SettingsConfig {
   };
 }
 
-type PostprocessToggle = "image_super_resolution_enabled" | "image_restoration_enabled";
+type PostprocessToggle = "image_restoration_enabled";
 
 type SettingsStore = {
   config: SettingsConfig | null;
@@ -174,7 +173,6 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
   isLoadingConfig: true,
   isSavingConfig: false,
   postprocessSaving: {
-    image_super_resolution_enabled: false,
     image_restoration_enabled: false,
   },
   registerConfig: null,
@@ -224,8 +222,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         image_account_precheck_timeout_secs: Math.min(180, Math.max(10, Number(config.image_account_precheck_timeout_secs) || 75)),
         image_settle_enabled: Boolean(config.image_settle_enabled !== false),
         image_check_before_hit_enabled: Boolean(config.image_check_before_hit_enabled !== false),
-				image_super_resolution_enabled: Boolean(config.image_super_resolution_enabled),
-				image_restoration_enabled: Boolean(config.image_restoration_enabled),
+						image_restoration_enabled: Boolean(config.image_restoration_enabled),
 				image_postprocess_timeout_secs: Math.min(1800, Math.max(30, Number(config.image_postprocess_timeout_secs) || 180)),
         image_settle_secs: Math.max(0.5, Number(config.image_settle_secs) || 2.0),
         image_timeout_retry_secs: Math.max(1, Number(config.image_timeout_retry_secs) || 30),
@@ -292,7 +289,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
       return;
     }
     const previous = Boolean(current[field]);
-    const label = field === "image_super_resolution_enabled" ? "自动超分" : "高清修复";
+    const label = "高清修复";
     set((state) => ({
       config: state.config ? { ...state.config, [field]: enabled } : null,
       postprocessSaving: { ...state.postprocessSaving, [field]: true },

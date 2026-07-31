@@ -531,18 +531,18 @@ func TestGenerateInteractiveChallengePreservesAccounts(t *testing.T) {
 
 func TestListModelsFallback(t *testing.T) {
 	models, err := NewService(config.Default(), accounts.NewStore(nil, ""), &fakeBackend{}).ListModels(context.Background())
-	want := []string{"gpt-image-2", "gpt-image-2-2k"}
+	want := []string{"gpt-image-2"}
 	if err != nil || !reflect.DeepEqual(models, want) {
 		t.Fatalf("models=%#v want=%#v err=%v", models, want, err)
 	}
 }
 
-func TestGenerateUsesBaseUpstreamModelFor2KVariant(t *testing.T) {
+func TestGenerateUsesBaseUpstreamModel(t *testing.T) {
 	store := accounts.NewStore([]accounts.Account{{AccessToken: "token", CreatedAt: 1}}, "")
 	backend := &fakeBackend{}
 	response, err := NewService(config.Default(), store, backend).Generate(context.Background(), Request{
 		Prompt: "draw",
-		Model:  "gpt-image-2-2k",
+		Model:  "gpt-image-2",
 		Size:   "1024x1536",
 	})
 	if err != nil {
@@ -551,10 +551,10 @@ func TestGenerateUsesBaseUpstreamModelFor2KVariant(t *testing.T) {
 	backend.mu.Lock()
 	request := backend.lastRequest
 	backend.mu.Unlock()
-	if request.Model != "gpt-image-2" || request.Size != "1368x2048" || !request.SuperResolution {
+	if request.Model != "gpt-image-2" || request.Size != "1024x1536" {
 		t.Fatalf("upstream request=%#v", request)
 	}
-	if response.BackendModel != "gpt-image-2-2k" {
+	if response.BackendModel != "gpt-image-2" {
 		t.Fatalf("response model=%q", response.BackendModel)
 	}
 }

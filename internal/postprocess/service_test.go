@@ -53,22 +53,22 @@ func TestDisabledPostprocessReturnsOriginal(t *testing.T) {
 
 func TestEnabledPostprocessUsesDedicatedWorker(t *testing.T) {
 	cfg := config.Default()
-	cfg.ImageSuperResolutionEnabled = true
-	runner := &fakeRunner{result: Result{Data: []byte("processed"), SuperResolved: true}}
+	cfg.ImageRestorationEnabled = true
+	runner := &fakeRunner{result: Result{Data: []byte("processed"), Restored: true}}
 	service := newService(cfg, runner)
 	defer service.Close()
 	result := service.Process(context.Background(), []byte("original"), Options{
-		ParentTaskID:    "img_parent",
-		OwnerID:         "admin",
-		Model:           "gpt-image-2-2k",
-		RequestedSize:   "2048x2048",
-		SuperResolution: true,
+		ParentTaskID:  "img_parent",
+		OwnerID:       "admin",
+		Model:         "gpt-image-2",
+		RequestedSize: "1024x1024",
+		HDRepair:      true,
 	})
-	if string(result.Data) != "processed" || !result.SuperResolved || runner.calls != 1 {
+	if string(result.Data) != "processed" || !result.Restored || runner.calls != 1 {
 		t.Fatalf("result=%#v calls=%d", result, runner.calls)
 	}
 	stats := service.Stats()
-	if stats.Processed != 1 || stats.SuperResolved != 1 || stats.WorkerLimit != 1 {
+	if stats.Processed != 1 || stats.Restored != 1 || stats.WorkerLimit != 1 {
 		t.Fatalf("stats=%#v", stats)
 	}
 	history, err := service.History(1, 50, "admin", false)
@@ -79,20 +79,20 @@ func TestEnabledPostprocessUsesDedicatedWorker(t *testing.T) {
 		t.Fatalf("history=%#v", history)
 	}
 	task := history.Items[0]
-	if task.ParentTaskID != "img_parent" || task.Model != "gpt-image-2-2k" || task.Status != "success" || !task.SuperResolved || !task.ForceSuperResolution || task.OutputBytes != len("processed") {
+	if task.ParentTaskID != "img_parent" || task.Model != "gpt-image-2" || task.Status != "success" || !task.Restored || task.OutputBytes != len("processed") {
 		t.Fatalf("postprocess task=%#v", task)
 	}
 }
 
-func TestRequestCanForceSuperResolutionWhenGlobalSwitchIsDisabled(t *testing.T) {
-	runner := &fakeRunner{result: Result{Data: []byte("processed"), SuperResolved: true}}
+func TestRequestDoesNotRunWhenRestorationIsDisabled(t *testing.T) {
+	runner := &fakeRunner{result: Result{Data: []byte("processed"), Restored: true}}
 	service := newService(config.Default(), runner)
 	defer service.Close()
 	result := service.Process(context.Background(), []byte("original"), Options{
-		RequestedSize:   "2048x2048",
-		SuperResolution: true,
+		RequestedSize: "1024x1024",
+		HDRepair:      true,
 	})
-	if string(result.Data) != "processed" || !result.SuperResolved || runner.calls != 1 {
+	if string(result.Data) != "original" || !result.Skipped || runner.calls != 0 {
 		t.Fatalf("result=%#v calls=%d", result, runner.calls)
 	}
 }
@@ -100,15 +100,15 @@ func TestRequestCanForceSuperResolutionWhenGlobalSwitchIsDisabled(t *testing.T) 
 func TestSuccessfulTaskPersistsComparisonImages(t *testing.T) {
 	cfg := config.Default()
 	cfg.ImageOutputDir = t.TempDir()
-	cfg.ImageSuperResolutionEnabled = true
+	cfg.ImageRestorationEnabled = true
 	before := comparisonTestPNG(t, color.RGBA{R: 0xff, A: 0xff})
 	after := comparisonTestPNG(t, color.RGBA{G: 0xff, A: 0xff})
-	runner := &fakeRunner{result: Result{Data: after, SuperResolved: true}}
+	runner := &fakeRunner{result: Result{Data: after, Restored: true}}
 	service := newService(cfg, runner)
 	defer service.Close()
 
-	result := service.Process(context.Background(), before, Options{ParentTaskID: "img_parent"})
-	if !result.SuperResolved {
+	result := service.Process(context.Background(), before, Options{ParentTaskID: "img_parent", HDRepair: true})
+	if !result.Restored {
 		t.Fatalf("result=%#v", result)
 	}
 	history, err := service.History(1, 10, "", true)

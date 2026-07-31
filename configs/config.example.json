@@ -4,7 +4,9 @@
   "timezone": "Asia/Shanghai",
   "storage_backend": "postgres",
   "database_url": "postgresql://imagepool:imagepool@postgres:5432/imagepool?sslmode=disable",
-  "api_keys": ["dev-key"],
+  "api_keys": [
+    "dev-key"
+  ],
   "auth_key_file": "../data/auth_keys.json",
   "account_file": "../data/accounts.json",
   "call_log_file": "../data/calls.json",
@@ -27,10 +29,8 @@
   "image_account_precheck_timeout_secs": 75,
   "image_check_before_hit_enabled": true,
   "image_settle_enabled": true,
-  "image_super_resolution_enabled": false,
   "image_restoration_enabled": false,
   "image_postprocess_worker": "../postprocess/worker.mjs",
-  "image_super_resolution_model": "../postprocess/models/realesr-general-x4v3.onnx",
   "image_restoration_model": "../postprocess/models/scunet-color-real-gan.onnx",
   "image_postprocess_timeout_secs": 180,
   "max_image_attempts": 3,
@@ -43,7 +43,9 @@
     "proxy_url": "",
     "resource_proxy_url": "",
     "skip_ssl_verify": false,
-    "reset_session_status_codes": [403],
+    "reset_session_status_codes": [
+      403
+    ],
     "clearance": {
       "enabled": false,
       "mode": "none",
@@ -57,5 +59,7 @@
       "warm_up_on_start": false
     }
   },
-  "models": ["gpt-image-2"]
+  "models": [
+    "gpt-image-2"
+  ]
 }

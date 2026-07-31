@@ -31,38 +31,34 @@ const (
 type ProgressFunc func(stage, message string, details map[string]any)
 
 type Options struct {
-	ParentTaskID    string
-	OwnerID         string
-	Model           string
-	RequestedSize   string
-	HDRepair        bool
-	SuperResolution bool
-	Progress        ProgressFunc
+	ParentTaskID  string
+	OwnerID       string
+	Model         string
+	RequestedSize string
+	HDRepair      bool
+	Progress      ProgressFunc
 }
 
 type Task struct {
-	ID                   string     `json:"id"`
-	ParentTaskID         string     `json:"parent_task_id,omitempty"`
-	OwnerID              string     `json:"owner_id,omitempty"`
-	Status               string     `json:"status"`
-	Model                string     `json:"model,omitempty"`
-	RequestedSize        string     `json:"requested_size,omitempty"`
-	HDRepair             bool       `json:"hd_repair,omitempty"`
-	SuperResolution      bool       `json:"super_resolution,omitempty"`
-	ForceSuperResolution bool       `json:"force_super_resolution,omitempty"`
-	Restored             bool       `json:"restored,omitempty"`
-	SuperResolved        bool       `json:"super_resolved,omitempty"`
-	Skipped              bool       `json:"skipped,omitempty"`
-	InputBytes           int        `json:"input_bytes,omitempty"`
-	OutputBytes          int        `json:"output_bytes,omitempty"`
-	InputImagePath       string     `json:"input_image_path,omitempty"`
-	OutputImagePath      string     `json:"output_image_path,omitempty"`
-	CreatedAt            time.Time  `json:"created_at"`
-	StartedAt            *time.Time `json:"started_at,omitempty"`
-	FinishedAt           *time.Time `json:"finished_at,omitempty"`
-	UpdatedAt            time.Time  `json:"updated_at"`
-	DurationMS           int64      `json:"duration_ms,omitempty"`
-	Error                string     `json:"error,omitempty"`
+	ID              string     `json:"id"`
+	ParentTaskID    string     `json:"parent_task_id,omitempty"`
+	OwnerID         string     `json:"owner_id,omitempty"`
+	Status          string     `json:"status"`
+	Model           string     `json:"model,omitempty"`
+	RequestedSize   string     `json:"requested_size,omitempty"`
+	HDRepair        bool       `json:"hd_repair,omitempty"`
+	Restored        bool       `json:"restored,omitempty"`
+	Skipped         bool       `json:"skipped,omitempty"`
+	InputBytes      int        `json:"input_bytes,omitempty"`
+	OutputBytes     int        `json:"output_bytes,omitempty"`
+	InputImagePath  string     `json:"input_image_path,omitempty"`
+	OutputImagePath string     `json:"output_image_path,omitempty"`
+	CreatedAt       time.Time  `json:"created_at"`
+	StartedAt       *time.Time `json:"started_at,omitempty"`
+	FinishedAt      *time.Time `json:"finished_at,omitempty"`
+	UpdatedAt       time.Time  `json:"updated_at"`
+	DurationMS      int64      `json:"duration_ms,omitempty"`
+	Error           string     `json:"error,omitempty"`
 }
 
 type HistoryPage struct {
@@ -74,56 +70,47 @@ type HistoryPage struct {
 }
 
 type Result struct {
-	Data          []byte
-	Restored      bool
-	SuperResolved bool
-	Skipped       bool
-	Error         string
+	Data     []byte
+	Restored bool
+	Skipped  bool
+	Error    string
 }
 
 type Stats struct {
-	Enabled                bool   `json:"enabled"`
-	SuperResolutionEnabled bool   `json:"super_resolution_enabled"`
-	RestorationEnabled     bool   `json:"restoration_enabled"`
-	QueueDepth             int    `json:"queue_depth"`
-	QueueCapacity          int    `json:"queue_capacity"`
-	ActiveWorkers          int    `json:"active_workers"`
-	WorkerLimit            int    `json:"worker_limit"`
-	WorkerRunning          bool   `json:"worker_running"`
-	Processed              uint64 `json:"processed"`
-	Failed                 uint64 `json:"failed"`
-	Restored               uint64 `json:"restored"`
-	SuperResolved          uint64 `json:"super_resolved"`
-	Skipped                uint64 `json:"skipped"`
-	LastError              string `json:"last_error,omitempty"`
+	Enabled            bool   `json:"enabled"`
+	RestorationEnabled bool   `json:"restoration_enabled"`
+	QueueDepth         int    `json:"queue_depth"`
+	QueueCapacity      int    `json:"queue_capacity"`
+	ActiveWorkers      int    `json:"active_workers"`
+	WorkerLimit        int    `json:"worker_limit"`
+	WorkerRunning      bool   `json:"worker_running"`
+	Processed          uint64 `json:"processed"`
+	Failed             uint64 `json:"failed"`
+	Restored           uint64 `json:"restored"`
+	Skipped            uint64 `json:"skipped"`
+	LastError          string `json:"last_error,omitempty"`
 }
 
 type workerConfig struct {
 	Script             string
-	SuperModel         string
 	RestorationModel   string
 	Timeout            time.Duration
-	SuperResolution    bool
 	RestorationEnabled bool
 }
 
 type workerRequest struct {
-	InputPath            string `json:"input_path"`
-	OutputPath           string `json:"output_path"`
-	RequestedSize        string `json:"requested_size"`
-	Restore              bool   `json:"restore"`
-	SuperResolution      bool   `json:"super_resolution"`
-	ForceSuperResolution bool   `json:"force_super_resolution"`
-	SuperModel           string `json:"super_model"`
-	RestorationModel     string `json:"restoration_model"`
+	InputPath        string `json:"input_path"`
+	OutputPath       string `json:"output_path"`
+	RequestedSize    string `json:"requested_size"`
+	Restore          bool   `json:"restore"`
+	RestorationModel string `json:"restoration_model"`
 }
 
 type workerResponse struct {
-	OK            bool   `json:"ok"`
-	Error         string `json:"error"`
-	Restored      bool   `json:"restored"`
-	SuperResolved bool   `json:"super_resolved"`
-	Skipped       bool   `json:"skipped"`
+	OK       bool   `json:"ok"`
+	Error    string `json:"error"`
+	Restored bool   `json:"restored"`
+	Skipped  bool   `json:"skipped"`
 }
 
 type processorRunner interface {
@@ -203,7 +190,7 @@ func (s *Service) Process(ctx context.Context, data []byte, options Options) Res
 		return Result{Data: data, Skipped: true}
 	}
 	cfg := s.currentWorkerConfig()
-	if !cfg.SuperResolution && !options.SuperResolution && !(cfg.RestorationEnabled && options.HDRepair) {
+	if !(cfg.RestorationEnabled && options.HDRepair) {
 		return Result{Data: data, Skipped: true}
 	}
 	if ctx == nil {
@@ -278,9 +265,8 @@ func (s *Service) run(request job) {
 	}
 	if request.options.Progress != nil {
 		request.options.Progress("postprocess_complete", "图片高清处理完成", map[string]any{
-			"restored":       result.Restored,
-			"super_resolved": result.SuperResolved,
-			"fallback":       result.Error != "",
+			"restored": result.Restored,
+			"fallback": result.Error != "",
 		})
 	}
 	s.statsMu.Lock()
@@ -291,9 +277,6 @@ func (s *Service) run(request job) {
 	}
 	if result.Restored {
 		s.stats.Restored++
-	}
-	if result.SuperResolved {
-		s.stats.SuperResolved++
 	}
 	if result.Skipped {
 		s.stats.Skipped++
@@ -312,19 +295,17 @@ func (s *Service) createTask(options Options, data []byte, cfg workerConfig) Tas
 	inputImagePath := s.saveComparisonImage(id, "before", data)
 	s.taskMu.Lock()
 	task := &Task{
-		ID:                   id,
-		ParentTaskID:         strings.TrimSpace(options.ParentTaskID),
-		OwnerID:              strings.TrimSpace(options.OwnerID),
-		Status:               "queued",
-		Model:                strings.TrimSpace(options.Model),
-		RequestedSize:        strings.TrimSpace(options.RequestedSize),
-		HDRepair:             cfg.RestorationEnabled && options.HDRepair,
-		SuperResolution:      cfg.SuperResolution || options.SuperResolution,
-		ForceSuperResolution: options.SuperResolution,
-		InputBytes:           len(data),
-		InputImagePath:       inputImagePath,
-		CreatedAt:            now,
-		UpdatedAt:            now,
+		ID:             id,
+		ParentTaskID:   strings.TrimSpace(options.ParentTaskID),
+		OwnerID:        strings.TrimSpace(options.OwnerID),
+		Status:         "queued",
+		Model:          strings.TrimSpace(options.Model),
+		RequestedSize:  strings.TrimSpace(options.RequestedSize),
+		HDRepair:       cfg.RestorationEnabled && options.HDRepair,
+		InputBytes:     len(data),
+		InputImagePath: inputImagePath,
+		CreatedAt:      now,
+		UpdatedAt:      now,
 	}
 	s.tasks[task.ID] = task
 	snapshot := *task
@@ -353,7 +334,7 @@ func (s *Service) finishTask(id string, result Result) {
 	now := time.Now()
 	outputImagePath := ""
 	inputImageToRemove := ""
-	if result.Error == "" && (result.SuperResolved || result.Restored) {
+	if result.Error == "" && result.Restored {
 		outputImagePath = s.saveComparisonImage(id, "after", result.Data)
 	}
 	s.taskMu.Lock()
@@ -363,7 +344,6 @@ func (s *Service) finishTask(id string, result Result) {
 		return
 	}
 	task.Restored = result.Restored
-	task.SuperResolved = result.SuperResolved
 	task.Skipped = result.Skipped
 	task.OutputBytes = len(result.Data)
 	task.OutputImagePath = outputImagePath
@@ -371,7 +351,7 @@ func (s *Service) finishTask(id string, result Result) {
 	switch {
 	case task.Error != "":
 		task.Status = "error"
-	case task.SuperResolved || task.Restored:
+	case task.Restored:
 		task.Status = "success"
 	default:
 		task.Status = "skipped"
@@ -578,10 +558,8 @@ func (s *Service) currentWorkerConfig() workerConfig {
 	s.cfgMu.RUnlock()
 	return workerConfig{
 		Script:             strings.TrimSpace(cfg.ImagePostprocessWorker),
-		SuperModel:         strings.TrimSpace(cfg.ImageSuperResolutionModel),
 		RestorationModel:   strings.TrimSpace(cfg.ImageRestorationModel),
 		Timeout:            time.Duration(cfg.ImagePostprocessTimeoutSecs * float64(time.Second)),
-		SuperResolution:    cfg.ImageSuperResolutionEnabled,
 		RestorationEnabled: cfg.ImageRestorationEnabled,
 	}
 }
@@ -594,8 +572,7 @@ func (s *Service) Stats() Stats {
 	s.statsMu.RLock()
 	stats := s.stats
 	s.statsMu.RUnlock()
-	stats.Enabled = cfg.SuperResolution || cfg.RestorationEnabled
-	stats.SuperResolutionEnabled = cfg.SuperResolution
+	stats.Enabled = cfg.RestorationEnabled
 	stats.RestorationEnabled = cfg.RestorationEnabled
 	stats.QueueDepth = len(s.jobs)
 	stats.QueueCapacity = cap(s.jobs)
@@ -638,15 +615,10 @@ func (r *nodeRunner) Process(ctx context.Context, cfg workerConfig, data []byte,
 	}
 	request := workerRequest{
 		InputPath: inputPath, OutputPath: outputPath, RequestedSize: options.RequestedSize,
-		Restore: cfg.RestorationEnabled && options.HDRepair, SuperResolution: cfg.SuperResolution || options.SuperResolution,
-		ForceSuperResolution: options.SuperResolution,
-		SuperModel:           cfg.SuperModel, RestorationModel: cfg.RestorationModel,
+		Restore: cfg.RestorationEnabled && options.HDRepair, RestorationModel: cfg.RestorationModel,
 	}
 	if request.Restore && options.Progress != nil {
 		options.Progress("restoring_image", "正在进行高清修复", nil)
-	}
-	if request.SuperResolution && options.Progress != nil {
-		options.Progress("super_resolving", "正在检查并补足图片分辨率", nil)
 	}
 	response, err := r.call(ctx, cfg.Script, request)
 	if err != nil || !response.OK {
@@ -659,7 +631,7 @@ func (r *nodeRunner) Process(ctx context.Context, cfg workerConfig, data []byte,
 	if err != nil {
 		return Result{Data: data, Error: err.Error()}
 	}
-	return Result{Data: processed, Restored: response.Restored, SuperResolved: response.SuperResolved, Skipped: response.Skipped}
+	return Result{Data: processed, Restored: response.Restored, Skipped: response.Skipped}
 }
 
 func (r *nodeRunner) call(ctx context.Context, script string, request workerRequest) (workerResponse, error) {
