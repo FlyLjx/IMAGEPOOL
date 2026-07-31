@@ -70,6 +70,7 @@ type imagePoolCapacityFactors struct {
 	PressureRatio                float64 `json:"pressure_ratio"`
 	DynamicReserveRatio          float64 `json:"dynamic_reserve_ratio"`
 	RegistrationAdjustmentFactor float64 `json:"registration_adjustment_factor"`
+	MaxInflightPerAccount        int     `json:"max_inflight_per_account"`
 }
 
 type imagePoolCapacityEstimate struct {
@@ -79,7 +80,9 @@ type imagePoolCapacityEstimate struct {
 	RequiredByBurstParallel           int     `json:"required_by_burst_parallel"`
 	RequiredByQuota                   int     `json:"required_by_quota"`
 	RecommendedRequiredUsableAccounts int     `json:"recommended_required_usable_accounts"`
+	RecommendedRequiredInflightSlots  int     `json:"recommended_required_inflight_slots"`
 	CurrentEffectiveAccounts          int     `json:"current_effective_accounts"`
+	CurrentEffectiveInflightSlots     int     `json:"current_effective_inflight_slots"`
 	RecommendedAddUsableAccounts      int     `json:"recommended_add_usable_accounts"`
 	RecommendedRegisterAccounts       int     `json:"recommended_register_accounts"`
 	ExpectedAttemptsForPendingTasks   float64 `json:"expected_attempts_for_pending_tasks"`
@@ -250,9 +253,23 @@ func estimateImagePoolCapacity(cfg config.Config, pressure imagePoolTaskPressure
 	if recent.AvailabilityTotal > 0 {
 		recentFailureRate = recent.FailureRate / 100
 	}
+	maxInflightPerAccount := cfg.ImageAccountMaxInflightPerAccount
+	if maxInflightPerAccount <= 0 {
+		maxInflightPerAccount = accountStats.MaxInflightPerAccount
+	}
+	if maxInflightPerAccount <= 0 {
+		maxInflightPerAccount = config.Default().ImageAccountMaxInflightPerAccount
+	}
+	if maxInflightPerAccount > 20 {
+		maxInflightPerAccount = 20
+	}
+	currentEffectiveSlots := accountStats.DispatchableSlots
+	if currentEffectiveSlots <= 0 {
+		currentEffectiveSlots = accountStats.Dispatchable * maxInflightPerAccount
+	}
 	pressureRatio := 0.0
-	if accountStats.Dispatchable > 0 {
-		pressureRatio = float64(pressure.Pending) / float64(accountStats.Dispatchable)
+	if currentEffectiveSlots > 0 {
+		pressureRatio = float64(pressure.Pending) / float64(currentEffectiveSlots)
 	} else if pressure.Pending > 0 {
 		pressureRatio = float64(pressure.Pending)
 	}
@@ -303,7 +320,11 @@ func estimateImagePoolCapacity(cfg config.Config, pressure imagePoolTaskPressure
 		}
 		dynamicRequired += reserveAccounts
 	}
-	recommendedRequired := maxInt(dynamicRequired, requiredByBurst)
+	recommendedRequiredSlots := maxInt(dynamicRequired, requiredByBurst)
+	recommendedRequired := 0
+	if recommendedRequiredSlots > 0 {
+		recommendedRequired = int(math.Ceil(float64(recommendedRequiredSlots) / float64(maxInflightPerAccount)))
+	}
 	currentEffective := accountStats.Dispatchable
 	addUsable := maxInt(0, recommendedRequired-currentEffective)
 	registrationFactor := registrationAdjustmentFactor(deadRate)
@@ -323,6 +344,7 @@ func estimateImagePoolCapacity(cfg config.Config, pressure imagePoolTaskPressure
 		PressureRatio:                roundFloat(pressureRatio, 2),
 		DynamicReserveRatio:          roundFloat(reserveRatio, 4),
 		RegistrationAdjustmentFactor: roundFloat(registrationFactor, 4),
+		MaxInflightPerAccount:        maxInflightPerAccount,
 	}
 	estimate := imagePoolCapacityEstimate{
 		RequiredByCurrentParallel:         requiredByParallel,
@@ -331,7 +353,9 @@ func estimateImagePoolCapacity(cfg config.Config, pressure imagePoolTaskPressure
 		RequiredByBurstParallel:           requiredByBurst,
 		RequiredByQuota:                   requiredByQuota,
 		RecommendedRequiredUsableAccounts: recommendedRequired,
+		RecommendedRequiredInflightSlots:  recommendedRequiredSlots,
 		CurrentEffectiveAccounts:          currentEffective,
+		CurrentEffectiveInflightSlots:     currentEffectiveSlots,
 		RecommendedAddUsableAccounts:      addUsable,
 		RecommendedRegisterAccounts:       registerAccounts,
 		ExpectedAttemptsForPendingTasks:   roundFloat(expectedAttempts, 2),

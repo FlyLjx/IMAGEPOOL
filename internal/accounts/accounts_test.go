@@ -317,6 +317,53 @@ func TestAcquireForImageWaitsForOccupiedAccount(t *testing.T) {
 	}
 }
 
+func TestAcquireForImageAllowsConfiguredPerAccountInflight(t *testing.T) {
+	store := NewStore([]Account{{Email: "one@example.com", AccessToken: "one", CreatedAt: 1}}, "")
+	store.SetImageMaxInflightPerAccount(2)
+
+	first, err := store.AcquireForImage(context.Background(), nil, nil)
+	if err != nil || first.AccessToken != "one" {
+		t.Fatalf("first=%#v err=%v", first, err)
+	}
+	second, err := store.AcquireForImage(context.Background(), nil, nil)
+	if err != nil || second.AccessToken != "one" {
+		t.Fatalf("second=%#v err=%v", second, err)
+	}
+	stats := store.ImageDispatchStats()
+	if stats.MaxInflightPerAccount != 2 || stats.DispatchableSlots != 2 || stats.LeasedSlots != 2 || stats.IdleSlots != 0 || stats.Saturated != 1 {
+		t.Fatalf("stats=%#v", stats)
+	}
+
+	waiting := make(chan struct{}, 1)
+	done := make(chan error, 1)
+	go func() {
+		_, err := store.AcquireForImage(context.Background(), nil, func() { waiting <- struct{}{} })
+		done <- err
+	}()
+	select {
+	case <-waiting:
+	case <-time.After(time.Second):
+		t.Fatal("third task did not wait for a free slot")
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("third task acquired before a slot was released: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	store.ReleaseImage(first.AccessToken)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("third task did not acquire after release")
+	}
+	store.ReleaseImage(second.AccessToken)
+	store.ReleaseImage("one")
+}
+
 func TestAcquireForImageWaitersAreFIFO(t *testing.T) {
 	store := NewStore([]Account{{Email: "one@example.com", AccessToken: "one", CreatedAt: 1}}, "")
 	first, err := store.AcquireForImage(context.Background(), nil, nil)
@@ -574,6 +621,21 @@ func TestAcquireForImageLeaseReleaseBeatsCooldownTimer(t *testing.T) {
 	case <-time.After(200 * time.Millisecond):
 		t.Fatal("lease release did not wake cooldown waiter")
 	}
+}
+
+func TestAcquireAccountForImageAllowsConfiguredPerAccountInflight(t *testing.T) {
+	store := NewStore([]Account{{Email: "one@example.com", AccessToken: "one", CreatedAt: 1}}, "")
+	store.SetImageMaxInflightPerAccount(2)
+	first, err := store.AcquireAccountForImage(context.Background(), "one", nil)
+	if err != nil || first.AccessToken != "one" {
+		t.Fatalf("first=%#v err=%v", first, err)
+	}
+	second, err := store.AcquireAccountForImage(context.Background(), "one", nil)
+	if err != nil || second.AccessToken != "one" {
+		t.Fatalf("second=%#v err=%v", second, err)
+	}
+	store.ReleaseImage(first.AccessToken)
+	store.ReleaseImage(second.AccessToken)
 }
 
 func TestAcquireAccountForImageWaitsForOccupiedAccount(t *testing.T) {

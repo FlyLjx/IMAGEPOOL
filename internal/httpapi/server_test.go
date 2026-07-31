@@ -1282,14 +1282,14 @@ func TestSettingsPersistAndNotify(t *testing.T) {
 	handler := newTestServer(cfg, func(next config.Config) { updated = next }).(*Server)
 	srv := httptest.NewServer(handler)
 	defer srv.Close()
-	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/settings", strings.NewReader(`{"image_web_model_slug":"gpt-5-6","refresh_account_interval_minute":2,"refresh_account_concurrency":3,"image_retention_days":7}`))
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/settings", strings.NewReader(`{"image_web_model_slug":"gpt-5-6","refresh_account_interval_minute":2,"refresh_account_concurrency":3,"image_retention_days":7,"image_account_max_inflight_per_account":3}`))
 	req.Header.Set("Authorization", "Bearer k")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
-	if resp.StatusCode != http.StatusOK || updated.ImageWebModelSlug != "gpt-5-6" || updated.RefreshAccountIntervalMinutes != 2 || updated.RefreshAccountConcurrency != 3 || updated.ImageRetentionDays != 7 {
+	if resp.StatusCode != http.StatusOK || updated.ImageWebModelSlug != "gpt-5-6" || updated.RefreshAccountIntervalMinutes != 2 || updated.RefreshAccountConcurrency != 3 || updated.ImageRetentionDays != 7 || updated.ImageAccountMaxInflightPerAccount != 3 {
 		t.Fatalf("status=%d updated=%#v", resp.StatusCode, updated)
 	}
 	select {
@@ -1301,7 +1301,7 @@ func TestSettingsPersistAndNotify(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reloaded.ImageWebModelSlug != "gpt-5-6" || reloaded.RefreshAccountIntervalMinutes != 2 || reloaded.RefreshAccountConcurrency != 3 || reloaded.ImageRetentionDays != 7 {
+	if reloaded.ImageWebModelSlug != "gpt-5-6" || reloaded.RefreshAccountIntervalMinutes != 2 || reloaded.RefreshAccountConcurrency != 3 || reloaded.ImageRetentionDays != 7 || reloaded.ImageAccountMaxInflightPerAccount != 3 {
 		t.Fatalf("persisted config=%#v", reloaded)
 	}
 }
@@ -1621,6 +1621,31 @@ func TestImagePoolCapacityEstimateMaintainsBurstParallelBaseline(t *testing.T) {
 	}
 	if estimate.Status != "shortage" {
 		t.Fatalf("status=%q, want shortage", estimate.Status)
+	}
+}
+
+func TestImagePoolCapacityEstimateUsesPerAccountInflightSlots(t *testing.T) {
+	cfg := config.Default()
+	cfg.ImageCapacityBurstParallel = 50
+	cfg.ImageAccountMaxInflightPerAccount = 2
+	accountStats := accounts.ImageDispatchStats{
+		Total:                 20,
+		Usable:                20,
+		Dispatchable:          20,
+		Idle:                  20,
+		MaxInflightPerAccount: 2,
+		DispatchableSlots:     40,
+	}
+
+	factors, estimate := estimateImagePoolCapacity(cfg, imagePoolTaskPressure{}, imagePoolRecentTaskStats{Limit: 60}, accountStats)
+	if factors.MaxInflightPerAccount != 2 {
+		t.Fatalf("factors=%#v", factors)
+	}
+	if estimate.RecommendedRequiredInflightSlots != 50 || estimate.RecommendedRequiredUsableAccounts != 25 {
+		t.Fatalf("estimate=%#v", estimate)
+	}
+	if estimate.RecommendedAddUsableAccounts != 5 {
+		t.Fatalf("add accounts=%d, want 5", estimate.RecommendedAddUsableAccounts)
 	}
 }
 

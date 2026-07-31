@@ -24,6 +24,7 @@
   "image_task_timeout_secs": 330,
   "image_settle_secs": 2,
   "image_capacity_burst_parallel": 50,
+  "image_account_max_inflight_per_account": 1,
   "image_account_precheck_interval_minutes": 10,
   "image_account_precheck_concurrency": 6,
   "image_account_precheck_timeout_secs": 75,

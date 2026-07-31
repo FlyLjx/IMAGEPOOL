@@ -482,6 +482,48 @@ func TestGenerateQueuesUntilAnOccupiedAccountIsReleased(t *testing.T) {
 	}
 }
 
+func TestGenerateWithAccountHonorsPerAccountInflightConfig(t *testing.T) {
+	cfg := config.Default()
+	cfg.ImageAccountMaxInflightPerAccount = 2
+	store := accounts.NewStore([]accounts.Account{{Email: "one", AccessToken: "one", CreatedAt: 1}}, "")
+	backend := &serialImageBackend{
+		fakeBackend: &fakeBackend{},
+		started:     make(chan struct{}, 2),
+		release:     make(chan struct{}),
+	}
+	service := NewService(cfg, store, backend)
+	done := make(chan error, 2)
+	for i := 0; i < 2; i++ {
+		go func() {
+			_, err := service.GenerateWithAccount(context.Background(), "one", Request{Prompt: "draw"})
+			done <- err
+		}()
+	}
+	for i := 0; i < 2; i++ {
+		select {
+		case <-backend.started:
+		case <-time.After(time.Second):
+			close(backend.release)
+			t.Fatal("configured per-account inflight did not reach backend")
+		}
+	}
+	if calls, maxActive := backend.stats(); calls != 2 || maxActive != 2 {
+		close(backend.release)
+		t.Fatalf("calls=%d maxActive=%d", calls, maxActive)
+	}
+	close(backend.release)
+	for i := 0; i < 2; i++ {
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("generation did not finish")
+		}
+	}
+}
+
 func TestGenerateLimitsNoQuotaAccountAndRetries(t *testing.T) {
 	store := accounts.NewStore([]accounts.Account{{Email: "a", AccessToken: "a", CreatedAt: 1}, {Email: "b", AccessToken: "b", CreatedAt: 2}}, "")
 	fb := &fakeBackend{errs: []error{errors.New("no available free image quota (tried 20 tokens)")}}

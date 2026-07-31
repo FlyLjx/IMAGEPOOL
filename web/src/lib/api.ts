@@ -643,6 +643,11 @@ export type SchedulerPoolStats = {
   dispatchable: number;
   idle: number;
   leased: number;
+  saturated?: number;
+  max_inflight_per_account?: number;
+  dispatchable_slots?: number;
+  idle_slots?: number;
+  leased_slots?: number;
   cooling: number;
   limited: number;
   invalid: number;
@@ -732,6 +737,11 @@ export type ImagePoolCapacity = {
     dispatchable: number;
     idle: number;
     leased: number;
+    saturated?: number;
+    max_inflight_per_account?: number;
+    dispatchable_slots?: number;
+    idle_slots?: number;
+    leased_slots?: number;
     cooling: number;
     limited: number;
     invalid: number;
@@ -765,6 +775,7 @@ export type ImagePoolCapacity = {
     pressure_ratio: number;
     dynamic_reserve_ratio: number;
     registration_adjustment_factor: number;
+    max_inflight_per_account?: number;
   };
   estimate: {
     required_by_current_parallel: number;
@@ -773,7 +784,9 @@ export type ImagePoolCapacity = {
     required_by_burst_parallel: number;
     required_by_quota: number;
     recommended_required_usable_accounts: number;
+    recommended_required_inflight_slots?: number;
     current_effective_accounts: number;
+    current_effective_inflight_slots?: number;
     recommended_add_usable_accounts: number;
     recommended_register_accounts: number;
     expected_attempts_for_pending_tasks: number;

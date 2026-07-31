@@ -98,6 +98,7 @@ export function ConfigCard() {
   const setImageRetentionDays = useSettingsStore((state) => state.setImageRetentionDays);
   const setImagePollTimeoutSecs = useSettingsStore((state) => state.setImagePollTimeoutSecs);
   const setImageCapacityBurstParallel = useSettingsStore((state) => state.setImageCapacityBurstParallel);
+  const setImageAccountMaxInflightPerAccount = useSettingsStore((state) => state.setImageAccountMaxInflightPerAccount);
   const setImageWebModelSlug = useSettingsStore((state) => state.setImageWebModelSlug);
   const setProxy = useSettingsStore((state) => state.setProxy);
   const setBaseUrl = useSettingsStore((state) => state.setBaseUrl);
@@ -224,7 +225,16 @@ export function ConfigCard() {
               value={String(config.image_capacity_burst_parallel || "")}
               onChange={setImageCapacityBurstParallel}
               placeholder="50"
-              help="号池容量评估最低按多少个同时进来的生图请求预留账号。"
+              help="号池容量评估最低按多少个同时进来的生图请求预留并发槽位。"
+            />
+          </Col>
+          <Col xs={24} md={12} xl={6}>
+            <NumberInput
+              label="单号生图并发"
+              value={String(config.image_account_max_inflight_per_account || "")}
+              onChange={setImageAccountMaxInflightPerAccount}
+              placeholder="1"
+              help="每个账号同时允许的上游生图任务数；1 最稳，最高 20。"
             />
           </Col>
           <Col xs={24} lg={12}>

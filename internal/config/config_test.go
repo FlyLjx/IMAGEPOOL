@@ -29,6 +29,9 @@ func TestDefaultNormalize(t *testing.T) {
 	if cfg.ImageTaskTimeoutSecs != 330 {
 		t.Fatalf("image task timeout=%.0f", cfg.ImageTaskTimeoutSecs)
 	}
+	if cfg.ImageAccountMaxInflightPerAccount != 1 {
+		t.Fatalf("image account max inflight=%d", cfg.ImageAccountMaxInflightPerAccount)
+	}
 	if cfg.RefreshAccountIntervalMinutes != 60 {
 		t.Fatalf("refresh interval=%d", cfg.RefreshAccountIntervalMinutes)
 	}
@@ -70,6 +73,18 @@ func TestNormalizePreservesImageRetentionDays(t *testing.T) {
 	}
 	if days := (Config{ImageRetentionDays: 5000}).Normalize().ImageRetentionDays; days != 3650 {
 		t.Fatalf("capped image retention days=%d", days)
+	}
+}
+
+func TestNormalizeCapsImageAccountMaxInflight(t *testing.T) {
+	if got := (Config{ImageAccountMaxInflightPerAccount: 3}).Normalize().ImageAccountMaxInflightPerAccount; got != 3 {
+		t.Fatalf("max inflight=%d", got)
+	}
+	if got := (Config{ImageAccountMaxInflightPerAccount: 0}).Normalize().ImageAccountMaxInflightPerAccount; got != 1 {
+		t.Fatalf("default max inflight=%d", got)
+	}
+	if got := (Config{ImageAccountMaxInflightPerAccount: 99}).Normalize().ImageAccountMaxInflightPerAccount; got != 20 {
+		t.Fatalf("capped max inflight=%d", got)
 	}
 }
 

@@ -289,7 +289,8 @@ type Store struct {
 	accounts                   []Account
 	credentialRecoveryLogs     []CredentialRecoveryLog
 	credentialRecoverySequence uint64
-	imageLeases                map[string]struct{}
+	imageLeases                map[string]int
+	imageMaxInflightPerAccount int
 	imageLeaseChanged          chan struct{}
 	imageWaiters               []*imageWaiter
 	now                        func() time.Time
@@ -307,6 +308,11 @@ type ImageDispatchStats struct {
 	Dispatchable               int        `json:"dispatchable"`
 	Idle                       int        `json:"idle"`
 	Leased                     int        `json:"leased"`
+	Saturated                  int        `json:"saturated"`
+	MaxInflightPerAccount      int        `json:"max_inflight_per_account"`
+	DispatchableSlots          int        `json:"dispatchable_slots"`
+	IdleSlots                  int        `json:"idle_slots"`
+	LeasedSlots                int        `json:"leased_slots"`
 	Cooling                    int        `json:"cooling"`
 	Limited                    int        `json:"limited"`
 	Invalid                    int        `json:"invalid"`
@@ -339,6 +345,38 @@ type fileShape struct {
 	CredentialRecoveryLogs []CredentialRecoveryLog `json:"credential_recovery_logs,omitempty"`
 }
 
+func NormalizeImageMaxInflightPerAccount(value int) int {
+	if value <= 0 {
+		return 1
+	}
+	if value > 20 {
+		return 20
+	}
+	return value
+}
+
+func (s *Store) SetImageMaxInflightPerAccount(value int) {
+	if s == nil {
+		return
+	}
+	normalized := NormalizeImageMaxInflightPerAccount(value)
+	s.mu.Lock()
+	if s.imageMaxInflightPerAccount != normalized {
+		s.imageMaxInflightPerAccount = normalized
+		s.signalImageAvailabilityLocked()
+	}
+	s.mu.Unlock()
+}
+
+func (s *Store) ImageMaxInflightPerAccount() int {
+	if s == nil {
+		return 1
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return NormalizeImageMaxInflightPerAccount(s.imageMaxInflightPerAccount)
+}
+
 func NewStore(items []Account, path string) *Store {
 	return newStore(items, nil, path, nil)
 }
@@ -357,13 +395,14 @@ func newStore(items []Account, recoveryLogs []CredentialRecoveryLog, path string
 		logs = append([]CredentialRecoveryLog(nil), logs[len(logs)-maxCredentialRecoveryLogs:]...)
 	}
 	s := &Store{
-		path:                   strings.TrimSpace(path),
-		state:                  state,
-		accounts:               copied,
-		credentialRecoveryLogs: logs,
-		imageLeases:            map[string]struct{}{},
-		imageLeaseChanged:      make(chan struct{}),
-		now:                    time.Now,
+		path:                       strings.TrimSpace(path),
+		state:                      state,
+		accounts:                   copied,
+		credentialRecoveryLogs:     logs,
+		imageLeases:                map[string]int{},
+		imageMaxInflightPerAccount: 1,
+		imageLeaseChanged:          make(chan struct{}),
+		now:                        time.Now,
 	}
 	if s.path != "" || s.state != nil {
 		s.wake = make(chan struct{}, 1)
@@ -501,7 +540,7 @@ func (s *Store) ImageDispatchStats() ImageDispatchStats {
 	now := s.now()
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	stats := ImageDispatchStats{Total: len(s.accounts)}
+	stats := ImageDispatchStats{Total: len(s.accounts), MaxInflightPerAccount: NormalizeImageMaxInflightPerAccount(s.imageMaxInflightPerAccount)}
 	for _, account := range s.accounts {
 		stats.TotalImageSuccess += max(0, account.ImageOK)
 		stats.TotalImageFailures += max(0, account.ImageFailures)
@@ -552,10 +591,20 @@ func (s *Store) ImageDispatchStats() ImageDispatchStats {
 			continue
 		}
 		stats.Dispatchable++
-		if _, occupied := s.imageLeases[token]; occupied {
+		leaseCount := max(0, s.imageLeases[token])
+		maxInflight := NormalizeImageMaxInflightPerAccount(s.imageMaxInflightPerAccount)
+		stats.DispatchableSlots += maxInflight
+		stats.LeasedSlots += leaseCount
+		availableSlots := max(0, maxInflight-leaseCount)
+		stats.IdleSlots += availableSlots
+		if leaseCount > 0 {
 			stats.Leased++
-		} else {
+		}
+		if leaseCount == 0 {
 			stats.Idle++
+		}
+		if availableSlots == 0 {
+			stats.Saturated++
 		}
 	}
 	if stats.Total > 0 {
@@ -741,7 +790,7 @@ func (s *Store) TokensForScheduledRefresh() []string {
 		if token == "" {
 			continue
 		}
-		if _, leased := s.imageLeases[token]; leased {
+		if s.imageLeases[token] > 0 {
 			continue
 		}
 		tokens = append(tokens, token)
@@ -958,7 +1007,7 @@ func (s *Store) AcquireForImage(ctx context.Context, exclude map[string]bool, on
 				if waiter != nil {
 					s.removeImageWaiterLocked(waiter)
 				}
-				s.imageLeases[account.AccessToken] = struct{}{}
+				s.imageLeases[account.AccessToken]++
 				s.mu.Unlock()
 				return cloneAccount(account), nil
 			}
@@ -1032,8 +1081,9 @@ func (s *Store) AcquireAccountForImage(ctx context.Context, token string, onWait
 			s.mu.Unlock()
 			return Account{}, ErrNoAvailableAccount
 		}
-		if _, occupied := s.imageLeases[token]; !occupied {
-			s.imageLeases[token] = struct{}{}
+		maxInflight := NormalizeImageMaxInflightPerAccount(s.imageMaxInflightPerAccount)
+		if s.imageLeases[token] < maxInflight {
+			s.imageLeases[token]++
 			s.mu.Unlock()
 			return cloneAccount(account), nil
 		}
@@ -1060,10 +1110,15 @@ func (s *Store) ReleaseImage(token string) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, occupied := s.imageLeases[token]; !occupied {
+	leaseCount := s.imageLeases[token]
+	if leaseCount <= 0 {
 		return
 	}
-	delete(s.imageLeases, token)
+	if leaseCount <= 1 {
+		delete(s.imageLeases, token)
+	} else {
+		s.imageLeases[token] = leaseCount - 1
+	}
 	s.signalImageAvailabilityLocked()
 }
 
@@ -1125,7 +1180,9 @@ func (s *Store) wakeImageWaiterLocked() {
 func (s *Store) selectForImageLocked(exclude map[string]bool, skipOccupied bool) (Account, bool) {
 	now := s.now()
 	var selected Account
+	selectedLeases := 0
 	found := false
+	maxInflight := NormalizeImageMaxInflightPerAccount(s.imageMaxInflightPerAccount)
 	for _, a := range s.accounts {
 		if !usable(a) {
 			continue
@@ -1136,13 +1193,13 @@ func (s *Store) selectForImageLocked(exclude map[string]bool, skipOccupied bool)
 		if exclude != nil && exclude[a.AccessToken] {
 			continue
 		}
-		if skipOccupied {
-			if _, occupied := s.imageLeases[a.AccessToken]; occupied {
-				continue
-			}
+		leaseCount := max(0, s.imageLeases[a.AccessToken])
+		if skipOccupied && leaseCount >= maxInflight {
+			continue
 		}
-		if !found || imageAccountPreferred(a, selected) {
+		if !found || (skipOccupied && leaseCount < selectedLeases) || ((!skipOccupied || leaseCount == selectedLeases) && imageAccountPreferred(a, selected)) {
 			selected = a
+			selectedLeases = leaseCount
 			found = true
 		}
 	}

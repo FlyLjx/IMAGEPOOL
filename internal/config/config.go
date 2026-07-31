@@ -33,6 +33,7 @@ type Config struct {
 	ImageTaskTimeoutSecs                float64      `json:"image_task_timeout_secs"`
 	ImageSettleSecs                     float64      `json:"image_settle_secs"`
 	ImageCapacityBurstParallel          int          `json:"image_capacity_burst_parallel"`
+	ImageAccountMaxInflightPerAccount   int          `json:"image_account_max_inflight_per_account"`
 	ImageAccountPrecheckIntervalMinutes int          `json:"image_account_precheck_interval_minutes"`
 	ImageAccountPrecheckConcurrency     int          `json:"image_account_precheck_concurrency"`
 	ImageAccountPrecheckTimeoutSecs     float64      `json:"image_account_precheck_timeout_secs"`
@@ -103,6 +104,7 @@ func Default() Config {
 		ImageTaskTimeoutSecs:                330,
 		ImageSettleSecs:                     2,
 		ImageCapacityBurstParallel:          50,
+		ImageAccountMaxInflightPerAccount:   1,
 		ImageAccountPrecheckIntervalMinutes: 10,
 		ImageAccountPrecheckConcurrency:     6,
 		ImageAccountPrecheckTimeoutSecs:     75,
@@ -318,6 +320,12 @@ func (c Config) Normalize() Config {
 	}
 	if c.ImageCapacityBurstParallel > 10000 {
 		c.ImageCapacityBurstParallel = 10000
+	}
+	if c.ImageAccountMaxInflightPerAccount <= 0 {
+		c.ImageAccountMaxInflightPerAccount = d.ImageAccountMaxInflightPerAccount
+	}
+	if c.ImageAccountMaxInflightPerAccount > 20 {
+		c.ImageAccountMaxInflightPerAccount = 20
 	}
 	if c.ImageAccountPrecheckIntervalMinutes <= 0 {
 		c.ImageAccountPrecheckIntervalMinutes = d.ImageAccountPrecheckIntervalMinutes

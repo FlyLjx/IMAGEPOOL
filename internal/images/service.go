@@ -87,6 +87,9 @@ type Response struct {
 
 func NewService(cfg config.Config, store *accounts.Store, backend openaiweb.Backend, imageStorage ...*storage.Service) *Service {
 	cfg = cfg.Normalize()
+	if store != nil {
+		store.SetImageMaxInflightPerAccount(cfg.ImageAccountMaxInflightPerAccount)
+	}
 	service := &Service{cfg: cfg, store: store, backend: backend}
 	if len(imageStorage) > 0 {
 		service.storage = imageStorage[0]
@@ -98,8 +101,12 @@ func (s *Service) UpdateConfig(cfg config.Config) {
 	if s == nil {
 		return
 	}
+	next := cfg.Normalize()
+	if s.store != nil {
+		s.store.SetImageMaxInflightPerAccount(next.ImageAccountMaxInflightPerAccount)
+	}
 	s.cfgMu.Lock()
-	s.cfg = cfg.Normalize()
+	s.cfg = next
 	s.cfgMu.Unlock()
 }
 

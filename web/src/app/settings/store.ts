@@ -54,6 +54,7 @@ function normalizeConfig(config: SettingsConfig): SettingsConfig {
     image_poll_timeout_secs: Math.min(300, Number(config.image_poll_timeout_secs) || 300),
     image_task_timeout_secs: 330,
     image_capacity_burst_parallel: Math.max(1, Number(config.image_capacity_burst_parallel) || 50),
+    image_account_max_inflight_per_account: Math.min(20, Math.max(1, Number(config.image_account_max_inflight_per_account) || 1)),
     image_web_model_slug: String(config.image_web_model_slug || "gpt-5-5"),
     image_account_concurrency: Number(config.image_account_concurrency || 3),
     image_account_precheck_interval_minutes: Number(config.image_account_precheck_interval_minutes || 10),
@@ -134,6 +135,7 @@ type SettingsStore = {
   setImageRetentionDays: (value: string) => void;
   setImagePollTimeoutSecs: (value: string) => void;
   setImageCapacityBurstParallel: (value: string) => void;
+  setImageAccountMaxInflightPerAccount: (value: string) => void;
   setImageWebModelSlug: (value: string) => void;
   setAutoRemoveInvalidAccounts: (value: boolean) => void;
   setAutoRemoveRateLimitedAccounts: (value: boolean) => void;
@@ -215,6 +217,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         image_poll_timeout_secs: Math.min(300, Math.max(15, Number(config.image_poll_timeout_secs) || 300)),
         image_task_timeout_secs: 330,
         image_capacity_burst_parallel: Math.min(10000, Math.max(1, Number(config.image_capacity_burst_parallel) || 50)),
+        image_account_max_inflight_per_account: Math.min(20, Math.max(1, Number(config.image_account_max_inflight_per_account) || 1)),
         image_web_model_slug: String(config.image_web_model_slug || "gpt-5-5").trim() || "gpt-5-5",
         image_account_concurrency: Math.max(1, Number(config.image_account_concurrency) || 3),
         image_account_precheck_interval_minutes: Math.max(1, Number(config.image_account_precheck_interval_minutes) || 10),
@@ -331,6 +334,10 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
 
   setImageCapacityBurstParallel: (value) => {
     set((state) => (state.config ? { config: { ...state.config, image_capacity_burst_parallel: value } } : {}));
+  },
+
+  setImageAccountMaxInflightPerAccount: (value) => {
+    set((state) => (state.config ? { config: { ...state.config, image_account_max_inflight_per_account: value } } : {}));
   },
 
   setImageWebModelSlug: (value) => {
