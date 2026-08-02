@@ -342,7 +342,7 @@ func (s *Service) GenerateWithAccount(ctx context.Context, token string, req Req
 		if openaiweb.IsAuthenticationError(err) {
 			_, _ = s.store.RemoveInvalidToken(account.AccessToken, err.Error())
 		} else if openaiweb.IsNoFreeImageQuotaError(err) {
-			_ = s.store.MarkImageQuotaExhausted(account.AccessToken, err)
+			_, _ = s.store.RemoveQuotaExhausted(account.AccessToken, err)
 		}
 		return Response{}, err
 	}
@@ -424,7 +424,8 @@ func (s *Service) generateOne(ctx context.Context, req Request) (openaiweb.Image
 				log.RemovedAccount = removed
 			}
 			if openaiweb.IsNoFreeImageQuotaError(err) {
-				_ = s.store.MarkImageQuotaExhausted(account.AccessToken, err)
+				removed, _ := s.store.RemoveQuotaExhausted(account.AccessToken, err)
+				log.RemovedAccount = removed
 			}
 			attempts = append(attempts, log)
 			continue
@@ -459,7 +460,8 @@ func (s *Service) generateOne(ctx context.Context, req Request) (openaiweb.Image
 			removed, _ := s.store.RemoveInvalidToken(account.AccessToken, err.Error())
 			log.RemovedAccount = removed
 		} else if openaiweb.IsNoFreeImageQuotaError(err) {
-			_ = s.store.MarkImageQuotaExhausted(account.AccessToken, err)
+			removed, _ := s.store.RemoveQuotaExhausted(account.AccessToken, err)
+			log.RemovedAccount = removed
 		}
 		s.store.ReleaseImage(account.AccessToken)
 		attempts = append(attempts, log)

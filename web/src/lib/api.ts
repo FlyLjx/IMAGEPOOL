@@ -503,36 +503,6 @@ export type DashboardTodayCalls = {
   recent_failed?: DashboardRecentFailedCall[];
 };
 
-export type PostprocessTask = {
-  id: string;
-  parent_task_id?: string;
-  owner_id?: string;
-  status: "queued" | "running" | "success" | "skipped" | "error";
-  model?: string;
-  requested_size?: string;
-  hd_repair?: boolean;
-  restored?: boolean;
-  skipped?: boolean;
-  input_bytes?: number;
-  output_bytes?: number;
-  input_image_path?: string;
-  output_image_path?: string;
-  created_at: string;
-  started_at?: string;
-  finished_at?: string;
-  updated_at: string;
-  duration_ms?: number;
-  error?: string;
-};
-
-export type PostprocessTaskListResponse = {
-  items: PostprocessTask[];
-  page: number;
-  page_size: number;
-  total: number;
-  has_more: boolean;
-};
-
 export type DashboardAccountSummary = {
   total: number;
   cumulative_total?: number;
@@ -1068,14 +1038,6 @@ export async function fetchImageTaskHistory(options: { page?: number; pageSize?:
   }
   params.set("_t", String(Date.now()));
   return httpRequest<ImageTaskListResponse>(`/api/image-tasks/history?${params.toString()}`);
-}
-
-export async function fetchPostprocessTaskHistory(options: { page?: number; pageSize?: number } = {}) {
-  const params = new URLSearchParams();
-  params.set("page", String(options.page || 1));
-  params.set("page_size", String(options.pageSize || 50));
-  params.set("_t", String(Date.now()));
-  return httpRequest<PostprocessTaskListResponse>(`/api/postprocess-tasks/history?${params.toString()}`);
 }
 
 export async function fetchImageTaskStatus(taskId: string, compact = false) {

@@ -524,7 +524,7 @@ func TestGenerateWithAccountHonorsPerAccountInflightConfig(t *testing.T) {
 	}
 }
 
-func TestGenerateLimitsNoQuotaAccountAndRetries(t *testing.T) {
+func TestGenerateRemovesNoQuotaAccountAndRetries(t *testing.T) {
 	store := accounts.NewStore([]accounts.Account{{Email: "a", AccessToken: "a", CreatedAt: 1}, {Email: "b", AccessToken: "b", CreatedAt: 2}}, "")
 	fb := &fakeBackend{errs: []error{errors.New("no available free image quota (tried 20 tokens)")}}
 	_, err := NewService(config.Default(), store, fb).Generate(context.Background(), Request{Prompt: "draw"})
@@ -532,8 +532,8 @@ func TestGenerateLimitsNoQuotaAccountAndRetries(t *testing.T) {
 		t.Fatal(err)
 	}
 	items := store.List()
-	if len(items) != 2 || items[1].Status != "限流" {
-		t.Fatalf("no quota account was not limited: %#v", items)
+	if len(items) != 1 || items[0].AccessToken != "a" {
+		t.Fatalf("no quota account was not removed: %#v", items)
 	}
 }
 

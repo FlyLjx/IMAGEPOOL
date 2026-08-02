@@ -1321,26 +1321,37 @@ func (s *Store) MarkImageSuccess(token string) error {
 	})
 }
 
-// MarkImageQuotaExhausted keeps the account for a later refresh instead of
-// deleting a token based on an upstream quota response that may be transient.
-func (s *Store) MarkImageQuotaExhausted(token string, err error) error {
-	return s.updateByToken(token, func(a *Account) {
-		now := s.now()
-		a.LastUsedAt = now.Unix()
-		a.LastError = strings.TrimSpace(fmt.Sprint(err))
-		if a.Extra == nil {
-			a.Extra = map[string]any{}
+// RemoveQuotaExhausted removes an account as soon as the upstream image
+// service confirms that its image quota is exhausted. Temporary HTTP 429
+// responses use the separate cooldown path and do not call this method.
+func (s *Store) RemoveQuotaExhausted(token string, err error) (bool, error) {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return false, nil
+	}
+	reason := strings.TrimSpace(fmt.Sprint(err))
+	s.mu.Lock()
+	next := s.accounts[:0]
+	removed := false
+	for _, account := range s.accounts {
+		if account.AccessToken == token {
+			removed = true
+			s.appendCredentialRecoveryLogLocked(account, "warning", "account_deleted", "账号因图片额度耗尽被自动移除", reason, 0)
+			continue
 		}
-		if !a.ImageQuotaUnknown {
-			updateImageQuotaTotal(a, a.Quota)
-			a.Quota = 0
-			updateImageQuotaRemaining(a.Extra, 0)
-		}
-		a.Status = "限流"
-		a.Extra["last_used_at"] = now.In(time.Local).Format(time.RFC3339)
-		a.Extra["image_quota_refresh_required"] = true
-		a.Extra["image_quota_limited_at"] = now.In(time.Local).Format(time.RFC3339)
-	})
+		next = append(next, account)
+	}
+	s.accounts = next
+	if !removed {
+		s.mu.Unlock()
+		return false, nil
+	}
+	delete(s.imageLeases, token)
+	s.signalImageAvailabilityLocked()
+	s.markDirtyLocked()
+	snapshot, revision := s.snapshotLocked()
+	s.mu.Unlock()
+	return true, s.persistSnapshot(snapshot, revision)
 }
 
 func recordSuccess(account *Account, now time.Time) {

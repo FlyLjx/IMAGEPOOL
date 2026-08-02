@@ -721,14 +721,14 @@ func TestMarkImageSuccessUpdatesKnownQuotaEstimate(t *testing.T) {
 	}
 }
 
-func TestMarkImageQuotaExhaustedRetainsAccount(t *testing.T) {
+func TestRemoveQuotaExhaustedDeletesAccount(t *testing.T) {
 	store := NewStore([]Account{{AccessToken: "token", Quota: 1, Status: "正常", Extra: map[string]any{}}}, "")
-	if err := store.MarkImageQuotaExhausted("token", errors.New("no available free image quota")); err != nil {
+	removed, err := store.RemoveQuotaExhausted("token", errors.New("no available free image quota"))
+	if err != nil || !removed {
 		t.Fatal(err)
 	}
-	account, found := store.Get("token")
-	if !found || account.Status != "限流" || account.Quota != 0 {
-		t.Fatalf("account=%#v found=%v", account, found)
+	if _, found := store.Get("token"); found {
+		t.Fatal("quota-exhausted account was retained")
 	}
 }
 

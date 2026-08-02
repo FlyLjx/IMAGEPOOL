@@ -334,8 +334,6 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleTaskList(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/api/image-tasks/history":
 		s.handleTaskHistory(w, r)
-	case r.Method == http.MethodGet && r.URL.Path == "/api/postprocess-tasks/history":
-		s.handlePostprocessTaskHistory(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/api/image-tasks/generations":
 		s.handleTaskGeneration(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/api/image-tasks/edits":

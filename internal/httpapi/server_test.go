@@ -175,30 +175,6 @@ func TestModelsExposeBaseImageModel(t *testing.T) {
 	}
 }
 
-func TestPostprocessTaskHistoryEndpoint(t *testing.T) {
-	srv := httptest.NewServer(testServer(t))
-	defer srv.Close()
-	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/postprocess-tasks/history?page=1&page_size=20", nil)
-	req.Header.Set("Authorization", "Bearer k")
-	response, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer response.Body.Close()
-	var payload struct {
-		Items    []any `json:"items"`
-		Page     int   `json:"page"`
-		PageSize int   `json:"page_size"`
-		Total    int   `json:"total"`
-	}
-	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
-		t.Fatal(err)
-	}
-	if response.StatusCode != http.StatusOK || payload.Items == nil || payload.Page != 1 || payload.PageSize != 20 || payload.Total != 0 {
-		t.Fatalf("status=%d payload=%#v", response.StatusCode, payload)
-	}
-}
-
 func TestStabilityHealthEndpointIsPublicAndNoStore(t *testing.T) {
 	handler := testServer(t)
 	server, ok := handler.(*Server)
