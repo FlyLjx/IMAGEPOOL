@@ -44,7 +44,10 @@ function taskProgress(item: ImageTask) {
   );
 }
 
-function accountUsage(item: ImageTask) {
+function accountUsage(item: ImageTask | null | undefined) {
+  if (!item) {
+    return <Typography.Text type="secondary">加载中...</Typography.Text>;
+  }
   const accounts = item.used_accounts || [];
   if (accounts.length === 0) {
     return <Typography.Text type="secondary">{item.status === "queued" ? "等待分配" : "-"}</Typography.Text>;
