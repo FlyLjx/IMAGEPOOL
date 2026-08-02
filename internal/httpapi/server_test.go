@@ -433,7 +433,7 @@ func TestImageGenerationEndpoint(t *testing.T) {
 	if err := json.NewDecoder(tasksResponse.Body).Decode(&taskPayload); err != nil {
 		t.Fatal(err)
 	}
-	if tasksResponse.StatusCode != http.StatusOK || len(taskPayload.Items) != 1 || taskPayload.Items[0].Status != tasks.StatusSucceeded || taskPayload.Items[0].Model != images.PublicImageModel || len(taskPayload.Items[0].Data) != 1 || taskPayload.Items[0].Data[0].B64JSON == "" || taskPayload.Items[0].Data[0].URL != "" {
+	if tasksResponse.StatusCode != http.StatusOK || len(taskPayload.Items) != 1 || taskPayload.Items[0].Status != tasks.StatusSucceeded || taskPayload.Items[0].Model != images.PublicImageModel || len(taskPayload.Items[0].Data) != 1 || taskPayload.Items[0].Data[0].B64JSON == "" || taskPayload.Items[0].Data[0].URL != "" || len(taskPayload.Items[0].UsedAccounts) != 1 || taskPayload.Items[0].UsedAccounts[0].Email != "a" || taskPayload.Items[0].UsedAccounts[0].AvailableQuota == nil || *taskPayload.Items[0].UsedAccounts[0].AvailableQuota != 0 {
 		t.Fatalf("task status=%d payload=%#v", tasksResponse.StatusCode, taskPayload)
 	}
 }
@@ -619,7 +619,7 @@ func TestCompactTaskListOmitsLogsAndLegacyAlias(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, hidden := range []string{"account_email", "used_account_count", "failed_account_count", "image_route_attempt_count", `"attempts"`} {
+	for _, hidden := range []string{"account_email"} {
 		if strings.Contains(string(compactBody), hidden) {
 			t.Fatalf("compact response exposed %q: %s", hidden, compactBody)
 		}
@@ -631,7 +631,7 @@ func TestCompactTaskListOmitsLogsAndLegacyAlias(t *testing.T) {
 	if err := json.Unmarshal(compactBody, &compactPayload); err != nil {
 		t.Fatal(err)
 	}
-	if compactResponse.StatusCode != http.StatusOK || len(compactPayload.Items) != 1 {
+	if compactResponse.StatusCode != http.StatusOK || len(compactPayload.Items) != 1 || len(compactPayload.Items[0].UsedAccounts) != 1 {
 		t.Fatalf("compact response status=%d payload=%#v", compactResponse.StatusCode, compactPayload)
 	}
 	if compactPayload.Tasks != nil || len(compactPayload.Items[0].StatusLogs) != 0 || compactPayload.Items[0].StatusLogCount == 0 || len(compactPayload.Items[0].Data) != 0 {
@@ -693,7 +693,7 @@ func TestCompactTaskListOmitsLogsAndLegacyAlias(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, hidden := range []string{"account_email", "used_account_count", "failed_account_count", "image_route_attempt_count", `"attempts"`} {
+	for _, hidden := range []string{"account_email"} {
 		if strings.Contains(string(legacyBody), hidden) {
 			t.Fatalf("task response exposed %q: %s", hidden, legacyBody)
 		}
@@ -705,7 +705,7 @@ func TestCompactTaskListOmitsLogsAndLegacyAlias(t *testing.T) {
 	if err := json.Unmarshal(legacyBody, &legacyPayload); err != nil {
 		t.Fatal(err)
 	}
-	if legacyResponse.StatusCode != http.StatusOK || len(legacyPayload.Items) != 1 || len(legacyPayload.Tasks) == 0 || len(legacyPayload.Items[0].StatusLogs) == 0 || len(legacyPayload.Items[0].Data) == 0 {
+	if legacyResponse.StatusCode != http.StatusOK || len(legacyPayload.Items) != 1 || len(legacyPayload.Tasks) == 0 || len(legacyPayload.Items[0].StatusLogs) == 0 || len(legacyPayload.Items[0].Data) == 0 || len(legacyPayload.Items[0].UsedAccounts) != 1 {
 		t.Fatalf("legacy payload=%#v", legacyPayload)
 	}
 }

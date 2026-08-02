@@ -44,6 +44,32 @@ function taskProgress(item: ImageTask) {
   );
 }
 
+function accountUsage(item: ImageTask) {
+  const accounts = item.used_accounts || [];
+  if (accounts.length === 0) {
+    return <Typography.Text type="secondary">{item.status === "queued" ? "等待分配" : "-"}</Typography.Text>;
+  }
+  return (
+    <div className="flex min-w-[210px] flex-col gap-1">
+      {accounts.map((account, index) => {
+        const label = account.email || account.id || "未知账号";
+        const status = account.removed ? "已移除" : account.status === "success" ? "成功" : account.status === "error" ? "失败" : "处理中";
+        const color = account.removed || account.status === "error" ? "red" : account.status === "success" ? "green" : "blue";
+        return (
+          <div key={`${label}-${index}`} className="flex min-w-0 items-center gap-1.5">
+            <Typography.Text ellipsis className="min-w-0 flex-1 font-mono text-xs" title={label}>{label}</Typography.Text>
+            <Tag color={color} className="m-0 shrink-0">{status}</Tag>
+            <Typography.Text type="secondary" className="shrink-0 text-xs">
+              可用额度 {typeof account.available_quota === "number" ? account.available_quota : "未知"}
+            </Typography.Text>
+            {account.attempts ? <Typography.Text type="secondary" className="shrink-0 text-xs">×{account.attempts}</Typography.Text> : null}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function levelColor(level?: string) {
   return {
     processing: "text-blue-600 bg-blue-50 border-blue-100",
@@ -216,6 +242,7 @@ function TasksContent() {
       { title: "模式", dataIndex: "mode", width: 96, render: modeTag },
       { title: "状态", dataIndex: "status", width: 96, render: statusTag },
       { title: "模型", dataIndex: "model", width: 150, ellipsis: true },
+      { title: "使用账号", dataIndex: "used_accounts", width: 260, render: (_, item) => accountUsage(item) },
       { title: "进度", dataIndex: "progress_percent", width: 230, render: (_, item) => taskProgress(item) },
       {
         title: "实时状态",
@@ -347,6 +374,7 @@ function TasksContent() {
               <div>模型：<Typography.Text>{statusTask?.model || "-"}</Typography.Text></div>
               <div>更新时间：<Typography.Text>{formatShanghaiDateTime(statusTask?.updated_at)}</Typography.Text></div>
               <div>会话：<Typography.Text copyable={Boolean(statusTask?.conversation_id)}>{statusTask?.conversation_id || "-"}</Typography.Text></div>
+              <div className="sm:col-span-2">使用账号：{accountUsage(statusTask)}</div>
               <div>进度：<Typography.Text>{statusTask?.progress_percent ?? 0}%</Typography.Text></div>
             </div>
           </div>

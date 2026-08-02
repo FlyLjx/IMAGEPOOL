@@ -707,7 +707,7 @@ func (s *Server) handleImageEdit(w http.ResponseWriter, r *http.Request, asTask 
 		identity, _ := auth.IdentityFromContext(r.Context())
 		task := s.tasks.SubmitEditForOwner(identity.ID, clientTaskID, req)
 		if asTask {
-			writeJSON(w, http.StatusAccepted, publicTask(task))
+			writeJSON(w, http.StatusAccepted, taskResponse(task, identity.IsAdmin()))
 		} else {
 			writeJSON(w, http.StatusAccepted, standardImageTask(publicTask(task)))
 		}
@@ -998,7 +998,7 @@ func (s *Server) handleTaskGeneration(w http.ResponseWriter, r *http.Request) {
 	}
 	identity, _ := auth.IdentityFromContext(r.Context())
 	task := s.tasks.SubmitGenerationForOwner(identity.ID, body.ClientTaskID, req)
-	writeJSON(w, http.StatusAccepted, publicTask(task))
+	writeJSON(w, http.StatusAccepted, taskResponse(task, identity.IsAdmin()))
 }
 func (s *Server) handleTaskEdit(w http.ResponseWriter, r *http.Request) {
 	s.handleImageEdit(w, r, true)
@@ -1013,14 +1013,15 @@ func (s *Server) handleTaskList(w http.ResponseWriter, r *http.Request) {
 	}
 	identity, _ := auth.IdentityFromContext(r.Context())
 	items := s.tasks.ListForOwner(ids, identity.ID, identity.IsAdmin())
-	items = publicTasks(items)
 	compact := strings.TrimSpace(r.URL.Query().Get("compact")) == "1"
 	if compact {
 		if strings.TrimSpace(r.URL.Query().Get("include_data")) == "1" {
-			items = compactTaskListWithData(items)
+			items = compactTaskListResponse(items, true, identity.IsAdmin())
 		} else {
-			items = compactTaskList(items)
+			items = compactTaskListResponse(items, false, identity.IsAdmin())
 		}
+	} else {
+		items = taskResponses(items, identity.IsAdmin())
 	}
 	found := map[string]bool{}
 	for _, item := range items {
@@ -1051,9 +1052,9 @@ func (s *Server) handleTaskHistory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if strings.TrimSpace(r.URL.Query().Get("include_logs")) != "1" {
-		history.Items = compactTaskList(history.Items)
+		history.Items = compactTaskListResponse(history.Items, false, identity.IsAdmin())
 	} else {
-		history.Items = publicTasks(history.Items)
+		history.Items = taskResponses(history.Items, identity.IsAdmin())
 	}
 	writeJSON(w, http.StatusOK, history)
 }
@@ -1068,7 +1069,7 @@ func (s *Server) handleTaskItem(w http.ResponseWriter, r *http.Request) {
 	identity, _ := auth.IdentityFromContext(r.Context())
 	if action == "status" && r.Method == http.MethodGet {
 		if task, ok := s.tasks.StatusForOwner(id, identity.ID, identity.IsAdmin()); ok {
-			task = publicTask(task)
+			task = taskResponse(task, identity.IsAdmin())
 			if strings.TrimSpace(r.URL.Query().Get("compact")) == "1" {
 				task.Data = nil
 			}
@@ -1080,7 +1081,7 @@ func (s *Server) handleTaskItem(w http.ResponseWriter, r *http.Request) {
 	}
 	if action == "cancel" && r.Method == http.MethodPost {
 		if task, ok := s.tasks.CancelForOwner(id, identity.ID, identity.IsAdmin()); ok {
-			writeJSON(w, http.StatusOK, publicTask(task))
+			writeJSON(w, http.StatusOK, taskResponse(task, identity.IsAdmin()))
 			return
 		}
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": "task not found"})
@@ -1095,7 +1096,7 @@ func (s *Server) handleTaskItem(w http.ResponseWriter, r *http.Request) {
 			body.ExtraTimeoutSecs = 30
 		}
 		if task, ok := s.tasks.ResumePollForOwner(id, identity.ID, identity.IsAdmin(), body.ExtraTimeoutSecs); ok {
-			writeJSON(w, http.StatusOK, publicTask(task))
+			writeJSON(w, http.StatusOK, taskResponse(task, identity.IsAdmin()))
 			return
 		}
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": "task not found"})
@@ -2535,20 +2536,20 @@ func firstTasks(items []tasks.Task, limit int) []tasks.Task {
 // compactTaskList keeps list and dashboard responses small. Full logs remain
 // available from the per-task status endpoint when the operator opens a task.
 func compactTaskList(items []tasks.Task) []tasks.Task {
-	return compactTaskListResponse(items, false)
+	return compactTaskListResponse(items, false, false)
 }
 
 func compactTaskListWithData(items []tasks.Task) []tasks.Task {
-	return compactTaskListResponse(items, true)
+	return compactTaskListResponse(items, true, false)
 }
 
-func compactTaskListResponse(items []tasks.Task, includeData bool) []tasks.Task {
+func compactTaskListResponse(items []tasks.Task, includeData, includeAccountInfo bool) []tasks.Task {
 	if len(items) == 0 {
 		return items
 	}
 	out := append([]tasks.Task(nil), items...)
 	for i := range out {
-		out[i] = publicTask(out[i])
+		out[i] = taskResponse(out[i], includeAccountInfo)
 		out[i].StatusLogs = nil
 		if !includeData {
 			out[i].Data = nil
@@ -2558,20 +2559,31 @@ func compactTaskListResponse(items []tasks.Task, includeData bool) []tasks.Task 
 }
 
 func publicTasks(items []tasks.Task) []tasks.Task {
+	return taskResponses(items, false)
+}
+
+func taskResponses(items []tasks.Task, includeAccountInfo bool) []tasks.Task {
 	if len(items) == 0 {
 		return items
 	}
 	out := append([]tasks.Task(nil), items...)
 	for index := range out {
-		out[index] = publicTask(out[index])
+		out[index] = taskResponse(out[index], includeAccountInfo)
 	}
 	return out
 }
 
 func publicTask(task tasks.Task) tasks.Task {
-	task.UsedAccountCount = 0
-	task.FailedAccountCount = 0
-	task.ImageRouteAttemptCount = 0
+	return taskResponse(task, false)
+}
+
+func taskResponse(task tasks.Task, includeAccountInfo bool) tasks.Task {
+	if !includeAccountInfo {
+		task.UsedAccounts = nil
+		task.UsedAccountCount = 0
+		task.FailedAccountCount = 0
+		task.ImageRouteAttemptCount = 0
+	}
 	if task.Error != "" && task.ErrorCode == "" {
 		classified := errorinfo.ClassifyText(task.Error, 0)
 		task.Error = classified.Message

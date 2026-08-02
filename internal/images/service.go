@@ -347,6 +347,7 @@ func (s *Service) GenerateWithAccount(ctx context.Context, token string, req Req
 		return Response{}, err
 	}
 	_ = s.store.MarkImageSuccess(account.AccessToken)
+	s.reportAccountIdentity(req, account.AccessToken)
 	// Downloads only need the immutable account identity; releasing the image
 	// lease here lets the next queued generation start while the local cache is
 	// populated.
@@ -412,7 +413,7 @@ func (s *Service) generateOne(ctx context.Context, req Request) (openaiweb.Image
 		if taskCtx == nil {
 			taskCtx, cancelTask = s.taskContext(ctx, req)
 		}
-		log := openaiweb.AttemptLog{Attempt: len(attempts) + 1, AccountEmail: account.Email, Status: "running"}
+		log := openaiweb.AttemptLog{Attempt: len(attempts) + 1, AccountID: account.ID, AccountEmail: account.Email, Status: "running"}
 		account, err = s.prepareAccountForDispatch(account, req)
 		if err != nil {
 			s.store.ReleaseImage(account.AccessToken)
@@ -435,6 +436,7 @@ func (s *Service) generateOne(ctx context.Context, req Request) (openaiweb.Image
 		result, err := s.backend.GenerateImage(taskCtx, account, req)
 		if err == nil {
 			_ = s.store.MarkImageSuccess(account.AccessToken)
+			s.reportAccountIdentity(req, account.AccessToken)
 			s.store.ReleaseImage(account.AccessToken)
 			result, err = s.finalizeResult(taskCtx, account, result, req)
 			if err != nil {
@@ -544,10 +546,33 @@ func (s *Service) prepareAccountForDispatch(account accounts.Account, req Reques
 }
 
 func reportAccountProgress(req Request, progress, message string, account accounts.Account) {
+	reportAccountIdentity(req, account)
 	if req.Progress == nil {
 		return
 	}
 	req.Progress(openaiweb.ProgressEvent{Progress: progress, Message: message})
+}
+
+func reportAccountIdentity(req Request, account accounts.Account) {
+	if req.AccountProgress == nil || (strings.TrimSpace(account.ID) == "" && strings.TrimSpace(account.Email) == "") {
+		return
+	}
+	var availableQuota *int
+	if !account.ImageQuotaUnknown {
+		quota := max(0, account.Quota)
+		availableQuota = &quota
+	}
+	req.AccountProgress(openaiweb.AccountIdentity{ID: strings.TrimSpace(account.ID), Email: strings.TrimSpace(account.Email), AvailableQuota: availableQuota})
+}
+
+func (s *Service) reportAccountIdentity(req Request, token string) {
+	if s == nil || s.store == nil || req.AccountProgress == nil {
+		return
+	}
+	account, found := s.store.Get(token)
+	if found {
+		reportAccountIdentity(req, account)
+	}
 }
 
 func reportAccountWait(req Request, account accounts.Account) {

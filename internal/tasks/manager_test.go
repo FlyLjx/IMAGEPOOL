@@ -458,6 +458,9 @@ func TestFailedTaskKeepsAttemptStatistics(t *testing.T) {
 	if task.ImageRouteAttemptCount != 2 || task.UsedAccountCount != 2 || task.FailedAccountCount != 2 {
 		t.Fatalf("attempt statistics missing: %#v", task)
 	}
+	if len(task.UsedAccounts) != 2 || task.UsedAccounts[0].Email != "first@example.test" || task.UsedAccounts[0].Status != "failed" || task.UsedAccounts[1].Email != "second@example.test" {
+		t.Fatalf("account usage missing: %#v", task.UsedAccounts)
+	}
 }
 
 func TestFailedTaskRedactsUpstreamCredentialDetails(t *testing.T) {

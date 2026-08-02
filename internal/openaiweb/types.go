@@ -18,23 +18,32 @@ type ImageInput struct {
 }
 
 type ImageRequest struct {
-	Prompt         string              `json:"prompt"`
-	Model          string              `json:"model"`
-	N              int                 `json:"n"`
-	Size           string              `json:"size"`
-	Quality        string              `json:"quality"`
-	ResponseFormat string              `json:"response_format"`
-	OutputFormat   string              `json:"output_format"`
-	Stream         bool                `json:"stream"`
-	Async          bool                `json:"async"`
-	CallbackURL    string              `json:"callback_url,omitempty"`
-	HDRepair       bool                `json:"hd_repair,omitempty"`
-	References     []ImageInput        `json:"-"`
-	OutputBaseURL  string              `json:"-"`
-	TaskID         string              `json:"-"`
-	OwnerID        string              `json:"-"`
-	PublicModel    string              `json:"-"`
-	Progress       func(ProgressEvent) `json:"-"`
+	Prompt          string                `json:"prompt"`
+	Model           string                `json:"model"`
+	N               int                   `json:"n"`
+	Size            string                `json:"size"`
+	Quality         string                `json:"quality"`
+	ResponseFormat  string                `json:"response_format"`
+	OutputFormat    string                `json:"output_format"`
+	Stream          bool                  `json:"stream"`
+	Async           bool                  `json:"async"`
+	CallbackURL     string                `json:"callback_url,omitempty"`
+	HDRepair        bool                  `json:"hd_repair,omitempty"`
+	References      []ImageInput          `json:"-"`
+	OutputBaseURL   string                `json:"-"`
+	TaskID          string                `json:"-"`
+	OwnerID         string                `json:"-"`
+	PublicModel     string                `json:"-"`
+	Progress        func(ProgressEvent)   `json:"-"`
+	AccountProgress func(AccountIdentity) `json:"-"`
+}
+
+// AccountIdentity is the non-secret account identity used by the internal
+// task observer. Tokens are intentionally excluded.
+type AccountIdentity struct {
+	ID             string
+	Email          string
+	AvailableQuota *int
 }
 
 type ProgressEvent struct {
@@ -45,6 +54,7 @@ type ProgressEvent struct {
 
 type AttemptLog struct {
 	Attempt        int    `json:"attempt,omitempty"`
+	AccountID      string `json:"account_id,omitempty"`
 	AccountEmail   string `json:"account_email,omitempty"`
 	BackendModel   string `json:"backend_model,omitempty"`
 	ConversationID string `json:"conversation_id,omitempty"`
@@ -202,6 +212,7 @@ func PublicAttemptLogs(attempts []AttemptLog) []AttemptLog {
 	copy(out, attempts)
 	for i := range out {
 		out[i].Attempt = 0
+		out[i].AccountID = ""
 		out[i].AccountEmail = ""
 		out[i].RemovedAccount = false
 		out[i].Error = PublicErrorText(out[i].Error)
@@ -236,7 +247,7 @@ func PublicDetails(details map[string]any) map[string]any {
 
 func publicDetailKeyAllowed(key string) bool {
 	switch strings.ToLower(strings.TrimSpace(key)) {
-	case "account_email", "account", "email", "attempt", "attempts", "retry", "max_retries", "removed_account", "used_account_count", "failed_account_count", "image_route_attempt_count":
+	case "account_id", "account_email", "account", "email", "attempt", "attempts", "retry", "max_retries", "removed_account", "used_account_count", "failed_account_count", "image_route_attempt_count":
 		return false
 	default:
 		return true

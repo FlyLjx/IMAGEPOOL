@@ -59,6 +59,16 @@ type LogEntry struct {
 	Details  map[string]any `json:"details,omitempty"`
 }
 
+type AccountUsage struct {
+	ID             string `json:"id,omitempty"`
+	Email          string `json:"email,omitempty"`
+	AvailableQuota *int   `json:"available_quota,omitempty"`
+	Status         string `json:"status,omitempty"`
+	Attempts       int    `json:"attempts,omitempty"`
+	Removed        bool   `json:"removed,omitempty"`
+	Error          string `json:"error,omitempty"`
+}
+
 type Task struct {
 	ID                     string           `json:"id"`
 	OwnerID                string           `json:"owner_id,omitempty"`
@@ -86,6 +96,7 @@ type Task struct {
 	UsedAccountCount       int              `json:"used_account_count,omitempty"`
 	FailedAccountCount     int              `json:"failed_account_count,omitempty"`
 	ImageRouteAttemptCount int              `json:"image_route_attempt_count,omitempty"`
+	UsedAccounts           []AccountUsage   `json:"used_accounts,omitempty"`
 	DurationMS             int64            `json:"duration_ms,omitempty"`
 	ElapsedSecs            float64          `json:"elapsed_secs,omitempty"`
 	Error                  string           `json:"error,omitempty"`
@@ -390,6 +401,11 @@ func (m *Manager) run(ctx context.Context, id string, req images.Request) (image
 
 func (m *Manager) runWith(ctx context.Context, id string, req images.Request, generate imageGenerator) (images.Response, error) {
 	req.TaskID = id
+	req.AccountProgress = func(identity openaiweb.AccountIdentity) {
+		m.update(id, func(task *Task) {
+			recordAccountUsage(task, identity, "running")
+		})
+	}
 	req.Progress = func(event openaiweb.ProgressEvent) {
 		event = openaiweb.PublicProgressEvent(event)
 		m.update(id, func(task *Task) {
@@ -521,16 +537,84 @@ func applyAttemptStats(task *Task, result images.Response) {
 	task.ImageRouteAttemptCount = len(result.Attempts)
 	task.UsedAccountCount = 0
 	task.FailedAccountCount = 0
-	used := map[string]bool{}
+	previousQuotas := map[string]*int{}
+	for _, usage := range task.UsedAccounts {
+		if usage.AvailableQuota != nil {
+			quota := *usage.AvailableQuota
+			previousQuotas[accountUsageKey(usage.ID, usage.Email)] = &quota
+		}
+	}
+	task.UsedAccounts = nil
+	indices := map[string]int{}
 	for _, attempt := range result.Attempts {
-		if attempt.AccountEmail != "" {
-			used[attempt.AccountEmail] = true
+		key := accountUsageKey(attempt.AccountID, attempt.AccountEmail)
+		if key != "" {
+			index, found := indices[key]
+			if !found {
+				index = len(task.UsedAccounts)
+				indices[key] = index
+				usage := AccountUsage{ID: strings.TrimSpace(attempt.AccountID), Email: strings.TrimSpace(attempt.AccountEmail), AvailableQuota: previousQuotas[key]}
+				task.UsedAccounts = append(task.UsedAccounts, usage)
+			}
+			usage := &task.UsedAccounts[index]
+			usage.Status = strings.TrimSpace(attempt.Status)
+			usage.Attempts++
+			usage.Removed = usage.Removed || attempt.RemovedAccount
+			usage.Error = openaiweb.PublicErrorText(attempt.Error)
 		}
 		if attempt.Status == "failed" {
 			task.FailedAccountCount++
 		}
 	}
-	task.UsedAccountCount = len(used)
+	task.UsedAccountCount = len(task.UsedAccounts)
+}
+
+func accountUsageKey(id, email string) string {
+	if value := strings.TrimSpace(email); value != "" {
+		return "email:" + strings.ToLower(value)
+	}
+	if value := strings.TrimSpace(id); value != "" {
+		return "id:" + value
+	}
+	return ""
+}
+
+func recordAccountUsage(task *Task, identity openaiweb.AccountIdentity, status string) {
+	if task == nil {
+		return
+	}
+	id := strings.TrimSpace(identity.ID)
+	email := strings.TrimSpace(identity.Email)
+	key := accountUsageKey(id, email)
+	if key == "" {
+		return
+	}
+	for index := range task.UsedAccounts {
+		item := &task.UsedAccounts[index]
+		if accountUsageKey(item.ID, item.Email) != key {
+			continue
+		}
+		if item.ID == "" {
+			item.ID = id
+		}
+		if item.Email == "" {
+			item.Email = email
+		}
+		if identity.AvailableQuota != nil {
+			quota := *identity.AvailableQuota
+			item.AvailableQuota = &quota
+		}
+		if status != "" {
+			item.Status = status
+		}
+		return
+	}
+	var availableQuota *int
+	if identity.AvailableQuota != nil {
+		quota := *identity.AvailableQuota
+		availableQuota = &quota
+	}
+	task.UsedAccounts = append(task.UsedAccounts, AccountUsage{ID: id, Email: email, AvailableQuota: availableQuota, Status: status})
 }
 
 func (m *Manager) List(ids []string) []Task {
@@ -952,6 +1036,14 @@ func (m *Manager) copyTask(task *Task) Task {
 		cp.Result = &result
 	}
 	cp.Data = append([]images.Data(nil), task.Data...)
+	cp.UsedAccounts = make([]AccountUsage, len(task.UsedAccounts))
+	copy(cp.UsedAccounts, task.UsedAccounts)
+	for index := range cp.UsedAccounts {
+		if task.UsedAccounts[index].AvailableQuota != nil {
+			quota := *task.UsedAccounts[index].AvailableQuota
+			cp.UsedAccounts[index].AvailableQuota = &quota
+		}
+	}
 	cp.StatusLogs = make([]LogEntry, len(task.StatusLogs))
 	copy(cp.StatusLogs, task.StatusLogs)
 	for i := range cp.StatusLogs {

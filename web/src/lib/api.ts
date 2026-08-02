@@ -332,6 +332,18 @@ export type ImageTask = {
   created_at: string;
   updated_at: string;
   conversation_id?: string;
+  used_account_count?: number;
+  failed_account_count?: number;
+  image_route_attempt_count?: number;
+  used_accounts?: Array<{
+    id?: string;
+    email?: string;
+    available_quota?: number;
+    status?: string;
+    attempts?: number;
+    removed?: boolean;
+    error?: string;
+  }>;
   data?: Array<{ b64_json?: string; url?: string; mime_type?: string; format?: string; revised_prompt?: string }>;
   error?: string;
   error_code?: string;
