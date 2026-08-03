@@ -31,7 +31,7 @@ import { useAuthGuard } from "@/lib/use-auth-guard";
 const DEFAULT_MODEL_OPTIONS = ["gpt-image-2"];
 const SIZE_OPTIONS = ["1024x1024", "1536x1024", "1024x1536"];
 const QUALITY_OPTIONS = ["auto", "low", "medium", "high"];
-const MAX_REFERENCE_FILES = 4;
+const MAX_REFERENCE_FILES = 10;
 
 function newClientTaskID() {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
