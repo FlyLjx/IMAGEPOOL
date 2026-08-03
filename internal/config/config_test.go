@@ -23,10 +23,10 @@ func TestDefaultNormalize(t *testing.T) {
 	if cfg.ImageAccountPrecheckConcurrency != 6 || cfg.ImageAccountPrecheckTimeoutSecs != 75 {
 		t.Fatalf("precheck limits=%d/%.0f", cfg.ImageAccountPrecheckConcurrency, cfg.ImageAccountPrecheckTimeoutSecs)
 	}
-	if cfg.ImagePollTimeoutSecs != 300 {
+	if cfg.ImagePollTimeoutSecs != 600 {
 		t.Fatalf("image poll timeout=%.0f", cfg.ImagePollTimeoutSecs)
 	}
-	if cfg.ImageTaskTimeoutSecs != 330 {
+	if cfg.ImageTaskTimeoutSecs != 630 {
 		t.Fatalf("image task timeout=%.0f", cfg.ImageTaskTimeoutSecs)
 	}
 	if cfg.ImageAccountMaxInflightPerAccount != 1 {
@@ -42,24 +42,24 @@ func TestDefaultNormalize(t *testing.T) {
 
 func TestNormalizeFixesImageWaits(t *testing.T) {
 	cfg := Config{ImagePollTimeoutSecs: 300, ImageTaskTimeoutSecs: 600}.Normalize()
-	if cfg.ImagePollTimeoutSecs != 300 || cfg.ImageTaskTimeoutSecs != 330 {
+	if cfg.ImagePollTimeoutSecs != 600 || cfg.ImageTaskTimeoutSecs != 630 {
 		t.Fatalf("image timeouts=%.0f/%.0f", cfg.ImagePollTimeoutSecs, cfg.ImageTaskTimeoutSecs)
 	}
-	if timeout := (Config{ImageTaskTimeoutSecs: 120}).Normalize().ImageTaskTimeoutSecs; timeout != 330 {
+	if timeout := (Config{ImageTaskTimeoutSecs: 120}).Normalize().ImageTaskTimeoutSecs; timeout != 630 {
 		t.Fatalf("configured image task timeout=%.0f", timeout)
 	}
 }
 
 func TestNormalizeMigratesLegacyImagePollTimeout(t *testing.T) {
 	for _, configured := range []float64{60, 90, 180} {
-		if timeout := (Config{ImagePollTimeoutSecs: configured}).Normalize().ImagePollTimeoutSecs; timeout != 300 {
+		if timeout := (Config{ImagePollTimeoutSecs: configured}).Normalize().ImagePollTimeoutSecs; timeout != 600 {
 			t.Fatalf("configured=%.0f image poll timeout=%.0f", configured, timeout)
 		}
 	}
 }
 
 func TestZeroImageTaskTimeoutMigratesToBoundedDefault(t *testing.T) {
-	if timeout := (Config{ImageTaskTimeoutSecs: 0}).Normalize().ImageTaskTimeoutSecs; timeout != 330 {
+	if timeout := (Config{ImageTaskTimeoutSecs: 0}).Normalize().ImageTaskTimeoutSecs; timeout != 630 {
 		t.Fatalf("image task timeout=%.0f", timeout)
 	}
 }

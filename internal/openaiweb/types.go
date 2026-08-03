@@ -139,7 +139,7 @@ const (
 	// upstream response. Upstream OAuth bodies can contain endpoint and token
 	// details which must never reach API consumers or persisted task history.
 	PublicCredentialInvalidMessage = "上游认证状态异常，系统正在自动恢复"
-	PublicImagePollTimeoutMessage  = "OAI侧出图超出300s，请重新提交任务。"
+	PublicImagePollTimeoutMessage  = "OAI侧出图超出600s（10分钟），请重新提交任务。"
 	PublicUpstreamFailureMessage   = "上游服务请求失败，请稍后重试"
 )
 

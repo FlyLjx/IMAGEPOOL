@@ -113,7 +113,7 @@ func (c *Client) startImageGeneration(ctx context.Context, account accounts.Acco
 
 // startImageGenerationWithinBudget is used after GenerateImage has created a
 // shared generation context. Keeping the wrapper above preserves the same
-// limit for direct callers and tests without creating a second 300-second
+// limit for direct callers and tests without creating a second 600-second
 // window inside an account attempt.
 func (c *Client) startImageGenerationWithinBudget(ctx context.Context, account accounts.Account, prompt, model string, requirements chatRequirements, conduit, turnTraceID, parentMessageID string, refs []uploadMeta) (conversationID string, fileIDs []string, sedimentIDs []string, err error) {
 	return c.startImageGenerationWithinBudgetWithState(ctx, account, prompt, model, requirements, conduit, turnTraceID, parentMessageID, "sent", refs)
@@ -394,7 +394,7 @@ func (c *Client) consumeImageStream(ctx context.Context, body io.ReadCloser, ref
 	defer idleTimer.Stop()
 	streamTimeout := c.pollTimeout
 	if streamTimeout <= 0 {
-		streamTimeout = 300 * time.Second
+		streamTimeout = 600 * time.Second
 	}
 	streamTimer := time.NewTimer(streamTimeout)
 	defer streamTimer.Stop()
@@ -714,7 +714,7 @@ func (c *Client) pollImageResultsWithProgress(ctx context.Context, account accou
 	startedAt := time.Now()
 	pollTimeout := c.pollTimeout
 	if pollTimeout <= 0 {
-		pollTimeout = 300 * time.Second
+		pollTimeout = 600 * time.Second
 	}
 	deadline := startedAt.Add(pollTimeout)
 	pollTimeoutError := func() error {

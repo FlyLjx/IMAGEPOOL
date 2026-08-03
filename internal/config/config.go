@@ -98,10 +98,10 @@ func Default() Config {
 		ChatGPTBaseURL:                      "https://chatgpt.com",
 		UpstreamTransport:                   "standard",
 		ImageWebModelSlug:                   "gpt-5-5",
-		ImagePollTimeoutSecs:                300,
+		ImagePollTimeoutSecs:                600,
 		ImagePollIntervalSecs:               3,
 		ImagePollInitialWaitSecs:            0,
-		ImageTaskTimeoutSecs:                330,
+		ImageTaskTimeoutSecs:                630,
 		ImageSettleSecs:                     2,
 		ImageCapacityBurstParallel:          50,
 		ImageAccountMaxInflightPerAccount:   1,
@@ -309,7 +309,7 @@ func (c Config) Normalize() Config {
 		c.ImagePollInitialWaitSecs = 0
 	}
 	// The request budget must leave room for the bounded preparation phase plus
-	// a full 300-second submitted generation. Older configurations, including
+	// a full 600-second submitted generation. Older configurations, including
 	// zero (unlimited), are all migrated to this fixed end-to-end budget.
 	c.ImageTaskTimeoutSecs = d.ImageTaskTimeoutSecs
 	if c.ImageSettleSecs < 0 {

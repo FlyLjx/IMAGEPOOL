@@ -478,7 +478,7 @@ func (c *Client) imagePreparationBudget() time.Duration {
 func (c *Client) imageGenerationBudget() time.Duration {
 	timeout := c.pollTimeout
 	if timeout <= 0 {
-		return 300 * time.Second
+		return 600 * time.Second
 	}
 	return timeout
 }

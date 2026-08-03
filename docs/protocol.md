@@ -35,7 +35,7 @@ Go 版当前保留 Python 项目的普通 Image-2 反代链路，核心请求顺
 - `no available free image quota`：标记为图片额度耗尽，保留给后续刷新确认。
 - 生图超时、普通 `image generation failed`：不删号，记录失败并切换账号重试。
 - 工具消息返回 `server_timeout`、`interrupted` 等终态：立即切换账号，不再继续盲轮询。
-- 图片 SSE 的响应头、无字节空闲窗口均为 60 秒；同一次已提交生图从流到会话轮询共用 300 秒预算。收到恢复 token 后优先走恢复流，轮询从 3 秒开始并退避到 10 秒。
+- 图片 SSE 的响应头、无字节空闲窗口均为 60 秒；同一次已提交生图从流到会话轮询共用 600 秒预算。收到恢复 token 后优先走恢复流，轮询从 3 秒开始并退避到 10 秒。
 - 客户端重复 `client_task_id` 不复用任务，每次提交都会创建新任务 ID。
 
 协议测试覆盖：models endpoint、sentinel prepare/finalize、conversation prepare、SSE start、conversation polling、download URL 解析。

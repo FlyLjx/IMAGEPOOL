@@ -205,17 +205,17 @@ export function ConfigCard() {
               label="图片轮询上限"
               value={String(config.image_poll_timeout_secs || "")}
               onChange={setImagePollTimeoutSecs}
-              placeholder="300"
-              help="单位秒，最高 300 秒。图片已提交后会等到该时间再返回超时，不切换账号。"
+              placeholder="600"
+              help="单位秒，最高 600 秒（10 分钟）。图片已提交后会等到该时间再返回超时，不切换账号。"
             />
           </Col>
           <Col xs={24} md={12} xl={6}>
             <NumberInput
               label="生图总预算"
-              value="330"
+              value="630"
               onChange={() => {}}
-              placeholder="330"
-              help="固定 330 秒；包含准备阶段和已提交后的 300 秒生成等待，旧配置会自动迁移。"
+              placeholder="630"
+              help="固定 630 秒；包含准备阶段和已提交后的 600 秒（10 分钟）生成等待，旧配置会自动迁移。"
               disabled
             />
           </Col>
