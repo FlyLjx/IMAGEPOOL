@@ -33,6 +33,14 @@ type Config struct {
 	ImageTaskTimeoutSecs                float64      `json:"image_task_timeout_secs"`
 	ImageSettleSecs                     float64      `json:"image_settle_secs"`
 	ImageCapacityBurstParallel          int          `json:"image_capacity_burst_parallel"`
+	ImagePoolAutoRegisterEnabled        bool         `json:"image_pool_auto_register_enabled"`
+	ImagePoolMinUsableAccounts          int          `json:"image_pool_min_usable_accounts"`
+	ImagePoolIdleFloorAccounts          int          `json:"image_pool_idle_floor_accounts"`
+	ImagePoolMaxUsableAccounts          int          `json:"image_pool_max_usable_accounts"`
+	ImagePoolQuietAfterMinutes          int          `json:"image_pool_quiet_after_minutes"`
+	ImagePoolRegisterCooldownMinutes    int          `json:"image_pool_register_cooldown_minutes"`
+	ImagePoolMaxRegisterPerCycle        int          `json:"image_pool_max_register_per_cycle"`
+	ImagePoolAutoRegisterIntervalSecs   int          `json:"image_pool_auto_register_interval_secs"`
 	ImageGlobalMaxInflight              int          `json:"image_global_max_inflight"`
 	ImagePrepareParallel                int          `json:"image_prepare_parallel"`
 	ImageSubmitParallel                 int          `json:"image_submit_parallel"`
@@ -112,6 +120,14 @@ func Default() Config {
 		ImageTaskTimeoutSecs:                630,
 		ImageSettleSecs:                     2,
 		ImageCapacityBurstParallel:          50,
+		ImagePoolAutoRegisterEnabled:        false,
+		ImagePoolMinUsableAccounts:          0,
+		ImagePoolIdleFloorAccounts:          0,
+		ImagePoolMaxUsableAccounts:          200,
+		ImagePoolQuietAfterMinutes:          15,
+		ImagePoolRegisterCooldownMinutes:    1,
+		ImagePoolMaxRegisterPerCycle:        10,
+		ImagePoolAutoRegisterIntervalSecs:   30,
 		ImageGlobalMaxInflight:              120,
 		ImagePrepareParallel:                20,
 		ImageSubmitParallel:                 20,
@@ -336,6 +352,51 @@ func (c Config) Normalize() Config {
 	}
 	if c.ImageCapacityBurstParallel > 10000 {
 		c.ImageCapacityBurstParallel = 10000
+	}
+	if c.ImagePoolMinUsableAccounts < 0 {
+		c.ImagePoolMinUsableAccounts = 0
+	}
+	if c.ImagePoolIdleFloorAccounts < 0 {
+		c.ImagePoolIdleFloorAccounts = 0
+	}
+	if c.ImagePoolMaxUsableAccounts <= 0 {
+		c.ImagePoolMaxUsableAccounts = d.ImagePoolMaxUsableAccounts
+	}
+	if c.ImagePoolMaxUsableAccounts > 10000 {
+		c.ImagePoolMaxUsableAccounts = 10000
+	}
+	if c.ImagePoolMinUsableAccounts > c.ImagePoolMaxUsableAccounts {
+		c.ImagePoolMinUsableAccounts = c.ImagePoolMaxUsableAccounts
+	}
+	if c.ImagePoolIdleFloorAccounts > c.ImagePoolMaxUsableAccounts {
+		c.ImagePoolIdleFloorAccounts = c.ImagePoolMaxUsableAccounts
+	}
+	if c.ImagePoolQuietAfterMinutes <= 0 {
+		c.ImagePoolQuietAfterMinutes = d.ImagePoolQuietAfterMinutes
+	}
+	if c.ImagePoolQuietAfterMinutes > 1440 {
+		c.ImagePoolQuietAfterMinutes = 1440
+	}
+	if c.ImagePoolRegisterCooldownMinutes <= 0 {
+		c.ImagePoolRegisterCooldownMinutes = d.ImagePoolRegisterCooldownMinutes
+	}
+	if c.ImagePoolRegisterCooldownMinutes > 1440 {
+		c.ImagePoolRegisterCooldownMinutes = 1440
+	}
+	if c.ImagePoolMaxRegisterPerCycle <= 0 {
+		c.ImagePoolMaxRegisterPerCycle = d.ImagePoolMaxRegisterPerCycle
+	}
+	if c.ImagePoolMaxRegisterPerCycle > 1000 {
+		c.ImagePoolMaxRegisterPerCycle = 1000
+	}
+	if c.ImagePoolAutoRegisterIntervalSecs <= 0 {
+		c.ImagePoolAutoRegisterIntervalSecs = d.ImagePoolAutoRegisterIntervalSecs
+	}
+	if c.ImagePoolAutoRegisterIntervalSecs < 5 {
+		c.ImagePoolAutoRegisterIntervalSecs = 5
+	}
+	if c.ImagePoolAutoRegisterIntervalSecs > 3600 {
+		c.ImagePoolAutoRegisterIntervalSecs = 3600
 	}
 	if c.ImageGlobalMaxInflight <= 0 {
 		c.ImageGlobalMaxInflight = d.ImageGlobalMaxInflight

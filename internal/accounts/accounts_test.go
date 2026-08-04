@@ -951,6 +951,41 @@ func TestImageCooldownSkipsAndPersists(t *testing.T) {
 	}
 }
 
+func TestReferenceUploadCooldownOnlyBlocksReferenceRequests(t *testing.T) {
+	now := time.Date(2026, time.July, 14, 3, 0, 0, 0, time.UTC)
+	store := NewStore([]Account{
+		{Email: "reference-limited@example.com", AccessToken: "reference-limited", CreatedAt: 2, Extra: map[string]any{}},
+		{Email: "fallback@example.com", AccessToken: "fallback", CreatedAt: 1, Extra: map[string]any{}},
+	}, "")
+	store.now = func() time.Time { return now }
+
+	if err := store.MarkImageReferenceUploadRateLimited("reference-limited", 0, errors.New("reference upload 429")); err != nil {
+		t.Fatal(err)
+	}
+	limited, found := store.Get("reference-limited")
+	if !found {
+		t.Fatal("reference-limited account was removed")
+	}
+	if got := imageReferenceUploadCooldownUntil(limited); !got.Equal(now.Add(defaultImageReferenceUploadCooldown)) {
+		t.Fatalf("reference cooldown=%v", got)
+	}
+
+	plain, err := store.SelectForImage(nil)
+	if err != nil || plain.AccessToken != "reference-limited" {
+		t.Fatalf("plain image selection=%#v err=%v", plain, err)
+	}
+	reference, err := store.SelectForImageWithRequirements(nil, ImageDispatchRequirements{NeedsReferenceUpload: true})
+	if err != nil || reference.AccessToken != "fallback" {
+		t.Fatalf("reference image selection=%#v err=%v", reference, err)
+	}
+
+	now = now.Add(defaultImageReferenceUploadCooldown + time.Second)
+	reference, err = store.SelectForImageWithRequirements(nil, ImageDispatchRequirements{NeedsReferenceUpload: true})
+	if err != nil || reference.AccessToken != "reference-limited" {
+		t.Fatalf("expired reference cooldown selection=%#v err=%v", reference, err)
+	}
+}
+
 func TestImageCooldownBackoffAndSuccessReset(t *testing.T) {
 	now := time.Date(2026, time.July, 14, 2, 0, 0, 0, time.UTC)
 	store := NewStore([]Account{{AccessToken: "token", Extra: map[string]any{}}}, "")

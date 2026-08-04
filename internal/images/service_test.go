@@ -219,6 +219,31 @@ func TestCheckAccountRefreshSkipsImageSpecificHandshake(t *testing.T) {
 	}
 }
 
+func TestGenerateUsesReferenceCapableAccountOnlyWhenReferencesArePresent(t *testing.T) {
+	store := accounts.NewStore([]accounts.Account{
+		{Email: "reference-limited", AccessToken: "reference-limited", CreatedAt: 2, Extra: map[string]any{}},
+		{Email: "fallback", AccessToken: "fallback", CreatedAt: 1, Extra: map[string]any{}},
+	}, "")
+	store.SetImageMaxInflightPerAccount(1)
+	if err := store.MarkImageReferenceUploadRateLimited("reference-limited", 0, errors.New("reference upload 429")); err != nil {
+		t.Fatal(err)
+	}
+
+	backend := &fakeBackend{}
+	service := NewService(config.Default(), store, backend)
+	withReference, err := service.Generate(context.Background(), Request{
+		Prompt:     "edit",
+		References: []openaiweb.ImageInput{{Data: []byte("reference")}},
+	})
+	if err != nil || withReference.AccountEmail != "fallback" {
+		t.Fatalf("reference response=%#v err=%v", withReference, err)
+	}
+	plain, err := service.Generate(context.Background(), Request{Prompt: "draw"})
+	if err != nil || plain.AccountEmail != "reference-limited" {
+		t.Fatalf("plain response=%#v err=%v", plain, err)
+	}
+}
+
 func TestGenerateRemovesInvalidTokenAndRetriesNextAccount(t *testing.T) {
 	store := accounts.NewStore([]accounts.Account{{Email: "old", AccessToken: "old", CreatedAt: 1}, {Email: "new", AccessToken: "new", CreatedAt: 2}}, "")
 	fb := &fakeBackend{errs: []error{errors.New("token_revoked")}}

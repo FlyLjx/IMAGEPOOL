@@ -54,6 +54,14 @@ function normalizeConfig(config: SettingsConfig): SettingsConfig {
     image_poll_timeout_secs: Math.min(600, Number(config.image_poll_timeout_secs) || 600),
     image_task_timeout_secs: 630,
     image_capacity_burst_parallel: Math.max(1, Number(config.image_capacity_burst_parallel) || 50),
+    image_pool_auto_register_enabled: Boolean(config.image_pool_auto_register_enabled),
+    image_pool_min_usable_accounts: Math.max(0, Number(config.image_pool_min_usable_accounts) || 0),
+    image_pool_idle_floor_accounts: Math.max(0, Number(config.image_pool_idle_floor_accounts) || 0),
+    image_pool_max_usable_accounts: Math.min(10000, Math.max(1, Number(config.image_pool_max_usable_accounts) || 200)),
+    image_pool_quiet_after_minutes: Math.min(1440, Math.max(1, Number(config.image_pool_quiet_after_minutes) || 15)),
+    image_pool_register_cooldown_minutes: Math.min(1440, Math.max(1, Number(config.image_pool_register_cooldown_minutes) || 1)),
+    image_pool_max_register_per_cycle: Math.min(1000, Math.max(1, Number(config.image_pool_max_register_per_cycle) || 10)),
+    image_pool_auto_register_interval_secs: Math.min(3600, Math.max(5, Number(config.image_pool_auto_register_interval_secs) || 30)),
     image_global_max_inflight: Math.min(10000, Math.max(1, Number(config.image_global_max_inflight) || 120)),
     image_prepare_parallel: Math.min(1000, Math.max(1, Number(config.image_prepare_parallel) || 20)),
     image_submit_parallel: Math.min(1000, Math.max(1, Number(config.image_submit_parallel) || 20)),
@@ -143,6 +151,14 @@ type SettingsStore = {
   setImageRetentionDays: (value: string) => void;
   setImagePollTimeoutSecs: (value: string) => void;
   setImageCapacityBurstParallel: (value: string) => void;
+  setImagePoolAutoRegisterEnabled: (value: boolean) => void;
+  setImagePoolMinUsableAccounts: (value: string) => void;
+  setImagePoolIdleFloorAccounts: (value: string) => void;
+  setImagePoolMaxUsableAccounts: (value: string) => void;
+  setImagePoolQuietAfterMinutes: (value: string) => void;
+  setImagePoolRegisterCooldownMinutes: (value: string) => void;
+  setImagePoolMaxRegisterPerCycle: (value: string) => void;
+  setImagePoolAutoRegisterIntervalSecs: (value: string) => void;
   setImageGlobalMaxInflight: (value: string) => void;
   setImagePrepareParallel: (value: string) => void;
   setImageSubmitParallel: (value: string) => void;
@@ -233,6 +249,14 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         image_poll_timeout_secs: Math.min(600, Math.max(15, Number(config.image_poll_timeout_secs) || 600)),
         image_task_timeout_secs: 630,
         image_capacity_burst_parallel: Math.min(10000, Math.max(1, Number(config.image_capacity_burst_parallel) || 50)),
+        image_pool_auto_register_enabled: Boolean(config.image_pool_auto_register_enabled),
+        image_pool_min_usable_accounts: Math.max(0, Number(config.image_pool_min_usable_accounts) || 0),
+        image_pool_idle_floor_accounts: Math.max(0, Number(config.image_pool_idle_floor_accounts) || 0),
+        image_pool_max_usable_accounts: Math.min(10000, Math.max(1, Number(config.image_pool_max_usable_accounts) || 200)),
+        image_pool_quiet_after_minutes: Math.min(1440, Math.max(1, Number(config.image_pool_quiet_after_minutes) || 15)),
+        image_pool_register_cooldown_minutes: Math.min(1440, Math.max(1, Number(config.image_pool_register_cooldown_minutes) || 1)),
+        image_pool_max_register_per_cycle: Math.min(1000, Math.max(1, Number(config.image_pool_max_register_per_cycle) || 10)),
+        image_pool_auto_register_interval_secs: Math.min(3600, Math.max(5, Number(config.image_pool_auto_register_interval_secs) || 30)),
         image_global_max_inflight: Math.min(10000, Math.max(1, Number(config.image_global_max_inflight) || 120)),
         image_prepare_parallel: Math.min(1000, Math.max(1, Number(config.image_prepare_parallel) || 20)),
         image_submit_parallel: Math.min(1000, Math.max(1, Number(config.image_submit_parallel) || 20)),
@@ -358,6 +382,38 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
 
   setImageCapacityBurstParallel: (value) => {
     set((state) => (state.config ? { config: { ...state.config, image_capacity_burst_parallel: value } } : {}));
+  },
+
+  setImagePoolAutoRegisterEnabled: (value) => {
+    set((state) => (state.config ? { config: { ...state.config, image_pool_auto_register_enabled: value } } : {}));
+  },
+
+  setImagePoolMinUsableAccounts: (value) => {
+    set((state) => (state.config ? { config: { ...state.config, image_pool_min_usable_accounts: value } } : {}));
+  },
+
+  setImagePoolIdleFloorAccounts: (value) => {
+    set((state) => (state.config ? { config: { ...state.config, image_pool_idle_floor_accounts: value } } : {}));
+  },
+
+  setImagePoolMaxUsableAccounts: (value) => {
+    set((state) => (state.config ? { config: { ...state.config, image_pool_max_usable_accounts: value } } : {}));
+  },
+
+  setImagePoolQuietAfterMinutes: (value) => {
+    set((state) => (state.config ? { config: { ...state.config, image_pool_quiet_after_minutes: value } } : {}));
+  },
+
+  setImagePoolRegisterCooldownMinutes: (value) => {
+    set((state) => (state.config ? { config: { ...state.config, image_pool_register_cooldown_minutes: value } } : {}));
+  },
+
+  setImagePoolMaxRegisterPerCycle: (value) => {
+    set((state) => (state.config ? { config: { ...state.config, image_pool_max_register_per_cycle: value } } : {}));
+  },
+
+  setImagePoolAutoRegisterIntervalSecs: (value) => {
+    set((state) => (state.config ? { config: { ...state.config, image_pool_auto_register_interval_secs: value } } : {}));
   },
 
   setImageGlobalMaxInflight: (value) => {

@@ -73,6 +73,19 @@ func TestRetryableImageErrorIncludesTransientUpstreamStatuses(t *testing.T) {
 	}
 }
 
+func TestImageReferenceUploadRateLimitClassification(t *testing.T) {
+	raw := &UpstreamError{Path: "/backend-api/files", StatusCode: 429, Body: "reference upload quota"}
+	if !IsImageReferenceUploadRateLimited(&imageUploadStageError{Stage: "create", Err: raw}) {
+		t.Fatal("reference upload 429 must be capability-scoped")
+	}
+	if !IsImageReferenceUploadRateLimited(fmt.Errorf("wrapped: %w", &imageUploadStageError{Stage: "confirm", Err: raw})) {
+		t.Fatal("wrapped reference upload 429 must remain detectable")
+	}
+	if IsImageReferenceUploadRateLimited(raw) {
+		t.Fatal("generation or direct 429 must not be classified as reference upload 429")
+	}
+}
+
 func TestPublicErrorProjectionRedactsCredentialDiagnostics(t *testing.T) {
 	raw := &UpstreamError{
 		Path:       "/backend-api/files",

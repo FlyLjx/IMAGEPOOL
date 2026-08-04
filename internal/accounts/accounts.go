@@ -52,7 +52,20 @@ const (
 	imageCooldownFailuresKey  = "image_cooldown_failures"
 	imageCooldownLastErrorKey = "image_cooldown_last_error"
 	imageCooldownLastAtKey    = "image_cooldown_last_at"
+
+	imageReferenceUploadCooldownUntilKey     = "image_reference_upload_cooldown_until"
+	imageReferenceUploadCooldownReasonKey    = "image_reference_upload_cooldown_reason"
+	imageReferenceUploadCooldownLastErrorKey = "image_reference_upload_cooldown_last_error"
+	imageReferenceUploadCooldownLastAtKey    = "image_reference_upload_cooldown_last_at"
+	defaultImageReferenceUploadCooldown      = 24 * time.Hour
 )
+
+// ImageDispatchRequirements describes capabilities required by one image
+// request. A reference-image request needs the account's file-upload path;
+// plain text-to-image requests do not.
+type ImageDispatchRequirements struct {
+	NeedsReferenceUpload bool
+}
 
 const (
 	DefaultBrowserUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36"
@@ -315,6 +328,7 @@ type ImageDispatchStats struct {
 	IdleSlots                  int        `json:"idle_slots"`
 	LeasedSlots                int        `json:"leased_slots"`
 	Cooling                    int        `json:"cooling"`
+	ReferenceUploadCooling     int        `json:"reference_upload_cooling"`
 	Limited                    int        `json:"limited"`
 	Invalid                    int        `json:"invalid"`
 	Recovering                 int        `json:"recovering"`
@@ -577,6 +591,9 @@ func (s *Store) ImageDispatchStats() ImageDispatchStats {
 			continue
 		}
 		stats.Usable++
+		if imageReferenceUploadCooldownUntil(account).After(now) {
+			stats.ReferenceUploadCooling++
+		}
 		if account.ImageQuotaUnknown {
 			stats.UnknownQuotaUsable++
 		} else {
@@ -975,9 +992,16 @@ func applySuccessfulAccountRefresh(account *Account, check AccountCheckResult, n
 }
 
 func (s *Store) SelectForImage(exclude map[string]bool) (Account, error) {
+	return s.SelectForImageWithRequirements(exclude, ImageDispatchRequirements{})
+}
+
+// SelectForImageWithRequirements selects an account that can satisfy the
+// request's capabilities. Reference-upload cooldowns only affect requests
+// that actually contain reference images.
+func (s *Store) SelectForImageWithRequirements(exclude map[string]bool, requirements ImageDispatchRequirements) (Account, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	account, ok := s.selectForImageLocked(exclude, false)
+	account, ok := s.selectForImageLocked(exclude, false, requirements)
 	if !ok {
 		return Account{}, ErrNoAvailableAccount
 	}
@@ -988,18 +1012,24 @@ func (s *Store) SelectForImage(exclude map[string]bool) (Account, error) {
 // the instant of the call. The separate false result lets a dispatcher wait on
 // another resource without holding an account lease.
 func (s *Store) TryAcquireForImage(exclude map[string]bool) (Account, bool, error) {
+	return s.TryAcquireForImageWithRequirements(exclude, ImageDispatchRequirements{})
+}
+
+// TryAcquireForImageWithRequirements reserves an eligible account only when
+// a slot is free at the instant of the call.
+func (s *Store) TryAcquireForImageWithRequirements(exclude map[string]bool, requirements ImageDispatchRequirements) (Account, bool, error) {
 	if s == nil {
 		return Account{}, false, ErrNoAvailableAccount
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	account, available := s.selectForImageLocked(exclude, true)
+	account, available := s.selectForImageLocked(exclude, true, requirements)
 	if available {
 		s.imageLeases[account.AccessToken]++
 		return cloneAccount(account), true, nil
 	}
-	_, eligible := s.selectForImageLocked(exclude, false)
-	_, cooling := s.earliestImageCooldownLocked(exclude)
+	_, eligible := s.selectForImageLocked(exclude, false, requirements)
+	_, cooling := s.earliestImageCooldownLocked(exclude, requirements)
 	if !eligible && !cooling {
 		return Account{}, false, ErrNoAvailableAccount
 	}
@@ -1010,6 +1040,12 @@ func (s *Store) TryAcquireForImage(exclude map[string]bool) (Account, bool, erro
 // pool change. It reserves no account and is intended for coordinated
 // dispatchers that must acquire several independent resources.
 func (s *Store) WaitForImageAvailability(ctx context.Context, exclude map[string]bool) error {
+	return s.WaitForImageAvailabilityWithRequirements(ctx, exclude, ImageDispatchRequirements{})
+}
+
+// WaitForImageAvailabilityWithRequirements waits for an account slot, a
+// matching capability cooldown expiry, or a pool change.
+func (s *Store) WaitForImageAvailabilityWithRequirements(ctx context.Context, exclude map[string]bool, requirements ImageDispatchRequirements) error {
 	if s == nil {
 		return ErrNoAvailableAccount
 	}
@@ -1018,13 +1054,13 @@ func (s *Store) WaitForImageAvailability(ctx context.Context, exclude map[string
 	}
 	for {
 		s.mu.Lock()
-		_, available := s.selectForImageLocked(exclude, true)
+		_, available := s.selectForImageLocked(exclude, true, requirements)
 		if available {
 			s.mu.Unlock()
 			return nil
 		}
-		_, eligible := s.selectForImageLocked(exclude, false)
-		cooldownUntil, cooling := s.earliestImageCooldownLocked(exclude)
+		_, eligible := s.selectForImageLocked(exclude, false, requirements)
+		cooldownUntil, cooling := s.earliestImageCooldownLocked(exclude, requirements)
 		changed := s.imageLeaseChanged
 		s.mu.Unlock()
 		if !eligible && !cooling {
@@ -1040,6 +1076,12 @@ func (s *Store) WaitForImageAvailability(ctx context.Context, exclude map[string
 // otherwise-eligible accounts are occupied, it waits for a release so callers
 // can remain in the task queue without starting a second request on a token.
 func (s *Store) AcquireForImage(ctx context.Context, exclude map[string]bool, onWait func()) (Account, error) {
+	return s.AcquireForImageWithRequirements(ctx, exclude, ImageDispatchRequirements{}, onWait)
+}
+
+// AcquireForImageWithRequirements reserves one account for an image request
+// while honoring capability-specific cooldowns.
+func (s *Store) AcquireForImageWithRequirements(ctx context.Context, exclude map[string]bool, requirements ImageDispatchRequirements, onWait func()) (Account, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -1055,7 +1097,7 @@ func (s *Store) AcquireForImage(ctx context.Context, exclude map[string]bool, on
 			waiter = s.enqueueImageWaiterLocked()
 		}
 		if waiter == nil || s.imageWaiters[0] == waiter {
-			account, available := s.selectForImageLocked(exclude, true)
+			account, available := s.selectForImageLocked(exclude, true, requirements)
 			if available {
 				if waiter != nil {
 					s.removeImageWaiterLocked(waiter)
@@ -1064,8 +1106,8 @@ func (s *Store) AcquireForImage(ctx context.Context, exclude map[string]bool, on
 				s.mu.Unlock()
 				return cloneAccount(account), nil
 			}
-			_, eligible := s.selectForImageLocked(exclude, false)
-			cooldownUntil, cooling := s.earliestImageCooldownLocked(exclude)
+			_, eligible := s.selectForImageLocked(exclude, false, requirements)
+			cooldownUntil, cooling := s.earliestImageCooldownLocked(exclude, requirements)
 			if !eligible && !cooling {
 				if waiter != nil {
 					s.removeImageWaiterLocked(waiter)
@@ -1110,6 +1152,12 @@ func (s *Store) AcquireForImage(ctx context.Context, exclude map[string]bool, on
 // account image-test endpoint so it follows the same one-request-per-account
 // rule as the normal dispatcher.
 func (s *Store) AcquireAccountForImage(ctx context.Context, token string, onWait func()) (Account, error) {
+	return s.AcquireAccountForImageWithRequirements(ctx, token, ImageDispatchRequirements{}, onWait)
+}
+
+// AcquireAccountForImageWithRequirements reserves a specific account while
+// applying the same capability checks as the normal image dispatcher.
+func (s *Store) AcquireAccountForImageWithRequirements(ctx context.Context, token string, requirements ImageDispatchRequirements, onWait func()) (Account, error) {
 	token = strings.TrimSpace(token)
 	if token == "" {
 		return Account{}, ErrAccountNotFound
@@ -1130,7 +1178,7 @@ func (s *Store) AcquireAccountForImage(ctx context.Context, token string, onWait
 			s.mu.Unlock()
 			return Account{}, ErrAccountNotFound
 		}
-		if !usable(account) || isImageCooling(account, s.now()) {
+		if !usable(account) || isImageDispatchBlocked(account, requirements, s.now()) {
 			s.mu.Unlock()
 			return Account{}, ErrNoAvailableAccount
 		}
@@ -1230,7 +1278,7 @@ func (s *Store) wakeImageWaiterLocked() {
 	waiter.notified = true
 }
 
-func (s *Store) selectForImageLocked(exclude map[string]bool, skipOccupied bool) (Account, bool) {
+func (s *Store) selectForImageLocked(exclude map[string]bool, skipOccupied bool, requirements ImageDispatchRequirements) (Account, bool) {
 	now := s.now()
 	var selected Account
 	selectedLeases := 0
@@ -1240,7 +1288,7 @@ func (s *Store) selectForImageLocked(exclude map[string]bool, skipOccupied bool)
 		if !usable(a) {
 			continue
 		}
-		if isImageCooling(a, now) {
+		if isImageDispatchBlocked(a, requirements, now) {
 			continue
 		}
 		if exclude != nil && exclude[a.AccessToken] {
@@ -1282,14 +1330,14 @@ func imageAccountPreferred(left, right Account) bool {
 	return left.Email > right.Email
 }
 
-func (s *Store) earliestImageCooldownLocked(exclude map[string]bool) (time.Time, bool) {
+func (s *Store) earliestImageCooldownLocked(exclude map[string]bool, requirements ImageDispatchRequirements) (time.Time, bool) {
 	now := s.now()
 	var earliest time.Time
 	for _, account := range s.accounts {
 		if !usable(account) || (exclude != nil && exclude[account.AccessToken]) {
 			continue
 		}
-		until := imageCooldownUntil(account)
+		until := imageDispatchCooldownUntil(account, requirements)
 		if !until.After(now) {
 			continue
 		}
@@ -1499,6 +1547,31 @@ func (s *Store) MarkImageRateLimited(token string, retryAfter time.Duration, err
 	return s.markImageCooldown(token, ImageCooldownRateLimited, retryAfter, err)
 }
 
+// MarkImageReferenceUploadRateLimited quarantines only the reference-image
+// upload capability. The account remains eligible for plain text-to-image
+// requests while this cooldown is active.
+func (s *Store) MarkImageReferenceUploadRateLimited(token string, retryAfter time.Duration, err error) error {
+	return s.updateByToken(token, func(a *Account) {
+		now := s.now()
+		if a.Extra == nil {
+			a.Extra = map[string]any{}
+		}
+		cooldown := defaultImageReferenceUploadCooldown
+		if retryAfter > cooldown {
+			cooldown = retryAfter
+		}
+		until := now.Add(cooldown)
+		a.LastUsedAt = now.Unix()
+		a.LastError = compactImageCooldownError(err)
+		a.ImageFailures++
+		a.Extra["last_used_at"] = now.In(time.Local).Format(time.RFC3339)
+		a.Extra[imageReferenceUploadCooldownUntilKey] = until.UTC().Format(time.RFC3339Nano)
+		a.Extra[imageReferenceUploadCooldownReasonKey] = "reference_upload_rate_limited"
+		a.Extra[imageReferenceUploadCooldownLastErrorKey] = a.LastError
+		a.Extra[imageReferenceUploadCooldownLastAtKey] = now.UTC().Format(time.RFC3339Nano)
+	})
+}
+
 // MarkImageUpstreamFailure temporarily backs off an account after a retryable
 // upstream 5xx response. It does not change the account's persistent status.
 func (s *Store) MarkImageUpstreamFailure(token string, err error) error {
@@ -1586,10 +1659,18 @@ func isImageCooling(account Account, now time.Time) bool {
 }
 
 func imageCooldownUntil(account Account) time.Time {
-	if account.Extra == nil {
+	return cooldownUntilFromExtra(account.Extra, imageCooldownUntilKey)
+}
+
+func imageReferenceUploadCooldownUntil(account Account) time.Time {
+	return cooldownUntilFromExtra(account.Extra, imageReferenceUploadCooldownUntilKey)
+}
+
+func cooldownUntilFromExtra(extra map[string]any, key string) time.Time {
+	if extra == nil {
 		return time.Time{}
 	}
-	value, ok := account.Extra[imageCooldownUntilKey]
+	value, ok := extra[key]
 	if !ok || value == nil {
 		return time.Time{}
 	}
@@ -1616,6 +1697,23 @@ func imageCooldownUntil(account Account) time.Time {
 		return time.Unix(seconds, 0)
 	}
 	return time.Time{}
+}
+
+func isImageDispatchBlocked(account Account, requirements ImageDispatchRequirements, now time.Time) bool {
+	if isImageCooling(account, now) {
+		return true
+	}
+	return requirements.NeedsReferenceUpload && imageReferenceUploadCooldownUntil(account).After(now)
+}
+
+func imageDispatchCooldownUntil(account Account, requirements ImageDispatchRequirements) time.Time {
+	until := imageCooldownUntil(account)
+	if requirements.NeedsReferenceUpload {
+		if referenceUntil := imageReferenceUploadCooldownUntil(account); referenceUntil.After(until) {
+			until = referenceUntil
+		}
+	}
+	return until
 }
 
 func clearImageCooldown(extra map[string]any) {

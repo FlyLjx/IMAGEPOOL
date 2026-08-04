@@ -346,6 +346,8 @@ function ImagePoolConcurrency({ capacity }: { capacity: ImagePoolCapacity | null
   ] as const;
   const globalPercent = limiterPercent(concurrency.global);
   const taskPressure = capacity.tasks.queued + capacity.tasks.running;
+  const estimate = capacity.estimate;
+  const registration = capacity.registration;
   return (
     <Card
       title={
@@ -387,6 +389,21 @@ function ImagePoolConcurrency({ capacity }: { capacity: ImagePoolCapacity | null
             </div>
           ))}
         </div>
+      </div>
+      <div className="mt-4 rounded-lg border border-slate-200 bg-slate-50/70 px-4 py-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="text-sm font-medium text-slate-700">任务驱动号池预测</div>
+          <div className="font-mono text-xs text-slate-500">
+            当前 {numberText(estimate.current_effective_accounts)} · 需求 {numberText(estimate.recommended_required_usable_accounts)} · 建议补 {numberText(estimate.recommended_add_usable_accounts)}
+          </div>
+        </div>
+        <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500">
+          <span>排队/运行 {numberText(capacity.tasks.pending)}</span>
+          <span>预估注册尝试 {numberText(estimate.recommended_register_accounts)}</span>
+          {registration ? <span>自动补号：{registration.enabled ? registration.status : "关闭"}</span> : null}
+          {registration?.inflight_registrations ? <span>注册中 {numberText(registration.inflight_registrations)}</span> : null}
+        </div>
+        {registration?.reason ? <div className="mt-2 text-xs text-slate-400">{registration.reason}</div> : null}
       </div>
     </Card>
   );

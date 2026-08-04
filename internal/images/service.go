@@ -329,7 +329,7 @@ func (s *Service) GenerateWithAccount(ctx context.Context, token string, req Req
 	if !ok {
 		return Response{}, fmt.Errorf("account not found")
 	}
-	account, err := s.store.AcquireAccountForImage(ctx, token, func() {
+	account, err := s.store.AcquireAccountForImageWithRequirements(ctx, token, imageDispatchRequirements(req), func() {
 		reportAccountWait(req, account)
 	})
 	if err != nil {
@@ -426,7 +426,7 @@ func (s *Service) acquireGlobal(ctx context.Context) (func(), error) {
 
 // acquireImageDispatch coordinates the global generation budget and account
 // lease without holding either one while the other resource is unavailable.
-func (s *Service) acquireImageDispatch(ctx context.Context, exclude map[string]bool, onWait, onReady func()) (accounts.Account, func(), error) {
+func (s *Service) acquireImageDispatch(ctx context.Context, exclude map[string]bool, requirements accounts.ImageDispatchRequirements, onWait, onReady func()) (accounts.Account, func(), error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -454,7 +454,7 @@ func (s *Service) acquireImageDispatch(ctx context.Context, exclude map[string]b
 			waitReported = false
 			continue
 		}
-		account, acquired, err := s.store.TryAcquireForImage(exclude)
+		account, acquired, err := s.store.TryAcquireForImageWithRequirements(exclude, requirements)
 		if err != nil {
 			releaseGlobal()
 			return accounts.Account{}, nil, err
@@ -464,7 +464,7 @@ func (s *Service) acquireImageDispatch(ctx context.Context, exclude map[string]b
 		}
 		releaseGlobal()
 		reportWait()
-		if err := s.store.WaitForImageAvailability(ctx, exclude); err != nil {
+		if err := s.store.WaitForImageAvailabilityWithRequirements(ctx, exclude, requirements); err != nil {
 			return accounts.Account{}, nil, err
 		}
 		if onReady != nil {
@@ -472,6 +472,10 @@ func (s *Service) acquireImageDispatch(ctx context.Context, exclude map[string]b
 		}
 		waitReported = false
 	}
+}
+
+func imageDispatchRequirements(req Request) accounts.ImageDispatchRequirements {
+	return accounts.ImageDispatchRequirements{NeedsReferenceUpload: len(req.References) > 0}
 }
 
 func (s *Service) generateOne(ctx context.Context, req Request) (openaiweb.ImageResult, error) {
@@ -500,7 +504,7 @@ func (s *Service) generateOne(ctx context.Context, req Request) (openaiweb.Image
 		if taskCtx != nil {
 			acquireCtx = taskCtx
 		}
-		account, releaseGlobal, err := s.acquireImageDispatch(acquireCtx, exclude, func() {
+		account, releaseGlobal, err := s.acquireImageDispatch(acquireCtx, exclude, imageDispatchRequirements(req), func() {
 			reportAccountWait(req, accounts.Account{})
 			if req.DispatchState != nil {
 				req.DispatchState("waiting")
@@ -680,6 +684,15 @@ func (s *Service) recordImageFailure(token string, err error) {
 	// A full Turnstile VM pool is process-wide congestion rather than a
 	// failure of this account. Do not cool or mark every waiting account.
 	if errors.Is(err, openaiweb.ErrTurnstileVMCapacity) {
+		return
+	}
+	if openaiweb.IsImageReferenceUploadRateLimited(err) {
+		retryAfter := time.Duration(0)
+		var upstream *openaiweb.UpstreamError
+		if errors.As(err, &upstream) && upstream.RetryAfter > 0 {
+			retryAfter = time.Duration(upstream.RetryAfter) * time.Second
+		}
+		_ = s.store.MarkImageReferenceUploadRateLimited(token, retryAfter, err)
 		return
 	}
 	if openaiweb.IsAuthenticationError(err) || openaiweb.IsNoFreeImageQuotaError(err) {

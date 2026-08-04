@@ -78,14 +78,15 @@ func logStep(ctx context.Context, text, level string) {
 }
 
 type Manager struct {
-	mu       sync.RWMutex
-	path     string
-	state    persistence.Store
-	accounts *accounts.Store
-	worker   Worker
-	cfg      Config
-	cancel   context.CancelFunc
-	running  bool
+	mu        sync.RWMutex
+	path      string
+	state     persistence.Store
+	accounts  *accounts.Store
+	worker    Worker
+	cfg       Config
+	cancel    context.CancelFunc
+	running   bool
+	automatic bool
 }
 
 func Default() Config {
@@ -133,6 +134,18 @@ func (m *Manager) Update(patch map[string]any) Config {
 }
 
 func (m *Manager) Start() Config {
+	return m.start(false)
+}
+
+// StartAutomatic starts a bounded registration batch owned by the image-pool
+// capacity controller. It shares the same worker and persisted configuration
+// as the manual registration UI, while allowing the controller to distinguish
+// an automatic batch from a manually started registration job.
+func (m *Manager) StartAutomatic() Config {
+	return m.start(true)
+}
+
+func (m *Manager) start(automatic bool) Config {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.running {
@@ -144,13 +157,40 @@ func (m *Manager) Start() Config {
 		return clone(m.cfg)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	m.cancel, m.running, m.cfg.Enabled = cancel, true, true
+	m.cancel, m.running, m.automatic, m.cfg.Enabled = cancel, true, automatic, true
 	m.cfg.Stats = Stats{JobID: fmt.Sprintf("register_%d", time.Now().UnixNano()), Threads: m.cfg.Threads, StartedAt: now(), UpdatedAt: now()}
 	m.updateStatsLocked()
-	m.appendLocked(fmt.Sprintf("注册任务启动，模式=%s，线程数=%d", m.cfg.Mode, m.cfg.Threads), "yellow")
+	mode := "手动"
+	if automatic {
+		mode = "自动"
+	}
+	m.appendLocked(fmt.Sprintf("%s注册任务启动，模式=%s，线程数=%d", mode, m.cfg.Mode, m.cfg.Threads), "yellow")
 	m.saveLocked()
 	go m.run(ctx)
 	return clone(m.cfg)
+}
+
+// IsRunning reports whether the registration manager still owns a worker run.
+// Stop marks the configuration disabled immediately, so callers that need to
+// avoid a stop/start race should use this method instead of Config.Enabled.
+func (m *Manager) IsRunning() bool {
+	if m == nil {
+		return false
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.running
+}
+
+// IsAutomatic reports whether the current run was started by the automatic
+// image-pool controller.
+func (m *Manager) IsAutomatic() bool {
+	if m == nil {
+		return false
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.running && m.automatic
 }
 
 func (m *Manager) Stop() Config {
@@ -159,6 +199,7 @@ func (m *Manager) Stop() Config {
 	if m.cancel != nil {
 		m.cancel()
 	}
+	m.automatic = false
 	m.cfg.Enabled = false
 	m.appendLocked("已请求停止注册任务", "yellow")
 	m.saveLocked()
@@ -187,7 +228,7 @@ func (m *Manager) run(ctx context.Context) {
 	running, submitted := 0, 0
 	for {
 		cfg := m.Get()
-		if ctx.Err() != nil || m.targetReached(cfg, submitted) {
+		if ctx.Err() != nil || m.targetReached(cfg, submitted, running) {
 			if running == 0 {
 				break
 			}
@@ -195,7 +236,7 @@ func (m *Manager) run(ctx context.Context) {
 			running--
 			continue
 		}
-		for running < cfg.Threads && !m.targetReached(cfg, submitted) && ctx.Err() == nil {
+		for running < cfg.Threads && !m.targetReached(cfg, submitted, running) && ctx.Err() == nil {
 			submitted++
 			running++
 			go func(index int) { m.runOne(ctx, index); completed <- struct{}{} }(submitted)
@@ -207,7 +248,7 @@ func (m *Manager) run(ctx context.Context) {
 		running--
 	}
 	m.mu.Lock()
-	m.running, m.cancel, m.cfg.Enabled = false, nil, false
+	m.running, m.cancel, m.automatic, m.cfg.Enabled = false, nil, false, false
 	m.cfg.Stats.Running, m.cfg.Stats.FinishedAt = 0, now()
 	m.updateStatsLocked()
 	m.appendLocked(fmt.Sprintf("注册任务结束，成功%d，失败%d", m.cfg.Stats.Success, m.cfg.Stats.Fail), "yellow")
@@ -215,12 +256,16 @@ func (m *Manager) run(ctx context.Context) {
 	m.mu.Unlock()
 }
 
-func (m *Manager) targetReached(cfg Config, submitted int) bool {
+func (m *Manager) targetReached(cfg Config, submitted, running int) bool {
 	switch cfg.Mode {
 	case "quota":
 		return m.quotaLocked() >= cfg.TargetQuota
 	case "available":
-		return m.availableLocked() >= cfg.TargetAvailable
+		// Include workers already launched in the target calculation. Without
+		// this reservation, a multi-threaded available-target run can launch a
+		// full thread batch before the first successful account is persisted and
+		// overshoot the requested pool size.
+		return m.availableLocked()+running >= cfg.TargetAvailable
 	default:
 		return submitted >= cfg.Total
 	}

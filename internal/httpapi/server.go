@@ -42,31 +42,34 @@ import (
 )
 
 type Server struct {
-	cfgMu           sync.RWMutex
-	cfg             config.Config
-	retentionOnce   sync.Once
-	retentionWake   chan struct{}
-	auth            *auth.Service
-	accounts        *accounts.Store
-	images          *images.Service
-	texts           *texts.Service
-	searches        *searches.Service
-	storage         *storage.Service
-	system          *systemstats.Sampler
-	tags            *imagetags.Store
-	static          *staticFiles
-	tasks           *tasks.Manager
-	callbacks       *callbackDispatcher
-	postprocess     *postprocess.Service
-	metrics         *metrics.Service
-	refresh         *accounts.RefreshManager
-	autoRefresh     *accounts.AutoRefreshScheduler
-	oauth           *oauthlogin.Service
-	debugClient     *openaiweb.ReloadableClient
-	register        *registration.Manager
-	updater         *updater.Service
-	state           persistence.Store
-	onConfigUpdated func(config.Config)
+	cfgMu              sync.RWMutex
+	cfg                config.Config
+	retentionOnce      sync.Once
+	retentionWake      chan struct{}
+	autoRegisterOnce   sync.Once
+	autoRegistrationMu sync.RWMutex
+	autoRegistration   imagePoolAutoRegistrationState
+	auth               *auth.Service
+	accounts           *accounts.Store
+	images             *images.Service
+	texts              *texts.Service
+	searches           *searches.Service
+	storage            *storage.Service
+	system             *systemstats.Sampler
+	tags               *imagetags.Store
+	static             *staticFiles
+	tasks              *tasks.Manager
+	callbacks          *callbackDispatcher
+	postprocess        *postprocess.Service
+	metrics            *metrics.Service
+	refresh            *accounts.RefreshManager
+	autoRefresh        *accounts.AutoRefreshScheduler
+	oauth              *oauthlogin.Service
+	debugClient        *openaiweb.ReloadableClient
+	register           *registration.Manager
+	updater            *updater.Service
+	state              persistence.Store
+	onConfigUpdated    func(config.Config)
 }
 
 type stabilityResponse struct {
@@ -126,6 +129,7 @@ func (s *Server) StartBackground(ctx context.Context) {
 	}
 	s.autoRefresh.Start(ctx)
 	s.retentionOnce.Do(func() { go s.runImageRetention(ctx) })
+	s.autoRegisterOnce.Do(func() { go s.runImagePoolAutoRegistration(ctx) })
 }
 
 func (s *Server) runImageRetention(ctx context.Context) {
@@ -2106,6 +2110,9 @@ func (s *Server) applyConfigPatch(patch map[string]any) (config.Config, error) {
 	}
 	s.auth.UpdateAdminKeys(next.APIKeys)
 	s.setConfig(next)
+	if !next.ImagePoolAutoRegisterEnabled && s.register != nil && s.register.IsAutomatic() {
+		s.register.Stop()
+	}
 	s.triggerImageRetention()
 	s.refresh.SetConcurrency(next.RefreshAccountConcurrency)
 	s.autoRefresh.UpdateInterval(next.RefreshAccountIntervalMinutes)

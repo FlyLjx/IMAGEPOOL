@@ -11,6 +11,7 @@ import (
 	"image/color"
 	"image/png"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1573,7 +1574,7 @@ func TestImagePoolCapacityEstimateAdjustsRegistrationForDeadRate(t *testing.T) {
 	}
 }
 
-func TestImagePoolCapacityEstimateMaintainsBurstParallelBaseline(t *testing.T) {
+func TestImagePoolCapacityEstimateDoesNotRegisterWhenIdle(t *testing.T) {
 	cfg := config.Default()
 	cfg.ImageCapacityBurstParallel = 50
 	pressure := imagePoolTaskPressure{}
@@ -1589,20 +1590,22 @@ func TestImagePoolCapacityEstimateMaintainsBurstParallelBaseline(t *testing.T) {
 	if estimate.RequiredByBurstParallel != 50 {
 		t.Fatalf("burst baseline=%d, want 50", estimate.RequiredByBurstParallel)
 	}
-	if estimate.RecommendedRequiredUsableAccounts != 50 {
-		t.Fatalf("required usable=%d, want 50", estimate.RecommendedRequiredUsableAccounts)
+	if estimate.RecommendedRequiredUsableAccounts != 0 || estimate.RecommendedRequiredInflightSlots != 0 {
+		t.Fatalf("idle recommendation=%#v, want zero task-driven demand", estimate)
 	}
-	if estimate.RecommendedAddUsableAccounts != 48 || estimate.RecommendedRegisterAccounts != 48 {
-		t.Fatalf("estimate=%#v, want add/register 48", estimate)
+	if estimate.RecommendedAddUsableAccounts != 0 || estimate.RecommendedRegisterAccounts != 0 {
+		t.Fatalf("idle add/register=%#v, want zero", estimate)
 	}
-	if estimate.Status != "shortage" {
-		t.Fatalf("status=%q, want shortage", estimate.Status)
+	if estimate.Status != "idle" {
+		t.Fatalf("status=%q, want idle", estimate.Status)
 	}
 }
 
 func TestImagePoolCapacityEstimateUsesPerAccountInflightSlots(t *testing.T) {
 	cfg := config.Default()
 	cfg.ImageCapacityBurstParallel = 50
+	pressure := imagePoolTaskPressure{Queued: 50, Pending: 50}
+	recent := imagePoolRecentTaskStats{Limit: 60, AvailabilityTotal: 20, Success: 20, SuccessRate: 100, AverageSuccessDurationSecs: 60}
 	cfg.ImageAccountMaxInflightPerAccount = 2
 	accountStats := accounts.ImageDispatchStats{
 		Total:                 20,
@@ -1613,15 +1616,15 @@ func TestImagePoolCapacityEstimateUsesPerAccountInflightSlots(t *testing.T) {
 		DispatchableSlots:     40,
 	}
 
-	factors, estimate := estimateImagePoolCapacity(cfg, imagePoolTaskPressure{}, imagePoolRecentTaskStats{Limit: 60}, accountStats)
+	factors, estimate := estimateImagePoolCapacity(cfg, pressure, recent, accountStats)
 	if factors.MaxInflightPerAccount != 2 {
 		t.Fatalf("factors=%#v", factors)
 	}
-	if estimate.RecommendedRequiredInflightSlots != 50 || estimate.RecommendedRequiredUsableAccounts != 25 {
+	if estimate.RecommendedRequiredInflightSlots < 50 || estimate.RecommendedRequiredUsableAccounts != int(math.Ceil(float64(estimate.RecommendedRequiredInflightSlots)/2)) {
 		t.Fatalf("estimate=%#v", estimate)
 	}
-	if estimate.RecommendedAddUsableAccounts != 5 {
-		t.Fatalf("add accounts=%d, want 5", estimate.RecommendedAddUsableAccounts)
+	if estimate.RecommendedAddUsableAccounts <= 0 {
+		t.Fatalf("add accounts=%d, want a task-driven shortage", estimate.RecommendedAddUsableAccounts)
 	}
 }
 
@@ -1630,8 +1633,36 @@ func TestImagePoolCapacityEstimateSuggestsBurstBaselineWhenPoolEmpty(t *testing.
 	cfg.ImageCapacityBurstParallel = 50
 
 	_, estimate := estimateImagePoolCapacity(cfg, imagePoolTaskPressure{}, imagePoolRecentTaskStats{Limit: 60}, accounts.ImageDispatchStats{})
-	if estimate.RecommendedAddUsableAccounts != 50 || estimate.RecommendedRegisterAccounts != 50 {
-		t.Fatalf("empty pool estimate=%#v, want add/register 50", estimate)
+	if estimate.RecommendedAddUsableAccounts != 0 || estimate.RecommendedRegisterAccounts != 0 || estimate.Status != "idle" {
+		t.Fatalf("empty pool estimate=%#v, want idle zero add/register", estimate)
+	}
+}
+
+func TestAutoRegistrationTargetFollowsTaskPressure(t *testing.T) {
+	cfg := config.Default()
+	cfg.ImagePoolMinUsableAccounts = 0
+	cfg.ImagePoolIdleFloorAccounts = 0
+	cfg.ImagePoolMaxUsableAccounts = 200
+	factors := imagePoolCapacityFactors{MaxInflightPerAccount: 1, DynamicReserveRatio: 0}
+	estimate := imagePoolCapacityEstimate{RequiredByQueueDrain: 4}
+
+	if got := autoRegistrationTarget(cfg, imagePoolTaskPressure{}, factors, estimate); got != 0 {
+		t.Fatalf("idle target=%d, want 0", got)
+	}
+	if got := autoRegistrationTarget(cfg, imagePoolTaskPressure{Queued: 4, Pending: 4}, factors, estimate); got != 4 {
+		t.Fatalf("task target=%d, want 4", got)
+	}
+	cfg.ImagePoolMinUsableAccounts = 6
+	if got := autoRegistrationTarget(cfg, imagePoolTaskPressure{Queued: 4, Pending: 4}, factors, estimate); got != 6 {
+		t.Fatalf("minimum target=%d, want 6", got)
+	}
+	cfg.ImagePoolMaxUsableAccounts = 3
+	if got := autoRegistrationTarget(cfg, imagePoolTaskPressure{Queued: 20, Pending: 20}, factors, estimate); got != 3 {
+		t.Fatalf("maximum target=%d, want 3", got)
+	}
+	cfg.ImagePoolMaxRegisterPerCycle = 2
+	if got := autoRegistrationBatchSize(cfg, 20, 1); got != 2 {
+		t.Fatalf("batch cap=%d, want 2", got)
 	}
 }
 

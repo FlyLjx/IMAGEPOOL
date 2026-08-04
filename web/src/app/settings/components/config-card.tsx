@@ -98,6 +98,14 @@ export function ConfigCard() {
   const setImageRetentionDays = useSettingsStore((state) => state.setImageRetentionDays);
   const setImagePollTimeoutSecs = useSettingsStore((state) => state.setImagePollTimeoutSecs);
   const setImageCapacityBurstParallel = useSettingsStore((state) => state.setImageCapacityBurstParallel);
+  const setImagePoolAutoRegisterEnabled = useSettingsStore((state) => state.setImagePoolAutoRegisterEnabled);
+  const setImagePoolMinUsableAccounts = useSettingsStore((state) => state.setImagePoolMinUsableAccounts);
+  const setImagePoolIdleFloorAccounts = useSettingsStore((state) => state.setImagePoolIdleFloorAccounts);
+  const setImagePoolMaxUsableAccounts = useSettingsStore((state) => state.setImagePoolMaxUsableAccounts);
+  const setImagePoolQuietAfterMinutes = useSettingsStore((state) => state.setImagePoolQuietAfterMinutes);
+  const setImagePoolRegisterCooldownMinutes = useSettingsStore((state) => state.setImagePoolRegisterCooldownMinutes);
+  const setImagePoolMaxRegisterPerCycle = useSettingsStore((state) => state.setImagePoolMaxRegisterPerCycle);
+  const setImagePoolAutoRegisterIntervalSecs = useSettingsStore((state) => state.setImagePoolAutoRegisterIntervalSecs);
   const setImageGlobalMaxInflight = useSettingsStore((state) => state.setImageGlobalMaxInflight);
   const setImagePrepareParallel = useSettingsStore((state) => state.setImagePrepareParallel);
   const setImageSubmitParallel = useSettingsStore((state) => state.setImageSubmitParallel);
@@ -378,6 +386,79 @@ export function ConfigCard() {
             </Form.Item>
           </Col>
         </Row>
+
+        <Divider />
+				<SectionTitle title="号池自动补号" description="根据当前排队和运行任务估算所需有效账号；无任务时停止注册，避免夜间持续消耗账号。默认关闭。" />
+				<Row gutter={[16, 16]}>
+					<Col xs={24} md={12} xl={6}>
+						<Form.Item label="启用自动补号" extra="开启后由任务压力控制注册机，手动注册运行时自动控制会让路。">
+							<Switch checked={Boolean(config.image_pool_auto_register_enabled)} onChange={setImagePoolAutoRegisterEnabled} disabled={isSavingConfig} />
+						</Form.Item>
+					</Col>
+					<Col xs={24} md={12} xl={6}>
+						<NumberInput
+							label="活跃任务最低账号"
+							value={String(config.image_pool_min_usable_accounts ?? "")}
+							onChange={setImagePoolMinUsableAccounts}
+							placeholder="0"
+							help="有任务时至少保留的有效账号数，0 表示完全按任务数计算。"
+						/>
+					</Col>
+					<Col xs={24} md={12} xl={6}>
+						<NumberInput
+							label="空闲保底账号"
+							value={String(config.image_pool_idle_floor_accounts ?? "")}
+							onChange={setImagePoolIdleFloorAccounts}
+							placeholder="0"
+							help="无任务时最多在静默宽限期内补到的账号数，建议 0。"
+						/>
+					</Col>
+					<Col xs={24} md={12} xl={6}>
+						<NumberInput
+							label="有效账号上限"
+							value={String(config.image_pool_max_usable_accounts ?? "")}
+							onChange={setImagePoolMaxUsableAccounts}
+							placeholder="200"
+							help="自动补号不会超过此有效账号数，上限 10000。"
+						/>
+					</Col>
+					<Col xs={24} md={12} xl={6}>
+						<NumberInput
+							label="空闲静默分钟"
+							value={String(config.image_pool_quiet_after_minutes ?? "")}
+							onChange={setImagePoolQuietAfterMinutes}
+							placeholder="15"
+							help="没有任务多久后进入静默模式。"
+						/>
+					</Col>
+					<Col xs={24} md={12} xl={6}>
+						<NumberInput
+							label="批次冷却分钟"
+							value={String(config.image_pool_register_cooldown_minutes ?? "")}
+							onChange={setImagePoolRegisterCooldownMinutes}
+							placeholder="1"
+							help="注册批次之间的最短间隔，防止短时间反复启动。"
+						/>
+					</Col>
+					<Col xs={24} md={12} xl={6}>
+						<NumberInput
+							label="单批最大尝试"
+							value={String(config.image_pool_max_register_per_cycle ?? "")}
+							onChange={setImagePoolMaxRegisterPerCycle}
+							placeholder="10"
+							help="每个自动批次最多尝试注册多少个账号。"
+						/>
+					</Col>
+					<Col xs={24} md={12} xl={6}>
+						<NumberInput
+							label="预测检查间隔秒"
+							value={String(config.image_pool_auto_register_interval_secs ?? "")}
+							onChange={setImagePoolAutoRegisterIntervalSecs}
+							placeholder="30"
+							help="后台重新评估任务压力和有效账号数的间隔。"
+						/>
+					</Col>
+				</Row>
 
         <Divider />
 				<SectionTitle title="图片后处理" description="独立队列运行，开关仅影响新提交的图片任务。" />

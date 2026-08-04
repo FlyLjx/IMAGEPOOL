@@ -213,6 +213,18 @@ func (e *UpstreamError) Error() string {
 	return fmt.Sprintf("upstream %s status=%d body=%s", e.Path, e.StatusCode, e.Body)
 }
 
+// IsImageReferenceUploadRateLimited distinguishes a file-upload quota from
+// a generation-endpoint quota. The former only affects requests that carry
+// reference images; plain text-to-image requests can keep using the account.
+func IsImageReferenceUploadRateLimited(err error) bool {
+	var stage *imageUploadStageError
+	if !errors.As(err, &stage) {
+		return false
+	}
+	var upstream *UpstreamError
+	return errors.As(stage.Err, &upstream) && upstream.StatusCode == 429
+}
+
 // PublicErrorMessage returns an API-safe representation of err. It must only
 // be used at output boundaries: callers still receive the original error and
 // can therefore classify a revoked credential and remove or retry it.

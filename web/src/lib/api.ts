@@ -240,6 +240,14 @@ export type SettingsConfig = {
   image_account_precheck_concurrency?: number | string;
   image_account_precheck_timeout_secs?: number | string;
   image_capacity_burst_parallel?: number | string;
+  image_pool_auto_register_enabled?: boolean;
+  image_pool_min_usable_accounts?: number | string;
+  image_pool_idle_floor_accounts?: number | string;
+  image_pool_max_usable_accounts?: number | string;
+  image_pool_quiet_after_minutes?: number | string;
+  image_pool_register_cooldown_minutes?: number | string;
+  image_pool_max_register_per_cycle?: number | string;
+  image_pool_auto_register_interval_secs?: number | string;
   image_parallel_generation?: boolean;
   image_settle_enabled?: boolean;
   image_check_before_hit_enabled?: boolean;
@@ -763,6 +771,24 @@ export type ImagePoolCapacity = {
     dispatchable_rate: number;
     next_cooldown_ends_at?: string;
     average_known_remaining_quota: number;
+  };
+  registration?: {
+    enabled: boolean;
+    running: boolean;
+    automatic: boolean;
+    status: string;
+    reason: string;
+    pending_tasks: number;
+    idle_for_secs: number;
+    current_usable_accounts: number;
+    current_dispatchable_accounts: number;
+    inflight_registrations: number;
+    target_usable_accounts: number;
+    batch_target_usable_accounts: number;
+    need_usable_accounts: number;
+    last_evaluation_at?: string;
+    last_action_at?: string;
+    next_action_at?: string;
   };
   factors: {
     observed_average_secs: number;

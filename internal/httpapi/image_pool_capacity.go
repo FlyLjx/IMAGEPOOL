@@ -15,13 +15,14 @@ import (
 )
 
 type imagePoolCapacityResponse struct {
-	GeneratedAt time.Time                   `json:"generated_at"`
-	Tasks       imagePoolTaskPressure       `json:"tasks"`
-	Recent      imagePoolRecentTaskStats    `json:"recent_60_tasks"`
-	Accounts    accounts.ImageDispatchStats `json:"accounts"`
-	Concurrency any                         `json:"concurrency"`
-	Factors     imagePoolCapacityFactors    `json:"factors"`
-	Estimate    imagePoolCapacityEstimate   `json:"estimate"`
+	GeneratedAt  time.Time                       `json:"generated_at"`
+	Tasks        imagePoolTaskPressure           `json:"tasks"`
+	Recent       imagePoolRecentTaskStats        `json:"recent_60_tasks"`
+	Accounts     accounts.ImageDispatchStats     `json:"accounts"`
+	Concurrency  any                             `json:"concurrency"`
+	Registration imagePoolAutoRegistrationStatus `json:"registration"`
+	Factors      imagePoolCapacityFactors        `json:"factors"`
+	Estimate     imagePoolCapacityEstimate       `json:"estimate"`
 }
 
 type imagePoolTaskPressure struct {
@@ -116,13 +117,14 @@ func (s *Server) handleImagePoolCapacity(w http.ResponseWriter, r *http.Request)
 		concurrency = s.images.ConcurrencyStats()
 	}
 	writeJSON(w, http.StatusOK, imagePoolCapacityResponse{
-		GeneratedAt: now,
-		Tasks:       taskPressure,
-		Recent:      recent,
-		Accounts:    accountStats,
-		Concurrency: concurrency,
-		Factors:     factors,
-		Estimate:    estimate,
+		GeneratedAt:  now,
+		Tasks:        taskPressure,
+		Recent:       recent,
+		Accounts:     accountStats,
+		Concurrency:  concurrency,
+		Registration: s.imagePoolAutoRegistrationSnapshot(),
+		Factors:      factors,
+		Estimate:     estimate,
 	})
 }
 
@@ -326,7 +328,14 @@ func estimateImagePoolCapacity(cfg config.Config, pressure imagePoolTaskPressure
 		}
 		dynamicRequired += reserveAccounts
 	}
-	recommendedRequiredSlots := maxInt(dynamicRequired, requiredByBurst)
+	// The capacity recommendation follows actual task pressure. The configured
+	// burst value remains visible as a planning input, but it must not make an
+	// idle pool look short or trigger automatic registration at night. When
+	// there are active tasks, the burst value is capped by the number of tasks.
+	recommendedRequiredSlots := dynamicRequired
+	if pressure.Pending > 0 {
+		recommendedRequiredSlots = maxInt(recommendedRequiredSlots, minInt(requiredByBurst, pressure.Pending))
+	}
 	recommendedRequired := 0
 	if recommendedRequiredSlots > 0 {
 		recommendedRequired = int(math.Ceil(float64(recommendedRequiredSlots) / float64(maxInflightPerAccount)))

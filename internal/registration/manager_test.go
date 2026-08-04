@@ -59,3 +59,20 @@ func TestManagerStopsWhenAvailableTargetReached(t *testing.T) {
 		t.Fatalf("config=%#v accounts=%#v", config, store.List())
 	}
 }
+
+func TestManagerAvailableTargetReservesInflightWorkers(t *testing.T) {
+	store := accounts.NewStore(nil, "")
+	manager := NewManager("", store, func(_ context.Context, _ Config, index int) (accounts.Account, error) {
+		return accounts.Account{AccessToken: fmt.Sprintf("reserved-%d", index), Status: "正常"}, nil
+	})
+	manager.Update(map[string]any{"mode": "available", "target_available": 2, "total": 99, "threads": 8})
+	manager.Start()
+	deadline := time.Now().Add(2 * time.Second)
+	for manager.Get().Enabled && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	config := manager.Get()
+	if config.Stats.Success != 2 || config.Stats.Done != 2 || len(store.List()) != 2 {
+		t.Fatalf("available target overshot: config=%#v accounts=%#v", config, store.List())
+	}
+}

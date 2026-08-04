@@ -73,6 +73,8 @@ Go 测试覆盖配置、鉴权和配额、账号选择与失效账号删除、�
 
 注册控制接口为 `/api/register`、`/api/register/start`、`/api/register/stop` 与 `/api/register/reset`；`GET /api/register/events?token=...` 提供 EventSource 实时状态。调度器、TempMail.lol 邮箱轮询、Sentinel、PKCE、邮箱验证码、OAuth token 交换、持久化状态、并发统计和账号落池均由 Go 服务负责。注册页中的默认 provider 为 `tempmail_lol`。
 
+号池容量接口为 `/api/image-pool/capacity`。启用 `image_pool_auto_register_enabled` 后，后台会按当前排队/运行任务预测所需有效账号，按 `image_pool_max_register_per_cycle` 分批尝试注册；任务清空后停止补号，连续空闲达到 `image_pool_quiet_after_minutes` 后进入静默。`image_pool_max_usable_accounts` 用于限制自动补号上限，默认自动补号关闭。
+
 ## 当前不包含
 
 - 不提供 PPT、PSD 或任何可编辑文件生成任务。

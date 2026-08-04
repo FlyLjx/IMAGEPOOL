@@ -35,6 +35,9 @@ func TestDefaultNormalize(t *testing.T) {
 	if cfg.ImageGlobalMaxInflight != 120 || cfg.ImagePrepareParallel != 20 || cfg.ImageSubmitParallel != 20 || cfg.ImagePollParallel != 80 || cfg.ImageDownloadParallel != 20 || cfg.ImageUploadParallel != 12 {
 		t.Fatalf("image concurrency=%d/%d/%d/%d/%d/%d", cfg.ImageGlobalMaxInflight, cfg.ImagePrepareParallel, cfg.ImageSubmitParallel, cfg.ImagePollParallel, cfg.ImageDownloadParallel, cfg.ImageUploadParallel)
 	}
+	if cfg.ImagePoolAutoRegisterEnabled || cfg.ImagePoolMinUsableAccounts != 0 || cfg.ImagePoolIdleFloorAccounts != 0 || cfg.ImagePoolMaxUsableAccounts != 200 || cfg.ImagePoolQuietAfterMinutes != 15 || cfg.ImagePoolRegisterCooldownMinutes != 1 || cfg.ImagePoolMaxRegisterPerCycle != 10 || cfg.ImagePoolAutoRegisterIntervalSecs != 30 {
+		t.Fatalf("auto registration defaults=%#v", cfg)
+	}
 	if cfg.ImageStallTimeoutSecs != 150 || cfg.ImageMaxSwitchesPerTask != 2 {
 		t.Fatalf("image switching=%.0f/%d", cfg.ImageStallTimeoutSecs, cfg.ImageMaxSwitchesPerTask)
 	}
@@ -43,6 +46,22 @@ func TestDefaultNormalize(t *testing.T) {
 	}
 	if len(cfg.APIKeys) != 1 || cfg.APIKeys[0] != "dev-key" {
 		t.Fatalf("keys=%#v", cfg.APIKeys)
+	}
+}
+
+func TestNormalizeCapsImagePoolAutoRegistration(t *testing.T) {
+	cfg := (Config{
+		ImagePoolAutoRegisterEnabled:      true,
+		ImagePoolMinUsableAccounts:        -1,
+		ImagePoolIdleFloorAccounts:        500,
+		ImagePoolMaxUsableAccounts:        2,
+		ImagePoolQuietAfterMinutes:        5000,
+		ImagePoolRegisterCooldownMinutes:  -1,
+		ImagePoolMaxRegisterPerCycle:      5000,
+		ImagePoolAutoRegisterIntervalSecs: 1,
+	}).Normalize()
+	if !cfg.ImagePoolAutoRegisterEnabled || cfg.ImagePoolMinUsableAccounts != 0 || cfg.ImagePoolIdleFloorAccounts != 2 || cfg.ImagePoolMaxUsableAccounts != 2 || cfg.ImagePoolQuietAfterMinutes != 1440 || cfg.ImagePoolRegisterCooldownMinutes != 1 || cfg.ImagePoolMaxRegisterPerCycle != 1000 || cfg.ImagePoolAutoRegisterIntervalSecs != 5 {
+		t.Fatalf("auto registration normalization=%#v", cfg)
 	}
 }
 
