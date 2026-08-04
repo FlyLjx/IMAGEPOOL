@@ -32,6 +32,12 @@ func TestDefaultNormalize(t *testing.T) {
 	if cfg.ImageAccountMaxInflightPerAccount != 1 {
 		t.Fatalf("image account max inflight=%d", cfg.ImageAccountMaxInflightPerAccount)
 	}
+	if cfg.ImageGlobalMaxInflight != 120 || cfg.ImagePrepareParallel != 20 || cfg.ImageSubmitParallel != 20 || cfg.ImagePollParallel != 80 || cfg.ImageDownloadParallel != 20 || cfg.ImageUploadParallel != 12 {
+		t.Fatalf("image concurrency=%d/%d/%d/%d/%d/%d", cfg.ImageGlobalMaxInflight, cfg.ImagePrepareParallel, cfg.ImageSubmitParallel, cfg.ImagePollParallel, cfg.ImageDownloadParallel, cfg.ImageUploadParallel)
+	}
+	if cfg.ImageStallTimeoutSecs != 150 || cfg.ImageMaxSwitchesPerTask != 2 {
+		t.Fatalf("image switching=%.0f/%d", cfg.ImageStallTimeoutSecs, cfg.ImageMaxSwitchesPerTask)
+	}
 	if cfg.RefreshAccountIntervalMinutes != 60 {
 		t.Fatalf("refresh interval=%d", cfg.RefreshAccountIntervalMinutes)
 	}
@@ -85,6 +91,25 @@ func TestNormalizeCapsImageAccountMaxInflight(t *testing.T) {
 	}
 	if got := (Config{ImageAccountMaxInflightPerAccount: 99}).Normalize().ImageAccountMaxInflightPerAccount; got != 20 {
 		t.Fatalf("capped max inflight=%d", got)
+	}
+}
+
+func TestNormalizeCapsImageConcurrency(t *testing.T) {
+	cfg := (Config{
+		ImageGlobalMaxInflight:  20000,
+		ImagePrepareParallel:    0,
+		ImageSubmitParallel:     20000,
+		ImagePollParallel:       20000,
+		ImageDownloadParallel:   -1,
+		ImageUploadParallel:     20000,
+		ImageStallTimeoutSecs:   900,
+		ImageMaxSwitchesPerTask: 20,
+	}).Normalize()
+	if cfg.ImageGlobalMaxInflight != 10000 || cfg.ImagePrepareParallel != 20 || cfg.ImageSubmitParallel != 1000 || cfg.ImagePollParallel != 5000 || cfg.ImageDownloadParallel != 20 || cfg.ImageUploadParallel != 1000 {
+		t.Fatalf("concurrency=%#v", cfg)
+	}
+	if cfg.ImageStallTimeoutSecs != 599 || cfg.ImageMaxSwitchesPerTask != 5 {
+		t.Fatalf("switching=%.0f/%d", cfg.ImageStallTimeoutSecs, cfg.ImageMaxSwitchesPerTask)
 	}
 }
 

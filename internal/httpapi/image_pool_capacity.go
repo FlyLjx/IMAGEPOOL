@@ -19,6 +19,7 @@ type imagePoolCapacityResponse struct {
 	Tasks       imagePoolTaskPressure       `json:"tasks"`
 	Recent      imagePoolRecentTaskStats    `json:"recent_60_tasks"`
 	Accounts    accounts.ImageDispatchStats `json:"accounts"`
+	Concurrency any                         `json:"concurrency"`
 	Factors     imagePoolCapacityFactors    `json:"factors"`
 	Estimate    imagePoolCapacityEstimate   `json:"estimate"`
 }
@@ -110,11 +111,16 @@ func (s *Server) handleImagePoolCapacity(w http.ResponseWriter, r *http.Request)
 		cfg.ImageCapacityBurstParallel = boundedQueryInt(r, "burst_parallel", cfg.ImageCapacityBurstParallel, 1, 10000)
 	}
 	factors, estimate := estimateImagePoolCapacity(cfg, taskPressure, recent, accountStats)
+	var concurrency any
+	if s.images != nil {
+		concurrency = s.images.ConcurrencyStats()
+	}
 	writeJSON(w, http.StatusOK, imagePoolCapacityResponse{
 		GeneratedAt: now,
 		Tasks:       taskPressure,
 		Recent:      recent,
 		Accounts:    accountStats,
+		Concurrency: concurrency,
 		Factors:     factors,
 		Estimate:    estimate,
 	})

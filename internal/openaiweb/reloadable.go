@@ -163,6 +163,13 @@ func (r *ReloadableClient) CheckImageReadyFor(ctx context.Context, account accou
 	return r.snapshot().CheckImageReadyFor(ctx, account)
 }
 
+func (r *ReloadableClient) ImageConcurrencyStats() ImageConcurrencyStats {
+	if r == nil {
+		return ImageConcurrencyStats{}
+	}
+	return r.snapshot().ImageConcurrencyStats()
+}
+
 func (r *ReloadableClient) GenerateText(ctx context.Context, account accounts.Account, req ChatRequest) (ChatResult, error) {
 	return r.snapshot().GenerateText(ctx, account, req)
 }

@@ -19,7 +19,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
-import { fetchDashboard, fetchSchedulerDiagnostics, fetchSystemLoad, type DashboardSummary, type SchedulerDiagnostics, type SystemLoad } from "@/lib/api";
+import { fetchDashboard, fetchImagePoolCapacity, fetchSchedulerDiagnostics, fetchSystemLoad, type DashboardSummary, type ImagePoolCapacity, type SchedulerDiagnostics, type SystemLoad } from "@/lib/api";
 import { formatShanghaiDateTime, formatShanghaiDateTimeParts } from "@/lib/datetime";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 import { cn } from "@/lib/utils";
@@ -43,6 +43,12 @@ function percent(value: number, total: number) {
     return 0;
   }
   return Math.round((value / total) * 100);
+}
+
+function limiterPercent(stats?: { active?: number; limit?: number }) {
+  const active = finiteNumber(stats?.active);
+  const limit = finiteNumber(stats?.limit);
+  return limit > 0 ? percent(active, limit) : 0;
 }
 
 function rateText(value: unknown) {
@@ -321,6 +327,66 @@ function OperationsOverview({ scheduler, system, summary }: { scheduler: Schedul
             </div>
           </div>
         </section>
+      </div>
+    </Card>
+  );
+}
+
+function ImagePoolConcurrency({ capacity }: { capacity: ImagePoolCapacity | null }) {
+  const concurrency = capacity?.concurrency;
+  if (!concurrency) {
+    return null;
+  }
+  const stages = [
+    ["准备", concurrency.upstream.prepare],
+    ["提交", concurrency.upstream.submit],
+    ["轮询", concurrency.upstream.poll],
+    ["下载", concurrency.upstream.download],
+    ["上传", concurrency.upstream.upload],
+  ] as const;
+  const globalPercent = limiterPercent(concurrency.global);
+  const taskPressure = capacity.tasks.queued + capacity.tasks.running;
+  return (
+    <Card
+      title={
+        <div className="flex items-center gap-2">
+          <span className="flex size-8 items-center justify-center rounded-md bg-cyan-50 text-cyan-600"><Network className="size-4" /></span>
+          <div>
+            <div>生图号池并发</div>
+            <div className="mt-0.5 text-xs font-normal text-slate-400">全局租约与上游阶段实时占用</div>
+          </div>
+        </div>
+      }
+      extra={<span className="font-mono text-xs text-slate-400">任务 {taskPressure} · 账号 {capacity.accounts.dispatchable} 可调度</span>}
+    >
+      <div className="grid gap-4 lg:grid-cols-[1.15fr_2fr]">
+        <div className="rounded-lg border border-cyan-100 bg-cyan-50/60 p-4">
+          <div className="flex items-center justify-between gap-3">
+            <span className="text-sm font-medium text-slate-600">全局生图槽</span>
+            <span className="font-mono text-lg font-semibold text-slate-900 tabular-nums">
+              {numberText(concurrency.global.active)} / {concurrency.global.limit > 0 ? numberText(concurrency.global.limit) : "∞"}
+            </span>
+          </div>
+          <Progress className="!mb-0 !mt-3" percent={globalPercent} showInfo={false} strokeColor="#06b6d4" trailColor="#cffafe" size="small" />
+          <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500">
+            <span>等待 {numberText(concurrency.global.waiting)}</span>
+            <span>租约 {numberText(capacity.accounts.leased)}</span>
+            <span>冷却 {numberText(capacity.accounts.cooling)}</span>
+            <span>卡住切号 {numberText(concurrency.stalled_attempts)}</span>
+          </div>
+        </div>
+        <div className="grid gap-3 sm:grid-cols-5">
+          {stages.map(([label, stats]) => (
+            <div key={label} className="rounded-lg border border-slate-200 bg-slate-50/70 p-3">
+              <div className="text-xs font-medium text-slate-500">{label}</div>
+              <div className="mt-2 font-mono text-base font-semibold text-slate-900 tabular-nums">
+                {numberText(stats.active)} / {stats.limit > 0 ? numberText(stats.limit) : "∞"}
+              </div>
+              <Progress className="!mb-0 !mt-2" percent={limiterPercent(stats)} showInfo={false} strokeColor="#64748b" trailColor="#e2e8f0" size="small" />
+              <div className="mt-1 text-[11px] text-slate-400">等待 {numberText(stats.waiting)}</div>
+            </div>
+          ))}
+        </div>
       </div>
     </Card>
   );
@@ -710,6 +776,7 @@ function DashboardContent() {
   const [data, setData] = useState<DashboardSummary | null>(null);
   const [systemLoad, setSystemLoad] = useState<SystemLoad | null>(null);
 	const [scheduler, setScheduler] = useState<SchedulerDiagnostics | null>(null);
+  const [capacity, setCapacity] = useState<ImagePoolCapacity | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [runtimeWindow, setRuntimeWindow] = useState<number | "custom">(7 * 24 * 60);
@@ -738,6 +805,7 @@ function DashboardContent() {
   useEffect(() => {
     void loadDashboard();
 		void fetchSchedulerDiagnostics().then(setScheduler).catch(() => undefined);
+    void fetchImagePoolCapacity().then(setCapacity).catch(() => undefined);
   }, []);
 
   useEffect(() => {
@@ -757,9 +825,11 @@ function DashboardContent() {
 					fetchSystemLoad(),
 					fetchSchedulerDiagnostics().catch(() => null),
 				]);
+				const latestCapacity = await fetchImagePoolCapacity().catch(() => null);
         if (active) {
           setSystemLoad((current) => newerSystemLoad(current, latest));
 					if (latestScheduler) setScheduler(latestScheduler);
+          if (latestCapacity) setCapacity(latestCapacity);
         }
       } catch {
         // Keep the last successful sample when the lightweight poll fails.
@@ -869,6 +939,8 @@ function DashboardContent() {
           }}
         />
       ) : null}
+
+      <ImagePoolConcurrency capacity={capacity} />
 
       {data.calls.runtime ? (
         <RuntimeHealth

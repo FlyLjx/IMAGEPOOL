@@ -41,6 +41,9 @@ func Classify(err error, statusHint int) Info {
 	if errors.Is(err, openaiweb.ErrImageGenerationTerminated) || strings.Contains(lower, "image_generation_failed") || strings.Contains(lower, "image generation failed") {
 		return info("OAI 未完成生图", "OAI 未能完成本次图片生成，系统已自动重试，请重新提交。", "image_generation_failed", "upstream", true, "retry_request", "请直接重新提交任务", http.StatusBadGateway)
 	}
+	if errors.Is(err, openaiweb.ErrImageGenerationStalled) {
+		return info("生图会话长时间无结果", "当前生图会话长时间没有返回图片，系统已重新选择账号继续处理。", "image_generation_stalled", "upstream", true, "retry_request", "请重新提交任务", http.StatusTooManyRequests)
+	}
 	if errors.Is(err, openaiweb.ErrPollTimeout) || strings.Contains(lower, "image poll timeout") || strings.Contains(text, "生图任务已等待") || strings.Contains(text, "OAI侧出图超出") || strings.Contains(text, "任务占用额度失败") {
 		return info("OAI 生图超时", "OAI 在 600 秒（10 分钟）内未完成出图，本次任务已结束，请重新提交。", "oai_image_generation_timeout", "upstream", true, "retry_request", "请重新提交任务", http.StatusTooManyRequests)
 	}

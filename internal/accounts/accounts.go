@@ -45,6 +45,7 @@ const (
 	ImageCooldownRateLimited          ImageCooldownReason = "rate_limited"
 	ImageCooldownUpstreamFailure      ImageCooldownReason = "upstream_failure"
 	ImageCooldownGenerationTerminated ImageCooldownReason = "generation_terminated"
+	ImageCooldownGenerationStalled    ImageCooldownReason = "generation_stalled"
 
 	imageCooldownUntilKey     = "image_cooldown_until"
 	imageCooldownReasonKey    = "image_cooldown_reason"
@@ -983,6 +984,58 @@ func (s *Store) SelectForImage(exclude map[string]bool) (Account, error) {
 	return cloneAccount(account), nil
 }
 
+// TryAcquireForImage reserves an eligible account only when a slot is free at
+// the instant of the call. The separate false result lets a dispatcher wait on
+// another resource without holding an account lease.
+func (s *Store) TryAcquireForImage(exclude map[string]bool) (Account, bool, error) {
+	if s == nil {
+		return Account{}, false, ErrNoAvailableAccount
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	account, available := s.selectForImageLocked(exclude, true)
+	if available {
+		s.imageLeases[account.AccessToken]++
+		return cloneAccount(account), true, nil
+	}
+	_, eligible := s.selectForImageLocked(exclude, false)
+	_, cooling := s.earliestImageCooldownLocked(exclude)
+	if !eligible && !cooling {
+		return Account{}, false, ErrNoAvailableAccount
+	}
+	return Account{}, false, nil
+}
+
+// WaitForImageAvailability waits for an account slot, a cooldown expiry, or a
+// pool change. It reserves no account and is intended for coordinated
+// dispatchers that must acquire several independent resources.
+func (s *Store) WaitForImageAvailability(ctx context.Context, exclude map[string]bool) error {
+	if s == nil {
+		return ErrNoAvailableAccount
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	for {
+		s.mu.Lock()
+		_, available := s.selectForImageLocked(exclude, true)
+		if available {
+			s.mu.Unlock()
+			return nil
+		}
+		_, eligible := s.selectForImageLocked(exclude, false)
+		cooldownUntil, cooling := s.earliestImageCooldownLocked(exclude)
+		changed := s.imageLeaseChanged
+		s.mu.Unlock()
+		if !eligible && !cooling {
+			return ErrNoAvailableAccount
+		}
+		if err := waitForImageAvailability(ctx, changed, cooldownUntil); err != nil {
+			return err
+		}
+	}
+}
+
 // AcquireForImage reserves one idle account for an image request. If all
 // otherwise-eligible accounts are occupied, it waits for a release so callers
 // can remain in the task queue without starting a second request on a token.
@@ -1458,6 +1511,13 @@ func (s *Store) MarkImageGenerationTerminated(token string, err error) error {
 	return s.markImageCooldown(token, ImageCooldownGenerationTerminated, 0, err)
 }
 
+// MarkImageStalled temporarily backs off an account after a submitted image
+// conversation stops producing image references for the configured stall
+// window. The original conversation remains available for diagnostics only.
+func (s *Store) MarkImageStalled(token string, err error) error {
+	return s.markImageCooldown(token, ImageCooldownGenerationStalled, 0, err)
+}
+
 // MarkImageHTTPFailure applies the image dispatch cooldown policy for HTTP
 // failures that are known to be transient. Other status codes are ignored.
 func (s *Store) MarkImageHTTPFailure(token string, statusCode int, retryAfter time.Duration, err error) error {
@@ -1499,6 +1559,8 @@ func imageCooldownDelay(reason ImageCooldownReason, retryAfter time.Duration, fa
 		base, capDelay = 30*time.Second, 15*time.Minute
 	case ImageCooldownGenerationTerminated:
 		base, capDelay = 20*time.Second, 5*time.Minute
+	case ImageCooldownGenerationStalled:
+		base, capDelay = 90*time.Second, 10*time.Minute
 	}
 	for attempts := max(0, failures-1); attempts > 0 && base < capDelay; attempts-- {
 		base *= 2

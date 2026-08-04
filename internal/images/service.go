@@ -18,12 +18,14 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/deepteams/webp"
 
 	"imagepool/internal/accounts"
 	"imagepool/internal/config"
+	"imagepool/internal/limiters"
 	"imagepool/internal/openaiweb"
 	"imagepool/internal/postprocess"
 	"imagepool/internal/storage"
@@ -42,6 +44,8 @@ type Service struct {
 	backend openaiweb.Backend
 	storage *storage.Service
 	post    *postprocess.Service
+	global  *limiters.Gate
+	stalled atomic.Uint64
 }
 
 type accountInfoBackend interface {
@@ -85,12 +89,18 @@ type Response struct {
 	ImageRoute     map[string]any         `json:"image_route,omitempty"`
 }
 
+type ConcurrencyStats struct {
+	Global          limiters.Stats                  `json:"global"`
+	Upstream        openaiweb.ImageConcurrencyStats `json:"upstream"`
+	StalledAttempts uint64                          `json:"stalled_attempts"`
+}
+
 func NewService(cfg config.Config, store *accounts.Store, backend openaiweb.Backend, imageStorage ...*storage.Service) *Service {
 	cfg = cfg.Normalize()
 	if store != nil {
 		store.SetImageMaxInflightPerAccount(cfg.ImageAccountMaxInflightPerAccount)
 	}
-	service := &Service{cfg: cfg, store: store, backend: backend}
+	service := &Service{cfg: cfg, store: store, backend: backend, global: limiters.New(cfg.ImageGlobalMaxInflight)}
 	if len(imageStorage) > 0 {
 		service.storage = imageStorage[0]
 	}
@@ -104,6 +114,11 @@ func (s *Service) UpdateConfig(cfg config.Config) {
 	next := cfg.Normalize()
 	if s.store != nil {
 		s.store.SetImageMaxInflightPerAccount(next.ImageAccountMaxInflightPerAccount)
+	}
+	if s.global == nil {
+		s.global = limiters.New(next.ImageGlobalMaxInflight)
+	} else {
+		s.global.SetLimit(next.ImageGlobalMaxInflight)
 	}
 	s.cfgMu.Lock()
 	s.cfg = next
@@ -121,6 +136,23 @@ func (s *Service) currentConfig() config.Config {
 	s.cfgMu.RLock()
 	defer s.cfgMu.RUnlock()
 	return s.cfg
+}
+
+func (s *Service) ConcurrencyStats() ConcurrencyStats {
+	if s == nil {
+		return ConcurrencyStats{}
+	}
+	stats := ConcurrencyStats{}
+	if s.global != nil {
+		stats.Global = s.global.Stats()
+	}
+	if backend, ok := s.backend.(interface {
+		ImageConcurrencyStats() openaiweb.ImageConcurrencyStats
+	}); ok {
+		stats.Upstream = backend.ImageConcurrencyStats()
+	}
+	stats.StalledAttempts = s.stalled.Load()
+	return stats
 }
 
 func (s *Service) Generate(ctx context.Context, req Request) (Response, error) {
@@ -303,6 +335,12 @@ func (s *Service) GenerateWithAccount(ctx context.Context, token string, req Req
 	if err != nil {
 		return Response{}, err
 	}
+	releaseGlobal, err := s.acquireGlobal(ctx)
+	if err != nil {
+		s.store.ReleaseImage(account.AccessToken)
+		return Response{}, err
+	}
+	defer releaseGlobal()
 	taskCtx, cancel := s.taskContext(ctx, req)
 	defer cancel()
 	released := false
@@ -375,6 +413,63 @@ func (s *Service) taskContext(parent context.Context, req Request) (context.Cont
 	return context.WithTimeout(parent, timeout)
 }
 
+func (s *Service) acquireGlobal(ctx context.Context) (func(), error) {
+	if s == nil || s.global == nil {
+		return func() {}, nil
+	}
+	return s.global.Acquire(ctx)
+}
+
+// acquireImageDispatch coordinates the global generation budget and account
+// lease without holding either one while the other resource is unavailable.
+func (s *Service) acquireImageDispatch(ctx context.Context, exclude map[string]bool, onWait, onReady func()) (accounts.Account, func(), error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if onReady != nil {
+		onReady()
+	}
+	waitReported := false
+	reportWait := func() {
+		if waitReported || onWait == nil {
+			return
+		}
+		waitReported = true
+		onWait()
+	}
+	for {
+		releaseGlobal, available := s.global.TryAcquire()
+		if !available {
+			reportWait()
+			if err := s.global.Wait(ctx); err != nil {
+				return accounts.Account{}, nil, err
+			}
+			if onReady != nil {
+				onReady()
+			}
+			waitReported = false
+			continue
+		}
+		account, acquired, err := s.store.TryAcquireForImage(exclude)
+		if err != nil {
+			releaseGlobal()
+			return accounts.Account{}, nil, err
+		}
+		if acquired {
+			return account, releaseGlobal, nil
+		}
+		releaseGlobal()
+		reportWait()
+		if err := s.store.WaitForImageAvailability(ctx, exclude); err != nil {
+			return accounts.Account{}, nil, err
+		}
+		if onReady != nil {
+			onReady()
+		}
+		waitReported = false
+	}
+}
+
 func (s *Service) generateOne(ctx context.Context, req Request) (openaiweb.ImageResult, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -387,6 +482,7 @@ func (s *Service) generateOne(ctx context.Context, req Request) (openaiweb.Image
 	}
 	var lastErr error
 	imageAttempts := 0
+	switches := 0
 	authenticationRetries := 0
 	var taskCtx context.Context
 	var cancelTask context.CancelFunc
@@ -400,8 +496,15 @@ func (s *Service) generateOne(ctx context.Context, req Request) (openaiweb.Image
 		if taskCtx != nil {
 			acquireCtx = taskCtx
 		}
-		account, err := s.store.AcquireForImage(acquireCtx, exclude, func() {
+		account, releaseGlobal, err := s.acquireImageDispatch(acquireCtx, exclude, func() {
 			reportAccountWait(req, accounts.Account{})
+			if req.DispatchState != nil {
+				req.DispatchState("waiting")
+			}
+		}, func() {
+			if req.DispatchState != nil {
+				req.DispatchState("acquiring")
+			}
 		})
 		if err != nil {
 			if lastErr != nil {
@@ -414,9 +517,11 @@ func (s *Service) generateOne(ctx context.Context, req Request) (openaiweb.Image
 			taskCtx, cancelTask = s.taskContext(ctx, req)
 		}
 		log := openaiweb.AttemptLog{Attempt: len(attempts) + 1, AccountID: account.ID, AccountEmail: account.Email, Status: "running"}
+		log.Phase = "preparing"
 		account, err = s.prepareAccountForDispatch(account, req)
 		if err != nil {
 			s.store.ReleaseImage(account.AccessToken)
+			releaseGlobal()
 			lastErr = err
 			log.Status = "failed"
 			log.Error = err.Error()
@@ -433,11 +538,14 @@ func (s *Service) generateOne(ctx context.Context, req Request) (openaiweb.Image
 		}
 		log.AccountEmail = account.Email
 		imageAttempts++
+		log.Phase = "generating"
 		result, err := s.backend.GenerateImage(taskCtx, account, req)
+		applyAttemptDiagnostics(&log, result, err)
 		if err == nil {
 			_ = s.store.MarkImageSuccess(account.AccessToken)
 			s.reportAccountIdentity(req, account.AccessToken)
 			s.store.ReleaseImage(account.AccessToken)
+			releaseGlobal()
 			result, err = s.finalizeResult(taskCtx, account, result, req)
 			if err != nil {
 				log.Status = "failed"
@@ -466,12 +574,14 @@ func (s *Service) generateOne(ctx context.Context, req Request) (openaiweb.Image
 			log.RemovedAccount = removed
 		}
 		s.store.ReleaseImage(account.AccessToken)
-		attempts = append(attempts, log)
+		releaseGlobal()
 		if openaiweb.IsInteractiveChallengeError(err) {
+			attempts = append(attempts, log)
 			return openaiweb.ImageResult{Attempts: attempts}, err
 		}
 		if authenticationError {
 			if authenticationRetries >= maxAuthenticationRetries {
+				attempts = append(attempts, log)
 				return openaiweb.ImageResult{Attempts: attempts}, err
 			}
 			authenticationRetries++
@@ -479,8 +589,18 @@ func (s *Service) generateOne(ctx context.Context, req Request) (openaiweb.Image
 				maxAttempts++
 			}
 			reportAuthenticationRetry(req, account, err, authenticationRetries)
+			attempts = append(attempts, log)
 			continue
 		}
+		if openaiweb.IsImageGenerationStalled(err) {
+			switches++
+			log.SwitchReason = "generation_stalled"
+			if switches > s.currentConfig().ImageMaxSwitchesPerTask {
+				attempts = append(attempts, log)
+				return openaiweb.ImageResult{Attempts: attempts}, err
+			}
+		}
+		attempts = append(attempts, log)
 		if !openaiweb.IsRetryableImageError(err) {
 			return openaiweb.ImageResult{Attempts: attempts}, err
 		}
@@ -489,6 +609,32 @@ func (s *Service) generateOne(ctx context.Context, req Request) (openaiweb.Image
 		lastErr = fmt.Errorf("image generation failed")
 	}
 	return openaiweb.ImageResult{Attempts: attempts}, lastErr
+}
+
+func applyAttemptDiagnostics(log *openaiweb.AttemptLog, result openaiweb.ImageResult, err error) {
+	if log == nil {
+		return
+	}
+	diagnostics := result.Diagnostics
+	var stalled *openaiweb.ImageGenerationStalledError
+	if errors.As(err, &stalled) {
+		diagnostics = stalled.Diagnostics
+		if log.SwitchReason == "" {
+			log.SwitchReason = "generation_stalled"
+		}
+	}
+	if diagnostics.Phase != "" {
+		log.Phase = diagnostics.Phase
+	}
+	if diagnostics.PollCount > 0 {
+		log.PollCount = diagnostics.PollCount
+	}
+	if diagnostics.LastHTTPStatus > 0 {
+		log.LastHTTPStatus = diagnostics.LastHTTPStatus
+	}
+	if diagnostics.EmptyResultSecs > 0 {
+		log.EmptyResultSecs = diagnostics.EmptyResultSecs
+	}
 }
 
 // recordImageFailure applies dispatch backoff once for each failed attempt.
@@ -506,6 +652,11 @@ func (s *Service) recordImageFailure(token string, err error) {
 	}
 	if openaiweb.IsAuthenticationError(err) || openaiweb.IsNoFreeImageQuotaError(err) {
 		_ = s.store.MarkFailure(token, err)
+		return
+	}
+	if openaiweb.IsImageGenerationStalled(err) {
+		s.stalled.Add(1)
+		_ = s.store.MarkImageStalled(token, err)
 		return
 	}
 	if openaiweb.IsImageConversationTimeout(err) {

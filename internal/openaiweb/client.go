@@ -15,11 +15,13 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"imagepool/internal/accounts"
 	"imagepool/internal/browsertransport"
 	"imagepool/internal/config"
+	"imagepool/internal/limiters"
 	"imagepool/internal/proxy"
 )
 
@@ -69,7 +71,14 @@ type Client struct {
 	pollRequestTimeout          time.Duration
 	imageUploadTimeout          time.Duration
 	imageUploadSlots            chan struct{}
+	imageUploadActive           atomic.Int64
+	imageUploadWaiting          atomic.Int64
+	prepareSlots                *limiters.Gate
+	submitSlots                 *limiters.Gate
+	pollSlots                   *limiters.Gate
+	downloadSlots               *limiters.Gate
 	imagePreparationTimeout     time.Duration
+	stallTimeout                time.Duration
 	imageStreamOpenTimeout      time.Duration
 	imageStreamIdleTimeout      time.Duration
 	imageStreamReferenceTimeout time.Duration
@@ -128,7 +137,7 @@ func NewClient(cfg config.Config, opts ...ClientOption) *Client {
 	}
 	c := &Client{
 		baseURL: strings.TrimRight(cfg.ChatGPTBaseURL, "/"), imageModelSlug: cfg.ImageWebModelSlug,
-		pollTimeout: seconds(cfg.ImagePollTimeoutSecs), pollInterval: seconds(cfg.ImagePollIntervalSecs), pollInitialWait: seconds(cfg.ImagePollInitialWaitSecs), pollHeartbeatInterval: 15 * time.Second, pollRequestTimeout: 20 * time.Second, imageUploadTimeout: defaultImageUploadTimeout, imageUploadSlots: make(chan struct{}, defaultImageUploadConcurrency), imagePreparationTimeout: defaultImagePreparationTimeout, imageStreamOpenTimeout: defaultImageStreamOpenTimeout, imageStreamIdleTimeout: defaultImageStreamIdleWindow, imageStreamReferenceTimeout: defaultImageStreamReferenceWindow, settle: seconds(cfg.ImageSettleSecs),
+		pollTimeout: seconds(cfg.ImagePollTimeoutSecs), pollInterval: seconds(cfg.ImagePollIntervalSecs), pollInitialWait: seconds(cfg.ImagePollInitialWaitSecs), pollHeartbeatInterval: 15 * time.Second, pollRequestTimeout: 20 * time.Second, imageUploadTimeout: defaultImageUploadTimeout, imageUploadSlots: make(chan struct{}, cfg.ImageUploadParallel), prepareSlots: limiters.New(cfg.ImagePrepareParallel), submitSlots: limiters.New(cfg.ImageSubmitParallel), pollSlots: limiters.New(cfg.ImagePollParallel), downloadSlots: limiters.New(cfg.ImageDownloadParallel), imagePreparationTimeout: defaultImagePreparationTimeout, stallTimeout: seconds(cfg.ImageStallTimeoutSecs), imageStreamOpenTimeout: defaultImageStreamOpenTimeout, imageStreamIdleTimeout: defaultImageStreamIdleWindow, imageStreamReferenceTimeout: defaultImageStreamReferenceWindow, settle: seconds(cfg.ImageSettleSecs),
 		checkBeforeHit: cfg.ImageCheckBeforeHitEnabled, settleEnabled: cfg.ImageSettleEnabled,
 		httpClient: httpClient, resourceClient: resourceClient, proxyRuntime: cfg.ProxyRuntime, transport: cfg.UpstreamTransport, timeout: seconds(cfg.RequestTimeoutSecs), tlsClients: map[string]*http.Client{}, tlsResources: map[string]*http.Client{}, tlsStreamClients: map[string]*http.Client{}, bootstrapResources: map[bootstrapResourcesCacheKey]bootstrapResourcesCacheEntry{}, bootstrapFlights: map[bootstrapResourcesCacheKey]*bootstrapResourcesFlight{}, now: time.Now, newID: newUUID,
 		sleep: func(ctx context.Context, d time.Duration) error {
@@ -337,17 +346,24 @@ func (c *Client) GenerateImage(ctx context.Context, account accounts.Account, re
 	defer cancelPreparation()
 	effectivePrompt := imagePromptForWeb(req.Prompt, len(refs) > 0, req.Size, req.Quality)
 	progress(ProgressEvent{Progress: "bootstrapping", Message: "初始化 ChatGPT Web 会话"})
+	releasePreparation, err := c.acquirePhase(c.prepareSlots, preparationCtx)
+	if err != nil {
+		return ImageResult{}, c.imagePreparationError(ctx, err)
+	}
 	scripts, dataBuild, err := c.bootstrapWithResources(preparationCtx, account)
 	if err != nil {
+		releasePreparation()
 		return ImageResult{}, c.imagePreparationError(ctx, err)
 	}
 	progress(ProgressEvent{Progress: "getting_token", Message: "获取 sentinel token"})
 	requirements, err := c.chatRequirements(preparationCtx, account, scripts, dataBuild)
 	if err != nil {
+		releasePreparation()
 		return ImageResult{}, c.imagePreparationError(ctx, err)
 	}
 	progress(ProgressEvent{Progress: "preparing_conversation", Message: "准备生图会话"})
 	prepare, err := c.prepareImageConversationForStart(preparationCtx, account, effectivePrompt, backendModel, requirements, refs)
+	releasePreparation()
 	if err != nil {
 		return ImageResult{}, c.imagePreparationError(ctx, err)
 	}
@@ -357,7 +373,12 @@ func (c *Client) GenerateImage(ctx context.Context, account accounts.Account, re
 	progress(ProgressEvent{Progress: "starting_generation", Message: "提交生图请求"})
 	generationCtx, cancelGeneration := c.imageGenerationContext(attemptCtx)
 	defer cancelGeneration()
+	releaseSubmit, err := c.acquirePhase(c.submitSlots, generationCtx)
+	if err != nil {
+		return ImageResult{}, imageAttemptError(ctx, generationCtx, err)
+	}
 	conversationID, fileIDs, sedimentIDs, err := c.startImageGenerationWithinBudgetWithState(generationCtx, account, effectivePrompt, backendModel, requirements, prepare.ConduitToken, prepare.TurnTraceID, prepare.ParentMessageID, prepare.StartState, refs)
+	releaseSubmit()
 	if err != nil {
 		return ImageResult{}, imageAttemptError(ctx, generationCtx, err)
 	}
@@ -368,14 +389,14 @@ func (c *Client) GenerateImage(ctx context.Context, account accounts.Account, re
 			uploadedFileIDs = append(uploadedFileIDs, ref.FileID)
 		}
 	}
-	urls, err := c.resolveConversationImageURLs(generationCtx, account, conversationID, fileIDs, sedimentIDs, true, progress, uploadedFileIDs...)
+	urls, diagnostics, err := c.resolveConversationImageURLsWithDiagnostics(generationCtx, account, conversationID, fileIDs, sedimentIDs, true, progress, uploadedFileIDs...)
 	if err != nil {
 		return ImageResult{}, imageAttemptError(ctx, generationCtx, err)
 	}
 	if len(urls) == 0 {
 		return ImageResult{}, fmt.Errorf("upstream completed without generating images")
 	}
-	out := ImageResult{URLs: urls, ConversationID: conversationID, AccountEmail: account.Email, BackendModel: backendModel}
+	out := ImageResult{URLs: urls, ConversationID: conversationID, AccountEmail: account.Email, BackendModel: backendModel, Diagnostics: diagnostics}
 	if strings.EqualFold(req.ResponseFormat, "b64_json") {
 		b64, err := c.downloadBase64(generationCtx, account, urls)
 		if err != nil {
@@ -427,12 +448,62 @@ func (c *Client) acquireImageUploadSlot(ctx context.Context) (func(), error) {
 	if c.imageUploadSlots == nil {
 		return func() {}, nil
 	}
+	c.imageUploadWaiting.Add(1)
 	select {
 	case c.imageUploadSlots <- struct{}{}:
-		return func() { <-c.imageUploadSlots }, nil
+		c.imageUploadWaiting.Add(-1)
+		c.imageUploadActive.Add(1)
+		var once sync.Once
+		return func() {
+			once.Do(func() {
+				c.imageUploadActive.Add(-1)
+				<-c.imageUploadSlots
+			})
+		}, nil
 	case <-ctx.Done():
+		c.imageUploadWaiting.Add(-1)
 		return nil, ctx.Err()
 	}
+}
+
+func (c *Client) acquirePhase(gate *limiters.Gate, ctx context.Context) (func(), error) {
+	if gate == nil {
+		return func() {}, nil
+	}
+	return gate.Acquire(ctx)
+}
+
+type ImageConcurrencyStats struct {
+	Prepare  limiters.Stats `json:"prepare"`
+	Submit   limiters.Stats `json:"submit"`
+	Poll     limiters.Stats `json:"poll"`
+	Download limiters.Stats `json:"download"`
+	Upload   limiters.Stats `json:"upload"`
+}
+
+func (c *Client) ImageConcurrencyStats() ImageConcurrencyStats {
+	if c == nil {
+		return ImageConcurrencyStats{}
+	}
+	stats := ImageConcurrencyStats{}
+	if c.prepareSlots != nil {
+		stats.Prepare = c.prepareSlots.Stats()
+	}
+	if c.submitSlots != nil {
+		stats.Submit = c.submitSlots.Stats()
+	}
+	if c.pollSlots != nil {
+		stats.Poll = c.pollSlots.Stats()
+	}
+	if c.downloadSlots != nil {
+		stats.Download = c.downloadSlots.Stats()
+	}
+	if c.imageUploadSlots != nil {
+		stats.Upload.Limit = cap(c.imageUploadSlots)
+		stats.Upload.Active = int(c.imageUploadActive.Load())
+		stats.Upload.Waiting = int(c.imageUploadWaiting.Load())
+	}
+	return stats
 }
 
 // imageAttemptContext contains every network phase for one account. Upload,
@@ -911,6 +982,11 @@ func (c *Client) DownloadImageFor(ctx context.Context, account accounts.Account,
 }
 
 func (c *Client) downloadImageFor(ctx context.Context, account accounts.Account, imageURL string) ([]byte, error) {
+	releaseDownload, err := c.acquirePhase(c.downloadSlots, ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer releaseDownload()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, imageURL, nil)
 	if err != nil {
 		return nil, err

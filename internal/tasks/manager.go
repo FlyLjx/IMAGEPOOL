@@ -50,6 +50,59 @@ type queuedTask struct {
 	req images.Request
 }
 
+// dispatchWorkerLease is separate from the goroutine lifetime. A task can
+// remain in the account/global admission wait without consuming one of the
+// manager's active execution slots; it reacquires the slot immediately before
+// trying to enter upstream work.
+type dispatchWorkerLease struct {
+	manager *Manager
+	mu      sync.Mutex
+	held    bool
+}
+
+func (l *dispatchWorkerLease) state(state string) {
+	if l == nil || l.manager == nil {
+		return
+	}
+	switch state {
+	case "waiting":
+		l.release()
+	case "acquiring":
+		l.acquire()
+	}
+}
+
+func (l *dispatchWorkerLease) acquire() {
+	l.mu.Lock()
+	if l.held {
+		l.mu.Unlock()
+		return
+	}
+	l.mu.Unlock()
+	select {
+	case l.manager.workerSlots <- struct{}{}:
+		l.mu.Lock()
+		l.held = true
+		l.mu.Unlock()
+	case <-l.manager.dispatchStop:
+	}
+}
+
+func (l *dispatchWorkerLease) release() {
+	l.mu.Lock()
+	if !l.held {
+		l.mu.Unlock()
+		return
+	}
+	l.held = false
+	l.mu.Unlock()
+	<-l.manager.workerSlots
+}
+
+func (l *dispatchWorkerLease) close() {
+	l.release()
+}
+
 type LogEntry struct {
 	Time     time.Time      `json:"time"`
 	Level    string         `json:"level,omitempty"`
@@ -313,12 +366,14 @@ func (m *Manager) dispatchLoop() {
 				return
 			case m.workerSlots <- struct{}{}:
 			}
+			lease := &dispatchWorkerLease{manager: m, held: true}
 			m.workers.Add(1)
 			go func() {
 				defer func() {
-					<-m.workerSlots
+					lease.close()
 					m.workers.Done()
 				}()
+				job.req.DispatchState = lease.state
 				_, _ = m.run(job.ctx, job.id, job.req)
 			}()
 		}

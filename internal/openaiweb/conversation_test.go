@@ -451,6 +451,32 @@ func TestConsumeImageStreamReturnsEarlyTimeoutWithoutConversationID(t *testing.T
 	}
 }
 
+func TestPollImageResultsReportsStalledConversation(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/backend-api/conversation/conv-stalled" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+	cfg := config.Default()
+	cfg.ChatGPTBaseURL = srv.URL
+	client := NewClient(cfg, WithHTTPClient(srv.Client()))
+	client.pollTimeout = time.Second
+	client.pollInterval = time.Millisecond
+	client.stallTimeout = 25 * time.Millisecond
+	client.pollRequestTimeout = 20 * time.Millisecond
+	files, sediments, diagnostics, err := client.pollImageResultsWithProgressAndDiagnostics(context.Background(), accounts.Account{AccessToken: "token"}, "conv-stalled", nil, nil, nil)
+	if !errors.Is(err, ErrImageGenerationStalled) {
+		t.Fatalf("files=%#v sediments=%#v diagnostics=%#v err=%v", files, sediments, diagnostics, err)
+	}
+	if diagnostics.PollCount == 0 || diagnostics.LastHTTPStatus != http.StatusOK || diagnostics.EmptyResultSecs < 1 {
+		t.Fatalf("diagnostics=%#v", diagnostics)
+	}
+}
+
 func TestConsumeImageStreamFiltersUploadedReferenceWithoutRole(t *testing.T) {
 	payload := `data: {"conversation_id":"conv-1","message":{"content":{"parts":[{"asset_pointer":"file-service://file_uploaded"},{"asset_pointer":"file-service://file_00000000aaaaaaaaaaaaaaaaaaaaaaaa"}]}}}` + "\n\n"
 	client := NewClient(config.Default())

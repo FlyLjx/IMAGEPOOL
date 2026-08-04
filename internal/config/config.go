@@ -33,7 +33,15 @@ type Config struct {
 	ImageTaskTimeoutSecs                float64      `json:"image_task_timeout_secs"`
 	ImageSettleSecs                     float64      `json:"image_settle_secs"`
 	ImageCapacityBurstParallel          int          `json:"image_capacity_burst_parallel"`
+	ImageGlobalMaxInflight              int          `json:"image_global_max_inflight"`
+	ImagePrepareParallel                int          `json:"image_prepare_parallel"`
+	ImageSubmitParallel                 int          `json:"image_submit_parallel"`
+	ImagePollParallel                   int          `json:"image_poll_parallel"`
+	ImageDownloadParallel               int          `json:"image_download_parallel"`
+	ImageUploadParallel                 int          `json:"image_upload_parallel"`
 	ImageAccountMaxInflightPerAccount   int          `json:"image_account_max_inflight_per_account"`
+	ImageStallTimeoutSecs               float64      `json:"image_stall_timeout_secs"`
+	ImageMaxSwitchesPerTask             int          `json:"image_max_switches_per_task"`
 	ImageAccountPrecheckIntervalMinutes int          `json:"image_account_precheck_interval_minutes"`
 	ImageAccountPrecheckConcurrency     int          `json:"image_account_precheck_concurrency"`
 	ImageAccountPrecheckTimeoutSecs     float64      `json:"image_account_precheck_timeout_secs"`
@@ -104,7 +112,15 @@ func Default() Config {
 		ImageTaskTimeoutSecs:                630,
 		ImageSettleSecs:                     2,
 		ImageCapacityBurstParallel:          50,
+		ImageGlobalMaxInflight:              120,
+		ImagePrepareParallel:                20,
+		ImageSubmitParallel:                 20,
+		ImagePollParallel:                   80,
+		ImageDownloadParallel:               20,
+		ImageUploadParallel:                 12,
 		ImageAccountMaxInflightPerAccount:   1,
+		ImageStallTimeoutSecs:               150,
+		ImageMaxSwitchesPerTask:             2,
 		ImageAccountPrecheckIntervalMinutes: 10,
 		ImageAccountPrecheckConcurrency:     6,
 		ImageAccountPrecheckTimeoutSecs:     75,
@@ -321,11 +337,37 @@ func (c Config) Normalize() Config {
 	if c.ImageCapacityBurstParallel > 10000 {
 		c.ImageCapacityBurstParallel = 10000
 	}
+	if c.ImageGlobalMaxInflight <= 0 {
+		c.ImageGlobalMaxInflight = d.ImageGlobalMaxInflight
+	}
+	if c.ImageGlobalMaxInflight > 10000 {
+		c.ImageGlobalMaxInflight = 10000
+	}
+	c.ImagePrepareParallel = normalizePositiveParallel(c.ImagePrepareParallel, d.ImagePrepareParallel, 1000)
+	c.ImageSubmitParallel = normalizePositiveParallel(c.ImageSubmitParallel, d.ImageSubmitParallel, 1000)
+	c.ImagePollParallel = normalizePositiveParallel(c.ImagePollParallel, d.ImagePollParallel, 5000)
+	c.ImageDownloadParallel = normalizePositiveParallel(c.ImageDownloadParallel, d.ImageDownloadParallel, 1000)
+	c.ImageUploadParallel = normalizePositiveParallel(c.ImageUploadParallel, d.ImageUploadParallel, 1000)
 	if c.ImageAccountMaxInflightPerAccount <= 0 {
 		c.ImageAccountMaxInflightPerAccount = d.ImageAccountMaxInflightPerAccount
 	}
 	if c.ImageAccountMaxInflightPerAccount > 20 {
 		c.ImageAccountMaxInflightPerAccount = 20
+	}
+	if c.ImageStallTimeoutSecs <= 0 {
+		c.ImageStallTimeoutSecs = d.ImageStallTimeoutSecs
+	}
+	if c.ImageStallTimeoutSecs < 15 {
+		c.ImageStallTimeoutSecs = 15
+	}
+	if c.ImageStallTimeoutSecs >= c.ImagePollTimeoutSecs {
+		c.ImageStallTimeoutSecs = maxFloat(15, c.ImagePollTimeoutSecs-1)
+	}
+	if c.ImageMaxSwitchesPerTask <= 0 {
+		c.ImageMaxSwitchesPerTask = d.ImageMaxSwitchesPerTask
+	}
+	if c.ImageMaxSwitchesPerTask > 5 {
+		c.ImageMaxSwitchesPerTask = 5
 	}
 	if c.ImageAccountPrecheckIntervalMinutes <= 0 {
 		c.ImageAccountPrecheckIntervalMinutes = d.ImageAccountPrecheckIntervalMinutes
@@ -401,6 +443,23 @@ func (c Config) Normalize() Config {
 	}
 	c.APIKeys = keys
 	return c
+}
+
+func normalizePositiveParallel(value, fallback, maximum int) int {
+	if value <= 0 {
+		value = fallback
+	}
+	if value > maximum {
+		value = maximum
+	}
+	return value
+}
+
+func maxFloat(a, b float64) float64 {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func proxyRuntimeEmpty(value ProxyRuntime) bool {

@@ -584,6 +584,36 @@ func TestAcquireForImageCooldownWaitRespectsContext(t *testing.T) {
 	}
 }
 
+func TestTryAcquireForImageCoordinatesWithoutHoldingLease(t *testing.T) {
+	store := NewStore([]Account{{AccessToken: "one", CreatedAt: 1}}, "")
+	first, acquired, err := store.TryAcquireForImage(nil)
+	if err != nil || !acquired || first.AccessToken != "one" {
+		t.Fatalf("first=%#v acquired=%t err=%v", first, acquired, err)
+	}
+	if _, acquired, err := store.TryAcquireForImage(nil); err != nil || acquired {
+		t.Fatalf("occupied try acquire acquired=%t err=%v", acquired, err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- store.WaitForImageAvailability(ctx, nil) }()
+	time.Sleep(10 * time.Millisecond)
+	store.ReleaseImage(first.AccessToken)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("availability waiter did not wake")
+	}
+	second, acquired, err := store.TryAcquireForImage(nil)
+	if err != nil || !acquired || second.AccessToken != "one" {
+		t.Fatalf("second=%#v acquired=%t err=%v", second, acquired, err)
+	}
+	store.ReleaseImage(second.AccessToken)
+}
+
 func TestAcquireForImageLeaseReleaseBeatsCooldownTimer(t *testing.T) {
 	store := NewStore([]Account{
 		{AccessToken: "leased", CreatedAt: 2, Extra: map[string]any{}},

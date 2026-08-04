@@ -226,8 +226,16 @@ export type SettingsConfig = {
   image_poll_timeout_secs?: number | string;
   image_task_timeout_secs?: number | string;
   image_web_model_slug?: string;
+  image_global_max_inflight?: number | string;
+  image_prepare_parallel?: number | string;
+  image_submit_parallel?: number | string;
+  image_poll_parallel?: number | string;
+  image_download_parallel?: number | string;
+  image_upload_parallel?: number | string;
   image_account_concurrency?: number | string;
   image_account_max_inflight_per_account?: number | string;
+  image_stall_timeout_secs?: number | string;
+  image_max_switches_per_task?: number | string;
   image_account_precheck_interval_minutes?: number | string;
   image_account_precheck_concurrency?: number | string;
   image_account_precheck_timeout_secs?: number | string;
@@ -680,6 +688,17 @@ export type SchedulerDiagnostics = {
 
 export type ImagePoolCapacity = {
   generated_at: string;
+  concurrency?: {
+    global: ImagePoolLimiterStats;
+    upstream: {
+      prepare: ImagePoolLimiterStats;
+      submit: ImagePoolLimiterStats;
+      poll: ImagePoolLimiterStats;
+      download: ImagePoolLimiterStats;
+      upload: ImagePoolLimiterStats;
+    };
+    stalled_attempts: number;
+  } | null;
   tasks: {
     queued: number;
     running: number;
@@ -777,6 +796,12 @@ export type ImagePoolCapacity = {
     status: "idle" | "enough" | "saturated" | "shortage" | string;
     message: string;
   };
+};
+
+export type ImagePoolLimiterStats = {
+  limit: number;
+  active: number;
+  waiting: number;
 };
 
 export async function login(authKey: string) {

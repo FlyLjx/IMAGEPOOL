@@ -18,22 +18,26 @@ type ImageInput struct {
 }
 
 type ImageRequest struct {
-	Prompt          string                `json:"prompt"`
-	Model           string                `json:"model"`
-	N               int                   `json:"n"`
-	Size            string                `json:"size"`
-	Quality         string                `json:"quality"`
-	ResponseFormat  string                `json:"response_format"`
-	OutputFormat    string                `json:"output_format"`
-	Stream          bool                  `json:"stream"`
-	Async           bool                  `json:"async"`
-	CallbackURL     string                `json:"callback_url,omitempty"`
-	HDRepair        bool                  `json:"hd_repair,omitempty"`
-	References      []ImageInput          `json:"-"`
-	OutputBaseURL   string                `json:"-"`
-	TaskID          string                `json:"-"`
-	OwnerID         string                `json:"-"`
-	PublicModel     string                `json:"-"`
+	Prompt         string       `json:"prompt"`
+	Model          string       `json:"model"`
+	N              int          `json:"n"`
+	Size           string       `json:"size"`
+	Quality        string       `json:"quality"`
+	ResponseFormat string       `json:"response_format"`
+	OutputFormat   string       `json:"output_format"`
+	Stream         bool         `json:"stream"`
+	Async          bool         `json:"async"`
+	CallbackURL    string       `json:"callback_url,omitempty"`
+	HDRepair       bool         `json:"hd_repair,omitempty"`
+	References     []ImageInput `json:"-"`
+	OutputBaseURL  string       `json:"-"`
+	TaskID         string       `json:"-"`
+	OwnerID        string       `json:"-"`
+	PublicModel    string       `json:"-"`
+	// DispatchState is used by the async task manager to release its local
+	// worker slot while this request waits for a global or account lease.
+	// It is intentionally internal and never crosses the HTTP boundary.
+	DispatchState   func(string)          `json:"-"`
 	Progress        func(ProgressEvent)   `json:"-"`
 	AccountProgress func(AccountIdentity) `json:"-"`
 }
@@ -53,23 +57,37 @@ type ProgressEvent struct {
 }
 
 type AttemptLog struct {
-	Attempt        int    `json:"attempt,omitempty"`
-	AccountID      string `json:"account_id,omitempty"`
-	AccountEmail   string `json:"account_email,omitempty"`
-	BackendModel   string `json:"backend_model,omitempty"`
-	ConversationID string `json:"conversation_id,omitempty"`
-	Status         string `json:"status"`
-	Error          string `json:"error,omitempty"`
-	RemovedAccount bool   `json:"removed_account,omitempty"`
+	Attempt         int    `json:"attempt,omitempty"`
+	AccountID       string `json:"account_id,omitempty"`
+	AccountEmail    string `json:"account_email,omitempty"`
+	BackendModel    string `json:"backend_model,omitempty"`
+	ConversationID  string `json:"conversation_id,omitempty"`
+	Status          string `json:"status"`
+	Phase           string `json:"phase,omitempty"`
+	PollCount       int    `json:"poll_count,omitempty"`
+	LastHTTPStatus  int    `json:"last_http_status,omitempty"`
+	EmptyResultSecs int    `json:"empty_result_secs,omitempty"`
+	SwitchReason    string `json:"switch_reason,omitempty"`
+	CooldownUntil   string `json:"cooldown_until,omitempty"`
+	Error           string `json:"error,omitempty"`
+	RemovedAccount  bool   `json:"removed_account,omitempty"`
+}
+
+type ImageAttemptDiagnostics struct {
+	Phase           string
+	PollCount       int
+	LastHTTPStatus  int
+	EmptyResultSecs int
 }
 
 type ImageResult struct {
-	URLs           []string     `json:"urls,omitempty"`
-	B64JSON        []string     `json:"b64_json,omitempty"`
-	ConversationID string       `json:"conversation_id,omitempty"`
-	AccountEmail   string       `json:"account_email,omitempty"`
-	BackendModel   string       `json:"backend_model,omitempty"`
-	Attempts       []AttemptLog `json:"attempts,omitempty"`
+	URLs           []string                `json:"urls,omitempty"`
+	B64JSON        []string                `json:"b64_json,omitempty"`
+	ConversationID string                  `json:"conversation_id,omitempty"`
+	AccountEmail   string                  `json:"account_email,omitempty"`
+	BackendModel   string                  `json:"backend_model,omitempty"`
+	Attempts       []AttemptLog            `json:"attempts,omitempty"`
+	Diagnostics    ImageAttemptDiagnostics `json:"-"`
 }
 
 type AccountInfo struct {
@@ -93,8 +111,49 @@ var (
 	ErrPollTimeout               = errors.New("image poll timeout")
 	ErrImagePreparationTimeout   = errors.New("image preparation timeout")
 	ErrImageGenerationTerminated = errors.New("image generation terminated")
+	ErrImageGenerationStalled    = errors.New("image generation stalled")
 	ErrMissingConduitToken       = errors.New("missing conduit_token")
 )
+
+type ImageGenerationStalledError struct {
+	ConversationID string
+	ElapsedSecs    int
+	Diagnostics    ImageAttemptDiagnostics
+}
+
+func (e *ImageGenerationStalledError) Error() string {
+	elapsed := e.ElapsedSecs
+	if elapsed <= 0 {
+		elapsed = e.Diagnostics.EmptyResultSecs
+	}
+	if elapsed <= 0 {
+		elapsed = 1
+	}
+	conversationID := strings.TrimSpace(e.ConversationID)
+	if conversationID == "" {
+		return fmt.Sprintf("%s: 图片会话连续 %d 秒没有图片结果", ErrImageGenerationStalled, elapsed)
+	}
+	return fmt.Sprintf("%s: 图片会话连续 %d 秒没有图片结果; conversation_id=%s", ErrImageGenerationStalled, elapsed, conversationID)
+}
+
+func (e *ImageGenerationStalledError) Unwrap() error {
+	return ErrImageGenerationStalled
+}
+
+func NewImageGenerationStalledError(conversationID string, elapsedSecs int, diagnostics ImageAttemptDiagnostics) error {
+	if elapsedSecs <= 0 {
+		elapsedSecs = diagnostics.EmptyResultSecs
+	}
+	if elapsedSecs <= 0 {
+		elapsedSecs = 1
+	}
+	return &ImageGenerationStalledError{ConversationID: strings.TrimSpace(conversationID), ElapsedSecs: elapsedSecs, Diagnostics: diagnostics}
+}
+
+func IsImageGenerationStalled(err error) bool {
+	var stalled *ImageGenerationStalledError
+	return errors.As(err, &stalled)
+}
 
 // ImageConversationTimeoutError marks the case where ChatGPT has already
 // accepted an image conversation but the generated image is still not available
@@ -167,6 +226,9 @@ func PublicErrorMessage(err error) string {
 	if errors.Is(err, ErrPollTimeout) {
 		return PublicImagePollTimeoutMessage
 	}
+	if errors.Is(err, ErrImageGenerationStalled) {
+		return "OAI侧生图长时间没有返回图片，系统已重新选择账号继续处理。"
+	}
 	return PublicErrorText(err.Error())
 }
 
@@ -188,6 +250,9 @@ func PublicErrorText(message string) string {
 		strings.Contains(message, "ChatGPT 生图任务已等待") ||
 		strings.Contains(message, "ChatGPT 生图超时") {
 		return PublicImagePollTimeoutMessage
+	}
+	if strings.Contains(lower, "image generation stalled") || strings.Contains(message, "连续") && strings.Contains(message, "没有图片结果") {
+		return "OAI侧生图长时间没有返回图片，系统已重新选择账号继续处理。"
 	}
 	if strings.Contains(lower, "upstream ") ||
 		strings.Contains(lower, "/backend-api/") ||
@@ -361,7 +426,7 @@ func IsRetryableImageError(err error) bool {
 		return true
 	}
 	text := strings.ToLower(err.Error())
-	if IsAuthenticationError(err) || IsNoFreeImageQuotaError(err) || errors.Is(err, ErrPollTimeout) || errors.Is(err, ErrImagePreparationTimeout) || errors.Is(err, ErrImageGenerationTerminated) || errors.Is(err, ErrMissingConduitToken) {
+	if IsAuthenticationError(err) || IsNoFreeImageQuotaError(err) || errors.Is(err, ErrPollTimeout) || errors.Is(err, ErrImagePreparationTimeout) || errors.Is(err, ErrImageGenerationTerminated) || errors.Is(err, ErrImageGenerationStalled) || errors.Is(err, ErrMissingConduitToken) {
 		return true
 	}
 	var upstream *UpstreamError

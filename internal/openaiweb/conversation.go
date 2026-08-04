@@ -665,25 +665,34 @@ func (c *Client) ResolveConversationImageURLs(ctx context.Context, account accou
 }
 
 func (c *Client) resolveConversationImageURLs(ctx context.Context, account accounts.Account, conversationID string, fileIDs, sedimentIDs []string, poll bool, progress func(ProgressEvent), excludeFileIDs ...string) ([]string, error) {
+	urls, _, err := c.resolveConversationImageURLsWithDiagnostics(ctx, account, conversationID, fileIDs, sedimentIDs, poll, progress, excludeFileIDs...)
+	return urls, err
+}
+
+func (c *Client) resolveConversationImageURLsWithDiagnostics(ctx context.Context, account accounts.Account, conversationID string, fileIDs, sedimentIDs []string, poll bool, progress func(ProgressEvent), excludeFileIDs ...string) ([]string, ImageAttemptDiagnostics, error) {
+	diagnostics := ImageAttemptDiagnostics{Phase: "resolving_image"}
 	excluded := idSet(excludeFileIDs)
 	fileIDs = filterExcludedIDs(fileIDs, excluded)
 	sedimentIDs = filterExcludedIDs(sedimentIDs, excluded)
 	var initialResolveErr error
 	if len(fileIDs) > 0 || len(sedimentIDs) > 0 {
 		if urls, err := c.resolveImageURLs(ctx, account, conversationID, fileIDs, sedimentIDs); len(urls) > 0 {
-			return urls, nil
+			return urls, diagnostics, nil
 		} else {
 			initialResolveErr = err
 		}
 	}
 	if poll && conversationID != "" {
-		f, s, err := c.pollImageResultsWithProgress(ctx, account, conversationID, fileIDs, sedimentIDs, progress, excluded)
+		f, s, pollDiagnostics, err := c.pollImageResultsWithProgressAndDiagnostics(ctx, account, conversationID, fileIDs, sedimentIDs, progress, excluded)
+		if pollDiagnostics.Phase != "" {
+			diagnostics = pollDiagnostics
+		}
 		if err != nil {
 			if errors.Is(err, ErrImageGenerationTerminated) {
-				return nil, err
+				return nil, diagnostics, err
 			}
 			if len(fileIDs) == 0 && len(sedimentIDs) == 0 {
-				return nil, err
+				return nil, diagnostics, err
 			}
 		} else {
 			fileIDs = appendUnique(fileIDs, filterExcludedIDs(f, excluded)...)
@@ -692,12 +701,12 @@ func (c *Client) resolveConversationImageURLs(ctx context.Context, account accou
 	}
 	urls, err := c.resolveImageURLs(ctx, account, conversationID, filterExcludedIDs(fileIDs, excluded), sedimentIDs)
 	if err != nil {
-		return nil, err
+		return nil, diagnostics, err
 	}
 	if len(urls) == 0 && initialResolveErr != nil {
-		return nil, fmt.Errorf("image stream references could not be resolved: %w", initialResolveErr)
+		return nil, diagnostics, fmt.Errorf("image stream references could not be resolved: %w", initialResolveErr)
 	}
-	return urls, nil
+	return urls, diagnostics, nil
 }
 
 func (c *Client) pollImageResults(ctx context.Context, account accounts.Account, conversationID string, initialFileIDs, initialSedimentIDs []string, excludedFileIDsArg ...map[string]bool) ([]string, []string, error) {
@@ -705,13 +714,23 @@ func (c *Client) pollImageResults(ctx context.Context, account accounts.Account,
 }
 
 func (c *Client) pollImageResultsWithProgress(ctx context.Context, account accounts.Account, conversationID string, initialFileIDs, initialSedimentIDs []string, progress func(ProgressEvent), excludedFileIDsArg ...map[string]bool) ([]string, []string, error) {
+	fileIDs, sedimentIDs, _, err := c.pollImageResultsWithProgressAndDiagnostics(ctx, account, conversationID, initialFileIDs, initialSedimentIDs, progress, excludedFileIDsArg...)
+	return fileIDs, sedimentIDs, err
+}
+
+func (c *Client) pollImageResultsWithProgressAndDiagnostics(ctx context.Context, account accounts.Account, conversationID string, initialFileIDs, initialSedimentIDs []string, progress func(ProgressEvent), excludedFileIDsArg ...map[string]bool) ([]string, []string, ImageAttemptDiagnostics, error) {
 	excludedFileIDs := map[string]bool{}
 	if len(excludedFileIDsArg) > 0 && excludedFileIDsArg[0] != nil {
 		excludedFileIDs = excludedFileIDsArg[0]
 	}
 	fileIDs := filterExcludedIDs(initialFileIDs, excludedFileIDs)
 	sedimentIDs := filterExcludedIDs(initialSedimentIDs, excludedFileIDs)
+	diagnostics := ImageAttemptDiagnostics{Phase: "polling_image"}
 	startedAt := time.Now()
+	emptyStartedAt := startedAt
+	if len(fileIDs) > 0 || len(sedimentIDs) > 0 {
+		emptyStartedAt = time.Time{}
+	}
 	pollTimeout := c.pollTimeout
 	if pollTimeout <= 0 {
 		pollTimeout = 600 * time.Second
@@ -727,10 +746,24 @@ func (c *Client) pollImageResultsWithProgress(ctx context.Context, account accou
 	if len(fileIDs) == 0 && len(sedimentIDs) == 0 && c.pollInitialWait > 0 {
 		if err := c.sleep(ctx, c.pollInitialWait); err != nil {
 			if errors.Is(err, context.DeadlineExceeded) {
-				return nil, nil, pollTimeoutError()
+				return nil, nil, diagnostics, pollTimeoutError()
 			}
-			return nil, nil, err
+			return nil, nil, diagnostics, err
 		}
+	}
+	stallTimeout := c.stallTimeout
+	if stallTimeout <= 0 {
+		stallTimeout = 150 * time.Second
+	}
+	maybeStalled := func() error {
+		if emptyStartedAt.IsZero() || time.Since(emptyStartedAt) < stallTimeout {
+			return nil
+		}
+		diagnostics.EmptyResultSecs = int(time.Since(emptyStartedAt).Round(time.Second).Seconds())
+		if diagnostics.EmptyResultSecs <= 0 {
+			diagnostics.EmptyResultSecs = 1
+		}
+		return NewImageGenerationStalledError(conversationID, diagnostics.EmptyResultSecs, diagnostics)
 	}
 	lastHeartbeat := startedAt
 	reportHeartbeat := func() {
@@ -769,23 +802,41 @@ func (c *Client) pollImageResultsWithProgress(ctx context.Context, account accou
 	for time.Now().Before(deadline) {
 		reportHeartbeat()
 		pollCtx, cancel := c.pollRequestContext(ctx, deadline)
+		diagnostics.PollCount++
+		releasePoll, acquireErr := c.acquirePhase(c.pollSlots, pollCtx)
+		if acquireErr != nil {
+			cancel()
+			return nil, nil, diagnostics, acquireErr
+		}
 		conversation, err := c.getConversation(pollCtx, account, conversationID)
+		releasePoll()
 		cancel()
 		reportHeartbeat()
 		if err != nil {
+			diagnostics.LastHTTPStatus = imagePollStatusCode(err)
+			if ctx.Err() != nil {
+				if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+					return nil, nil, diagnostics, pollTimeoutError()
+				}
+				return nil, nil, diagnostics, err
+			}
+			if stalledErr := maybeStalled(); stalledErr != nil {
+				return nil, nil, diagnostics, stalledErr
+			}
 			// Fresh image conversations can return conversation_inaccessible before
 			// their document is available for polling. Keep the same account and
 			// conversation ID; switching accounts cannot access this conversation.
 			if IsConversationInaccessibleError(err) || isRetryableImagePollError(err) {
 				if err := waitForNextPoll(); err != nil {
-					return nil, nil, err
+					return nil, nil, diagnostics, err
 				}
 				continue
 			}
-			return nil, nil, err
+			return nil, nil, diagnostics, err
 		}
+		diagnostics.LastHTTPStatus = http.StatusOK
 		if terminalErr := findImageGenerationTerminalError(conversation); terminalErr != nil {
-			return nil, nil, terminalErr
+			return nil, nil, diagnostics, terminalErr
 		}
 		f, s := ExtractImageReferenceIDs(conversation)
 		f = filterExcludedIDs(f, excludedFileIDs)
@@ -795,22 +846,25 @@ func (c *Client) pollImageResultsWithProgress(ctx context.Context, account accou
 		if len(fileIDs) > 0 || len(sedimentIDs) > 0 {
 			hit := strings.Join(fileIDs, ",") + "|" + strings.Join(sedimentIDs, ",")
 			if !c.checkBeforeHit || !c.settleEnabled || lastHit == hit {
-				return fileIDs, sedimentIDs, nil
+				return fileIDs, sedimentIDs, diagnostics, nil
 			}
 			lastHit = hit
 			if err := c.sleep(ctx, c.settle); err != nil {
-				return nil, nil, err
+				return nil, nil, diagnostics, err
 			}
 			continue
 		}
 		if policy := findContentPolicyText(conversation); policy != "" {
-			return nil, nil, fmt.Errorf("%w: %s", ErrContentPolicy, policy)
+			return nil, nil, diagnostics, fmt.Errorf("%w: %s", ErrContentPolicy, policy)
+		}
+		if stalledErr := maybeStalled(); stalledErr != nil {
+			return nil, nil, diagnostics, stalledErr
 		}
 		if err := waitForNextPoll(); err != nil {
-			return nil, nil, err
+			return nil, nil, diagnostics, err
 		}
 	}
-	return nil, nil, pollTimeoutError()
+	return nil, nil, diagnostics, pollTimeoutError()
 }
 
 // adaptiveImagePollDelay retains a quick first check while preventing a
@@ -872,6 +926,17 @@ func isRetryableImagePollError(err error) bool {
 		strings.Contains(message, "temporarily unavailable")
 }
 
+func imagePollStatusCode(err error) int {
+	if err == nil {
+		return http.StatusOK
+	}
+	var upstream *UpstreamError
+	if errors.As(err, &upstream) {
+		return upstream.StatusCode
+	}
+	return 0
+}
+
 func (c *Client) getConversation(ctx context.Context, account accounts.Account, conversationID string) (map[string]any, error) {
 	path := "/backend-api/conversation/" + conversationID
 	var out map[string]any
@@ -919,7 +984,13 @@ func (c *Client) resolveImageURLs(ctx context.Context, account accounts.Account,
 		if id == "file_upload" {
 			continue
 		}
+		releaseDownload, err := c.acquirePhase(c.downloadSlots, ctx)
+		if err != nil {
+			failures = append(failures, fmt.Errorf("resolve file %s: %w", id, err))
+			continue
+		}
 		resolved, err := c.resolveFileDownloadURL(ctx, account, conversationID, id)
+		releaseDownload()
 		if err != nil {
 			failures = append(failures, fmt.Errorf("resolve file %s: %w", id, err))
 			continue
@@ -932,7 +1003,14 @@ func (c *Client) resolveImageURLs(ctx context.Context, account accounts.Account,
 		}
 		path := "/backend-api/conversation/" + conversationID + "/attachment/" + id + "/download"
 		var out map[string]any
-		if err := c.doJSON(ctx, account, http.MethodGet, path, path, nil, map[string]string{"Accept": "application/json"}, &out); err != nil {
+		releaseDownload, err := c.acquirePhase(c.downloadSlots, ctx)
+		if err != nil {
+			failures = append(failures, fmt.Errorf("resolve attachment %s: %w", id, err))
+			continue
+		}
+		err = c.doJSON(ctx, account, http.MethodGet, path, path, nil, map[string]string{"Accept": "application/json"}, &out)
+		releaseDownload()
+		if err != nil {
 			failures = append(failures, fmt.Errorf("resolve attachment %s: %w", id, err))
 			continue
 		}

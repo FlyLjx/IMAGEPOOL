@@ -98,7 +98,15 @@ export function ConfigCard() {
   const setImageRetentionDays = useSettingsStore((state) => state.setImageRetentionDays);
   const setImagePollTimeoutSecs = useSettingsStore((state) => state.setImagePollTimeoutSecs);
   const setImageCapacityBurstParallel = useSettingsStore((state) => state.setImageCapacityBurstParallel);
+  const setImageGlobalMaxInflight = useSettingsStore((state) => state.setImageGlobalMaxInflight);
+  const setImagePrepareParallel = useSettingsStore((state) => state.setImagePrepareParallel);
+  const setImageSubmitParallel = useSettingsStore((state) => state.setImageSubmitParallel);
+  const setImagePollParallel = useSettingsStore((state) => state.setImagePollParallel);
+  const setImageDownloadParallel = useSettingsStore((state) => state.setImageDownloadParallel);
+  const setImageUploadParallel = useSettingsStore((state) => state.setImageUploadParallel);
   const setImageAccountMaxInflightPerAccount = useSettingsStore((state) => state.setImageAccountMaxInflightPerAccount);
+  const setImageStallTimeoutSecs = useSettingsStore((state) => state.setImageStallTimeoutSecs);
+  const setImageMaxSwitchesPerTask = useSettingsStore((state) => state.setImageMaxSwitchesPerTask);
   const setImageWebModelSlug = useSettingsStore((state) => state.setImageWebModelSlug);
   const setProxy = useSettingsStore((state) => state.setProxy);
   const setBaseUrl = useSettingsStore((state) => state.setBaseUrl);
@@ -237,6 +245,86 @@ export function ConfigCard() {
               help="每个账号同时允许的上游生图任务数；1 最稳，最高 20。"
             />
           </Col>
+        </Row>
+
+        <Divider />
+        <SectionTitle title="图片号池并发" description="控制全局生图任务和各个上游阶段的压力；等待账号或全局槽位的任务会留在调度等待状态。" />
+        <Row gutter={[16, 16]}>
+          <Col xs={24} md={12} xl={6}>
+            <NumberInput
+              label="全局生图并发"
+              value={String(config.image_global_max_inflight || "")}
+              onChange={setImageGlobalMaxInflight}
+              placeholder="120"
+              help="同时占用的生图尝试上限，最高 10000。"
+            />
+          </Col>
+          <Col xs={24} md={12} xl={6}>
+            <NumberInput
+              label="准备阶段并发"
+              value={String(config.image_prepare_parallel || "")}
+              onChange={setImagePrepareParallel}
+              placeholder="20"
+              help="浏览器身份和生图准备阶段的并发上限。"
+            />
+          </Col>
+          <Col xs={24} md={12} xl={6}>
+            <NumberInput
+              label="提交阶段并发"
+              value={String(config.image_submit_parallel || "")}
+              onChange={setImageSubmitParallel}
+              placeholder="20"
+              help="创建生图会话、提交提示词的并发上限。"
+            />
+          </Col>
+          <Col xs={24} md={12} xl={6}>
+            <NumberInput
+              label="轮询阶段并发"
+              value={String(config.image_poll_parallel || "")}
+              onChange={setImagePollParallel}
+              placeholder="80"
+              help="同时发出的会话状态轮询请求上限。"
+            />
+          </Col>
+          <Col xs={24} md={12} xl={6}>
+            <NumberInput
+              label="下载阶段并发"
+              value={String(config.image_download_parallel || "")}
+              onChange={setImageDownloadParallel}
+              placeholder="20"
+              help="生成结果解析和下载请求的并发上限。"
+            />
+          </Col>
+          <Col xs={24} md={12} xl={6}>
+            <NumberInput
+              label="参考图上传并发"
+              value={String(config.image_upload_parallel || "")}
+              onChange={setImageUploadParallel}
+              placeholder="12"
+              help="参考图上传请求的并发上限。"
+            />
+          </Col>
+          <Col xs={24} md={12} xl={6}>
+            <NumberInput
+              label="无图切号阈值"
+              value={String(config.image_stall_timeout_secs || "")}
+              onChange={setImageStallTimeoutSecs}
+              placeholder="150"
+              help="连续无图片引用达到该秒数后冷却当前账号并切换新会话。"
+            />
+          </Col>
+          <Col xs={24} md={12} xl={6}>
+            <NumberInput
+              label="单任务最大切号"
+              value={String(config.image_max_switches_per_task || "")}
+              onChange={setImageMaxSwitchesPerTask}
+              placeholder="2"
+              help="卡住生图最多切换账号的次数，最高 5 次。"
+            />
+          </Col>
+        </Row>
+
+        <Row gutter={[16, 16]}>
           <Col xs={24} lg={12}>
             <Form.Item label="全局出站代理" extra="保存后用于所有 ChatGPT 请求；留空则直连。">
               <Space.Compact className="w-full">

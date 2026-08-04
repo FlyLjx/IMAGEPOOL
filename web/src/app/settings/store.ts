@@ -54,7 +54,15 @@ function normalizeConfig(config: SettingsConfig): SettingsConfig {
     image_poll_timeout_secs: Math.min(600, Number(config.image_poll_timeout_secs) || 600),
     image_task_timeout_secs: 630,
     image_capacity_burst_parallel: Math.max(1, Number(config.image_capacity_burst_parallel) || 50),
+    image_global_max_inflight: Math.min(10000, Math.max(1, Number(config.image_global_max_inflight) || 120)),
+    image_prepare_parallel: Math.min(1000, Math.max(1, Number(config.image_prepare_parallel) || 20)),
+    image_submit_parallel: Math.min(1000, Math.max(1, Number(config.image_submit_parallel) || 20)),
+    image_poll_parallel: Math.min(5000, Math.max(1, Number(config.image_poll_parallel) || 80)),
+    image_download_parallel: Math.min(1000, Math.max(1, Number(config.image_download_parallel) || 20)),
+    image_upload_parallel: Math.min(1000, Math.max(1, Number(config.image_upload_parallel) || 12)),
     image_account_max_inflight_per_account: Math.min(20, Math.max(1, Number(config.image_account_max_inflight_per_account) || 1)),
+    image_stall_timeout_secs: Math.min(599, Math.max(15, Number(config.image_stall_timeout_secs) || 150)),
+    image_max_switches_per_task: Math.min(5, Math.max(1, Number(config.image_max_switches_per_task) || 2)),
     image_web_model_slug: String(config.image_web_model_slug || "gpt-5-5"),
     image_account_concurrency: Number(config.image_account_concurrency || 3),
     image_account_precheck_interval_minutes: Number(config.image_account_precheck_interval_minutes || 10),
@@ -135,7 +143,15 @@ type SettingsStore = {
   setImageRetentionDays: (value: string) => void;
   setImagePollTimeoutSecs: (value: string) => void;
   setImageCapacityBurstParallel: (value: string) => void;
+  setImageGlobalMaxInflight: (value: string) => void;
+  setImagePrepareParallel: (value: string) => void;
+  setImageSubmitParallel: (value: string) => void;
+  setImagePollParallel: (value: string) => void;
+  setImageDownloadParallel: (value: string) => void;
+  setImageUploadParallel: (value: string) => void;
   setImageAccountMaxInflightPerAccount: (value: string) => void;
+  setImageStallTimeoutSecs: (value: string) => void;
+  setImageMaxSwitchesPerTask: (value: string) => void;
   setImageWebModelSlug: (value: string) => void;
   setAutoRemoveInvalidAccounts: (value: boolean) => void;
   setAutoRemoveRateLimitedAccounts: (value: boolean) => void;
@@ -217,7 +233,15 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         image_poll_timeout_secs: Math.min(600, Math.max(15, Number(config.image_poll_timeout_secs) || 600)),
         image_task_timeout_secs: 630,
         image_capacity_burst_parallel: Math.min(10000, Math.max(1, Number(config.image_capacity_burst_parallel) || 50)),
+        image_global_max_inflight: Math.min(10000, Math.max(1, Number(config.image_global_max_inflight) || 120)),
+        image_prepare_parallel: Math.min(1000, Math.max(1, Number(config.image_prepare_parallel) || 20)),
+        image_submit_parallel: Math.min(1000, Math.max(1, Number(config.image_submit_parallel) || 20)),
+        image_poll_parallel: Math.min(5000, Math.max(1, Number(config.image_poll_parallel) || 80)),
+        image_download_parallel: Math.min(1000, Math.max(1, Number(config.image_download_parallel) || 20)),
+        image_upload_parallel: Math.min(1000, Math.max(1, Number(config.image_upload_parallel) || 12)),
         image_account_max_inflight_per_account: Math.min(20, Math.max(1, Number(config.image_account_max_inflight_per_account) || 1)),
+        image_stall_timeout_secs: Math.min(599, Math.max(15, Number(config.image_stall_timeout_secs) || 150)),
+        image_max_switches_per_task: Math.min(5, Math.max(1, Number(config.image_max_switches_per_task) || 2)),
         image_web_model_slug: String(config.image_web_model_slug || "gpt-5-5").trim() || "gpt-5-5",
         image_account_concurrency: Math.max(1, Number(config.image_account_concurrency) || 3),
         image_account_precheck_interval_minutes: Math.max(1, Number(config.image_account_precheck_interval_minutes) || 10),
@@ -336,8 +360,40 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
     set((state) => (state.config ? { config: { ...state.config, image_capacity_burst_parallel: value } } : {}));
   },
 
+  setImageGlobalMaxInflight: (value) => {
+    set((state) => (state.config ? { config: { ...state.config, image_global_max_inflight: value } } : {}));
+  },
+
+  setImagePrepareParallel: (value) => {
+    set((state) => (state.config ? { config: { ...state.config, image_prepare_parallel: value } } : {}));
+  },
+
+  setImageSubmitParallel: (value) => {
+    set((state) => (state.config ? { config: { ...state.config, image_submit_parallel: value } } : {}));
+  },
+
+  setImagePollParallel: (value) => {
+    set((state) => (state.config ? { config: { ...state.config, image_poll_parallel: value } } : {}));
+  },
+
+  setImageDownloadParallel: (value) => {
+    set((state) => (state.config ? { config: { ...state.config, image_download_parallel: value } } : {}));
+  },
+
+  setImageUploadParallel: (value) => {
+    set((state) => (state.config ? { config: { ...state.config, image_upload_parallel: value } } : {}));
+  },
+
   setImageAccountMaxInflightPerAccount: (value) => {
     set((state) => (state.config ? { config: { ...state.config, image_account_max_inflight_per_account: value } } : {}));
+  },
+
+  setImageStallTimeoutSecs: (value) => {
+    set((state) => (state.config ? { config: { ...state.config, image_stall_timeout_secs: value } } : {}));
+  },
+
+  setImageMaxSwitchesPerTask: (value) => {
+    set((state) => (state.config ? { config: { ...state.config, image_max_switches_per_task: value } } : {}));
   },
 
   setImageWebModelSlug: (value) => {

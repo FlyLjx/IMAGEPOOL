@@ -351,6 +351,37 @@ func TestGenerateDoesNotSwitchAccountsAfterAcceptedConversationTimeout(t *testin
 	}
 }
 
+func TestGenerateSwitchesAccountAfterStalledConversation(t *testing.T) {
+	store := accounts.NewStore([]accounts.Account{
+		{Email: "first", AccessToken: "first", CreatedAt: 1, Extra: map[string]any{}},
+		{Email: "second", AccessToken: "second", CreatedAt: 2, Extra: map[string]any{}},
+	}, "")
+	stalled := openaiweb.NewImageGenerationStalledError("conv-stalled", 150, openaiweb.ImageAttemptDiagnostics{
+		Phase: "polling_image", PollCount: 25, LastHTTPStatus: 200, EmptyResultSecs: 150,
+	})
+	backend := &fakeBackend{errs: []error{stalled}}
+	service := NewService(config.Default(), store, backend)
+	response, err := service.Generate(context.Background(), Request{Prompt: "draw"})
+	if err != nil || backend.calls != 2 || len(response.Attempts) != 2 {
+		t.Fatalf("response=%#v err=%v calls=%d", response, err, backend.calls)
+	}
+	cooled := 0
+	for _, account := range store.List() {
+		if account.Extra["image_cooldown_reason"] == "generation_stalled" {
+			cooled++
+		}
+	}
+	if cooled != 1 {
+		t.Fatalf("stalled account cooldowns=%d accounts=%#v", cooled, store.List())
+	}
+	if response.Attempts[0].SwitchReason != "generation_stalled" || response.Attempts[0].PollCount != 25 || response.Attempts[0].LastHTTPStatus != 200 {
+		t.Fatalf("attempts=%#v", response.Attempts)
+	}
+	if got := service.ConcurrencyStats().StalledAttempts; got != 1 {
+		t.Fatalf("stalled attempts=%d want 1", got)
+	}
+}
+
 func TestGenerateRateLimitedAccountCoolsAndSwitchesImmediately(t *testing.T) {
 	store := accounts.NewStore([]accounts.Account{
 		{Email: "fallback", AccessToken: "fallback", CreatedAt: 1, Extra: map[string]any{}},
@@ -479,6 +510,53 @@ func TestGenerateQueuesUntilAnOccupiedAccountIsReleased(t *testing.T) {
 	}
 	if calls, max := backend.stats(); calls != 2 || max != 1 {
 		t.Fatalf("calls=%d maxActive=%d", calls, max)
+	}
+}
+
+func TestGenerateHonorsGlobalInflightLimit(t *testing.T) {
+	cfg := config.Default()
+	cfg.ImageGlobalMaxInflight = 1
+	cfg.ImageAccountMaxInflightPerAccount = 2
+	store := accounts.NewStore([]accounts.Account{
+		{Email: "one", AccessToken: "one", CreatedAt: 1},
+		{Email: "two", AccessToken: "two", CreatedAt: 2},
+	}, "")
+	backend := &serialImageBackend{
+		fakeBackend: &fakeBackend{},
+		started:     make(chan struct{}, 2),
+		release:     make(chan struct{}),
+	}
+	service := NewService(cfg, store, backend)
+	done := make(chan error, 2)
+	for i := 0; i < 2; i++ {
+		go func() {
+			_, err := service.Generate(context.Background(), Request{Prompt: "draw"})
+			done <- err
+		}()
+	}
+	select {
+	case <-backend.started:
+	case <-time.After(time.Second):
+		t.Fatal("first generation did not start")
+	}
+	select {
+	case <-backend.started:
+		t.Fatal("global generation limit was bypassed")
+	case <-time.After(30 * time.Millisecond):
+	}
+	if _, maxActive := backend.stats(); maxActive != 1 {
+		t.Fatalf("max active=%d", maxActive)
+	}
+	close(backend.release)
+	for i := 0; i < 2; i++ {
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("generation did not finish")
+		}
 	}
 }
 

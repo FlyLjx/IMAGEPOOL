@@ -71,6 +71,11 @@ type queuedTaskSvc struct {
 	release chan struct{}
 }
 
+type dispatchWaitingTaskSvc struct {
+	waiting chan struct{}
+	release chan struct{}
+}
+
 type gatedTaskSvc struct {
 	started chan struct{}
 	release chan struct{}
@@ -269,6 +274,30 @@ func (s queuedTaskSvc) Generate(ctx context.Context, req images.Request) (images
 }
 
 func (s queuedTaskSvc) GenerateWithAccount(ctx context.Context, _ string, req images.Request) (images.Response, error) {
+	return s.Generate(ctx, req)
+}
+
+func (s *dispatchWaitingTaskSvc) Generate(ctx context.Context, req images.Request) (images.Response, error) {
+	if req.DispatchState != nil {
+		req.DispatchState("waiting")
+	}
+	select {
+	case s.waiting <- struct{}{}:
+	case <-ctx.Done():
+		return images.Response{}, ctx.Err()
+	}
+	select {
+	case <-s.release:
+		if req.DispatchState != nil {
+			req.DispatchState("acquiring")
+		}
+		return images.Response{Data: []images.Data{{URL: "u"}}}, nil
+	case <-ctx.Done():
+		return images.Response{}, ctx.Err()
+	}
+}
+
+func (s *dispatchWaitingTaskSvc) GenerateWithAccount(ctx context.Context, _ string, req images.Request) (images.Response, error) {
 	return s.Generate(ctx, req)
 }
 
@@ -777,6 +806,51 @@ func TestAsyncDispatcherBoundsConcurrentWorkers(t *testing.T) {
 	svc.mu.Unlock()
 	if maxWorkers != asyncTaskWorkerLimit {
 		t.Fatalf("max active workers=%d, want %d", maxWorkers, asyncTaskWorkerLimit)
+	}
+}
+
+func TestAsyncDispatcherReleasesWorkersWhileAdmissionWaits(t *testing.T) {
+	const taskCount = asyncTaskWorkerLimit + 24
+	svc := &dispatchWaitingTaskSvc{
+		waiting: make(chan struct{}, taskCount),
+		release: make(chan struct{}),
+	}
+	m := NewManager(svc)
+	defer m.Close()
+
+	for index := 0; index < taskCount; index++ {
+		m.SubmitGeneration("", images.Request{Prompt: "draw"})
+	}
+	deadline := time.After(2 * time.Second)
+	for {
+		stats := m.Stats()
+		if len(svc.waiting) == taskCount {
+			if stats.QueueDepth != 0 || stats.ActiveWorkers != 0 {
+				t.Fatalf("waiting tasks still occupied dispatcher resources: stats=%#v", stats)
+			}
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("only %d/%d tasks reached admission wait; stats=%#v", len(svc.waiting), taskCount, stats)
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+
+	close(svc.release)
+	deadline = time.After(2 * time.Second)
+	for {
+		stats := m.Stats()
+		if stats.ActiveTasks == 0 {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("waiting tasks did not complete: stats=%#v", stats)
+		default:
+			time.Sleep(time.Millisecond)
+		}
 	}
 }
 
