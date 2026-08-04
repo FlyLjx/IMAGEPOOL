@@ -112,6 +112,7 @@ func (s *Server) handleImagePoolCapacity(w http.ResponseWriter, r *http.Request)
 		cfg.ImageCapacityBurstParallel = boundedQueryInt(r, "burst_parallel", cfg.ImageCapacityBurstParallel, 1, 10000)
 	}
 	factors, estimate := estimateImagePoolCapacity(cfg, taskPressure, recent, accountStats)
+	estimate = alignImagePoolRegistrationEstimate(cfg, taskPressure, factors, accountStats, estimate)
 	var concurrency any
 	if s.images != nil {
 		concurrency = s.images.ConcurrencyStats()
@@ -379,6 +380,28 @@ func estimateImagePoolCapacity(cfg config.Config, pressure imagePoolTaskPressure
 	}
 	estimate.Status, estimate.Message = imagePoolCapacityStatus(pressure, accountStats, estimate)
 	return factors, estimate
+}
+
+// alignImagePoolRegistrationEstimate makes the public capacity response use
+// the same task-pressure target as the automatic registration controller. The
+// two values used to be calculated independently: the dashboard could report
+// zero recommended registrations while the controller was already starting a
+// registration batch for the same queue.
+func alignImagePoolRegistrationEstimate(cfg config.Config, pressure imagePoolTaskPressure, factors imagePoolCapacityFactors, accountStats accounts.ImageDispatchStats, estimate imagePoolCapacityEstimate) imagePoolCapacityEstimate {
+	target := autoRegistrationTarget(cfg, pressure, factors, estimate)
+	if target > estimate.RecommendedRequiredUsableAccounts {
+		estimate.RecommendedRequiredUsableAccounts = target
+	}
+	currentUsable := maxInt(0, accountStats.Usable)
+	estimate.RecommendedAddUsableAccounts = maxInt(0, estimate.RecommendedRequiredUsableAccounts-currentUsable)
+	if estimate.RecommendedAddUsableAccounts > 0 {
+		factor := registrationAdjustmentFactor(accountStats.DeadRate / 100)
+		estimate.RecommendedRegisterAccounts = int(math.Ceil(float64(estimate.RecommendedAddUsableAccounts) * factor))
+	} else {
+		estimate.RecommendedRegisterAccounts = 0
+	}
+	estimate.Status, estimate.Message = imagePoolCapacityStatus(pressure, accountStats, estimate)
+	return estimate
 }
 
 func observedImageAverageSecs(cfg config.Config, recent imagePoolRecentTaskStats) float64 {

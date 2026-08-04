@@ -786,6 +786,9 @@ export type ImagePoolCapacity = {
     target_usable_accounts: number;
     batch_target_usable_accounts: number;
     need_usable_accounts: number;
+    recommended_required_usable_accounts?: number;
+    recommended_add_usable_accounts?: number;
+    recommended_register_accounts?: number;
     last_evaluation_at?: string;
     last_action_at?: string;
     next_action_at?: string;

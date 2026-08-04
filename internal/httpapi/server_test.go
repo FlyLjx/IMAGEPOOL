@@ -1574,6 +1574,29 @@ func TestImagePoolCapacityEstimateAdjustsRegistrationForDeadRate(t *testing.T) {
 	}
 }
 
+func TestImagePoolCapacityEstimateAlignsWithAutoRegistrationTarget(t *testing.T) {
+	cfg := config.Default()
+	cfg.ImagePoolMinUsableAccounts = 0
+	cfg.ImagePoolIdleFloorAccounts = 0
+	cfg.ImagePoolMaxUsableAccounts = 200
+	cfg.ImageAccountMaxInflightPerAccount = 1
+	pressure := imagePoolTaskPressure{Queued: 35, Pending: 35}
+	accountStats := accounts.ImageDispatchStats{Total: 17, Usable: 17, Dispatchable: 17, Idle: 17}
+	factors := imagePoolCapacityFactors{MaxInflightPerAccount: 1}
+	estimate := imagePoolCapacityEstimate{}
+	estimate = alignImagePoolRegistrationEstimate(cfg, pressure, factors, accountStats, estimate)
+
+	if estimate.RecommendedRequiredUsableAccounts != 35 {
+		t.Fatalf("required usable accounts=%d, want 35; estimate=%#v", estimate.RecommendedRequiredUsableAccounts, estimate)
+	}
+	if estimate.RecommendedAddUsableAccounts != 18 {
+		t.Fatalf("recommended add=%d, want 18; estimate=%#v", estimate.RecommendedAddUsableAccounts, estimate)
+	}
+	if estimate.RecommendedRegisterAccounts != 18 {
+		t.Fatalf("recommended register=%d, want 18; estimate=%#v", estimate.RecommendedRegisterAccounts, estimate)
+	}
+}
+
 func TestImagePoolCapacityEstimateDoesNotRegisterWhenIdle(t *testing.T) {
 	cfg := config.Default()
 	cfg.ImageCapacityBurstParallel = 50

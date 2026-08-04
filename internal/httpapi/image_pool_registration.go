@@ -14,22 +14,25 @@ import (
 // avoids having to infer registration activity from the manual registration
 // panel.
 type imagePoolAutoRegistrationStatus struct {
-	Enabled                     bool       `json:"enabled"`
-	Running                     bool       `json:"running"`
-	Automatic                   bool       `json:"automatic"`
-	Status                      string     `json:"status"`
-	Reason                      string     `json:"reason"`
-	PendingTasks                int        `json:"pending_tasks"`
-	IdleForSecs                 float64    `json:"idle_for_secs"`
-	CurrentUsableAccounts       int        `json:"current_usable_accounts"`
-	CurrentDispatchableAccounts int        `json:"current_dispatchable_accounts"`
-	InflightRegistrations       int        `json:"inflight_registrations"`
-	TargetUsableAccounts        int        `json:"target_usable_accounts"`
-	BatchTargetUsableAccounts   int        `json:"batch_target_usable_accounts"`
-	NeedUsableAccounts          int        `json:"need_usable_accounts"`
-	LastEvaluationAt            *time.Time `json:"last_evaluation_at,omitempty"`
-	LastActionAt                *time.Time `json:"last_action_at,omitempty"`
-	NextActionAt                *time.Time `json:"next_action_at,omitempty"`
+	Enabled                           bool       `json:"enabled"`
+	Running                           bool       `json:"running"`
+	Automatic                         bool       `json:"automatic"`
+	Status                            string     `json:"status"`
+	Reason                            string     `json:"reason"`
+	PendingTasks                      int        `json:"pending_tasks"`
+	IdleForSecs                       float64    `json:"idle_for_secs"`
+	CurrentUsableAccounts             int        `json:"current_usable_accounts"`
+	CurrentDispatchableAccounts       int        `json:"current_dispatchable_accounts"`
+	InflightRegistrations             int        `json:"inflight_registrations"`
+	TargetUsableAccounts              int        `json:"target_usable_accounts"`
+	BatchTargetUsableAccounts         int        `json:"batch_target_usable_accounts"`
+	NeedUsableAccounts                int        `json:"need_usable_accounts"`
+	RecommendedRequiredUsableAccounts int        `json:"recommended_required_usable_accounts"`
+	RecommendedAddUsableAccounts      int        `json:"recommended_add_usable_accounts"`
+	RecommendedRegisterAccounts       int        `json:"recommended_register_accounts"`
+	LastEvaluationAt                  *time.Time `json:"last_evaluation_at,omitempty"`
+	LastActionAt                      *time.Time `json:"last_action_at,omitempty"`
+	NextActionAt                      *time.Time `json:"next_action_at,omitempty"`
 }
 
 type imagePoolAutoRegistrationState struct {
@@ -83,6 +86,7 @@ func (s *Server) reconcileImagePoolAutoRegistration(now time.Time) {
 	recent := summarizeRecentImageTasks(recentItems, 60)
 	accountStats := s.accounts.ImageDispatchStats()
 	factors, estimate := estimateImagePoolCapacity(cfg, pressure, recent, accountStats)
+	estimate = alignImagePoolRegistrationEstimate(cfg, pressure, factors, accountStats, estimate)
 
 	s.autoRegistrationMu.Lock()
 	if pressure.Pending > 0 {
@@ -98,15 +102,18 @@ func (s *Server) reconcileImagePoolAutoRegistration(now time.Time) {
 	running := s.register.IsRunning()
 	automatic := s.register.IsAutomatic()
 	status := imagePoolAutoRegistrationStatus{
-		Enabled:                     cfg.ImagePoolAutoRegisterEnabled,
-		Running:                     running,
-		Automatic:                   automatic,
-		PendingTasks:                pressure.Pending,
-		CurrentUsableAccounts:       accountStats.Usable,
-		CurrentDispatchableAccounts: accountStats.Dispatchable,
-		InflightRegistrations:       registrationConfig.Stats.Running,
-		LastEvaluationAt:            timePtr(now),
-		LastActionAt:                timePtr(lastAction),
+		Enabled:                           cfg.ImagePoolAutoRegisterEnabled,
+		Running:                           running,
+		Automatic:                         automatic,
+		PendingTasks:                      pressure.Pending,
+		CurrentUsableAccounts:             accountStats.Usable,
+		CurrentDispatchableAccounts:       accountStats.Dispatchable,
+		InflightRegistrations:             registrationConfig.Stats.Running,
+		RecommendedRequiredUsableAccounts: estimate.RecommendedRequiredUsableAccounts,
+		RecommendedAddUsableAccounts:      estimate.RecommendedAddUsableAccounts,
+		RecommendedRegisterAccounts:       estimate.RecommendedRegisterAccounts,
+		LastEvaluationAt:                  timePtr(now),
+		LastActionAt:                      timePtr(lastAction),
 	}
 	if !idleSince.IsZero() {
 		status.IdleForSecs = roundFloat(now.Sub(idleSince).Seconds(), 1)
@@ -134,7 +141,7 @@ func (s *Server) reconcileImagePoolAutoRegistration(now time.Time) {
 		return
 	}
 
-	target := autoRegistrationTarget(cfg, pressure, factors, estimate)
+	target := estimate.RecommendedRequiredUsableAccounts
 	status.TargetUsableAccounts = target
 	status.NeedUsableAccounts = maxInt(0, target-accountStats.Usable)
 
