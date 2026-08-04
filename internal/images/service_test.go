@@ -47,6 +47,7 @@ type cacheBackend struct {
 	*fakeBackend
 	downloadedAccount accounts.Account
 	downloadErr       error
+	downloadErrs      map[string]error
 	data              []byte
 }
 
@@ -107,6 +108,9 @@ func (b *serialImageBackend) stats() (calls, max int) {
 
 func (c *cacheBackend) DownloadImageFor(ctx context.Context, account accounts.Account, imageURL string) ([]byte, error) {
 	c.downloadedAccount = account
+	if err := c.downloadErrs[account.AccessToken]; err != nil {
+		return nil, err
+	}
 	if c.downloadErr != nil {
 		return nil, c.downloadErr
 	}
@@ -854,23 +858,59 @@ func testPNGBytes(t *testing.T) []byte {
 	return buffer.Bytes()
 }
 
-func TestGenerateRemovesAccountAfterAuthenticatedCacheDownloadFailure(t *testing.T) {
+func TestGenerateSwitchesAndRemovesAccountAfterAuthenticatedCacheDownloadFailure(t *testing.T) {
 	cfg := config.Default()
 	cfg.ImageOutputDir = t.TempDir()
-	store := accounts.NewStore([]accounts.Account{{AccessToken: "token", CreatedAt: 1}}, "")
+	store := accounts.NewStore([]accounts.Account{
+		{Email: "invalid", AccessToken: "invalid", CreatedAt: 2},
+		{Email: "fallback", AccessToken: "fallback", CreatedAt: 1},
+	}, "")
 	backend := &cacheBackend{
 		fakeBackend: &fakeBackend{},
-		downloadErr: &openaiweb.UpstreamError{Path: "/backend-api/files/file/download", StatusCode: 401, Body: `{"error":{"code":"token_revoked"}}`},
+		downloadErrs: map[string]error{
+			"invalid": &openaiweb.UpstreamError{Path: "/backend-api/files/file/download", StatusCode: 401, Body: `{"error":{"code":"token_revoked"}}`},
+		},
 	}
 	response, err := NewService(cfg, store, backend, storage.NewService(cfg)).Generate(context.Background(), Request{Prompt: "draw", ResponseFormat: "url"})
-	if err != nil || len(response.Data) != 1 || response.Data[0].URL != "https://example.com/image.png" {
+	if err != nil || len(response.Data) != 1 || !strings.Contains(response.Data[0].URL, "/images/") {
 		t.Fatalf("response=%#v err=%v", response, err)
 	}
-	if backend.calls != 1 {
-		t.Fatalf("image generation retried after cache failure: calls=%d", backend.calls)
+	if backend.calls != 2 {
+		t.Fatalf("image generation did not retry after cache 401: calls=%d", backend.calls)
 	}
-	if _, found := store.Get("token"); found {
+	if _, found := store.Get("invalid"); found {
 		t.Fatalf("invalid cache-download account was not removed: %#v", store.List())
+	}
+	if _, found := store.Get("fallback"); !found || backend.downloadedAccount.AccessToken != "fallback" {
+		t.Fatalf("fallback account was not used after cache 401: accounts=%#v downloaded=%#v", store.List(), backend.downloadedAccount)
+	}
+}
+
+func TestGenerateSwitchesAndRemovesAccountAfterAuthenticatedBase64DownloadFailure(t *testing.T) {
+	cfg := config.Default()
+	store := accounts.NewStore([]accounts.Account{
+		{Email: "invalid", AccessToken: "invalid", CreatedAt: 2},
+		{Email: "fallback", AccessToken: "fallback", CreatedAt: 1},
+	}, "")
+	backend := &cacheBackend{
+		fakeBackend: &fakeBackend{},
+		downloadErrs: map[string]error{
+			"invalid": &openaiweb.UpstreamError{Path: "/backend-api/files/file/download", StatusCode: 401, Body: `{"error":{"code":"token_revoked"}}`},
+		},
+		data: testPNGBytes(t),
+	}
+	response, err := NewService(cfg, store, backend).Generate(context.Background(), Request{Prompt: "draw", ResponseFormat: "b64_json"})
+	if err != nil || len(response.Data) != 1 || response.Data[0].B64JSON == "" {
+		t.Fatalf("response=%#v err=%v", response, err)
+	}
+	if backend.calls != 2 {
+		t.Fatalf("image generation did not retry after base64 download 401: calls=%d", backend.calls)
+	}
+	if _, found := store.Get("invalid"); found {
+		t.Fatalf("invalid base64-download account was not removed: %#v", store.List())
+	}
+	if backend.downloadedAccount.AccessToken != "fallback" {
+		t.Fatalf("fallback account was not used after base64 download 401: %#v", backend.downloadedAccount)
 	}
 }
 

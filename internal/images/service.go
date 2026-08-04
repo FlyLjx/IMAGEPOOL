@@ -378,7 +378,7 @@ func (s *Service) GenerateWithAccount(ctx context.Context, token string, req Req
 	if err != nil {
 		s.recordImageFailure(account.AccessToken, err)
 		if openaiweb.IsAuthenticationError(err) {
-			_, _ = s.store.RemoveInvalidToken(account.AccessToken, err.Error())
+			s.removeInvalidImageAccount(account.AccessToken, err)
 		} else if openaiweb.IsNoFreeImageQuotaError(err) {
 			_, _ = s.store.RemoveQuotaExhausted(account.AccessToken, err)
 		}
@@ -393,6 +393,10 @@ func (s *Service) GenerateWithAccount(ctx context.Context, token string, req Req
 	result, err = s.finalizeResult(taskCtx, account, result, req)
 	response := responseWithModel(responseFromResult(result), publicModel)
 	if err != nil {
+		if openaiweb.IsAuthenticationError(err) {
+			s.recordImageFailure(account.AccessToken, err)
+			s.removeInvalidImageAccount(account.AccessToken, err)
+		}
 		return response, err
 	}
 	return withEstimatedUsage(response, req), nil
@@ -548,8 +552,21 @@ func (s *Service) generateOne(ctx context.Context, req Request) (openaiweb.Image
 			releaseGlobal()
 			result, err = s.finalizeResult(taskCtx, account, result, req)
 			if err != nil {
+				lastErr = err
 				log.Status = "failed"
 				log.Error = err.Error()
+				if openaiweb.IsAuthenticationError(err) {
+					log.RemovedAccount = s.removeInvalidImageAccount(account.AccessToken, err)
+					if authenticationRetries < maxAuthenticationRetries {
+						authenticationRetries++
+						if imageAttempts >= maxAttempts {
+							maxAttempts++
+						}
+						attempts = append(attempts, log)
+						reportAuthenticationRetry(req, account, err, authenticationRetries)
+						continue
+					}
+				}
 				attempts = append(attempts, log)
 				result.Attempts = append(result.Attempts, attempts...)
 				return result, err
@@ -567,8 +584,7 @@ func (s *Service) generateOne(ctx context.Context, req Request) (openaiweb.Image
 		s.recordImageFailure(account.AccessToken, err)
 		authenticationError := openaiweb.IsAuthenticationError(err)
 		if authenticationError {
-			removed, _ := s.store.RemoveInvalidToken(account.AccessToken, err.Error())
-			log.RemovedAccount = removed
+			log.RemovedAccount = s.removeInvalidImageAccount(account.AccessToken, err)
 		} else if openaiweb.IsNoFreeImageQuotaError(err) {
 			removed, _ := s.store.RemoveQuotaExhausted(account.AccessToken, err)
 			log.RemovedAccount = removed
@@ -609,6 +625,22 @@ func (s *Service) generateOne(ctx context.Context, req Request) (openaiweb.Image
 		lastErr = fmt.Errorf("image generation failed")
 	}
 	return openaiweb.ImageResult{Attempts: attempts}, lastErr
+}
+
+// removeInvalidImageAccount immediately evicts an account after an upstream
+// authentication failure. The caller owns releasing any active image lease
+// and global slot; this helper only changes account-pool membership.
+func (s *Service) removeInvalidImageAccount(token string, err error) bool {
+	if s == nil || s.store == nil || !openaiweb.IsAuthenticationError(err) {
+		return false
+	}
+	removed, removeErr := s.store.RemoveInvalidToken(token, err.Error())
+	if removeErr != nil {
+		log.Printf("remove account after image authentication failure: %v", removeErr)
+	} else if removed {
+		log.Printf("removed account after image authentication failure")
+	}
+	return removed
 }
 
 func applyAttemptDiagnostics(log *openaiweb.AttemptLog, result openaiweb.ImageResult, err error) {
@@ -848,7 +880,6 @@ func (s *Service) cacheResult(ctx context.Context, account accounts.Account, res
 	}
 	baseURL := strings.TrimRight(strings.TrimSpace(req.OutputBaseURL), "/")
 	urls := make([]string, 0, len(result.URLs)+len(result.B64JSON))
-	credentialInvalid := false
 	for _, encoded := range result.B64JSON {
 		data, err := base64.StdEncoding.DecodeString(encoded)
 		if err != nil {
@@ -880,21 +911,11 @@ func (s *Service) cacheResult(ctx context.Context, account accounts.Account, res
 		return result, nil
 	}
 	for _, remoteURL := range result.URLs {
-		if credentialInvalid {
-			urls = append(urls, remoteURL)
-			continue
-		}
 		data, err := downloader.DownloadImageFor(ctx, account, remoteURL)
 		if err != nil {
 			log.Printf("image cache download failed: %v", err)
 			if isCacheDownloadAuthenticationFailure(err) {
-				credentialInvalid = true
-				removed, removeErr := s.store.RemoveInvalidToken(account.AccessToken, err.Error())
-				if removeErr != nil {
-					log.Printf("remove account after image cache authentication failure: %v", removeErr)
-				} else if removed {
-					log.Printf("removed account after image cache authentication failure")
-				}
+				return result, err
 			}
 			urls = append(urls, remoteURL)
 			continue
