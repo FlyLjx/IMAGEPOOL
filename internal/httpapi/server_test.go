@@ -1574,6 +1574,65 @@ func TestImagePoolCapacityEstimateAdjustsRegistrationForDeadRate(t *testing.T) {
 	}
 }
 
+func TestImagePoolCapacityReportsQuotaAndAccountConcurrency(t *testing.T) {
+	cfg := config.Default()
+	cfg.ImageAccountMaxInflightPerAccount = 3
+	accountStats := accounts.ImageDispatchStats{
+		Total:                      4,
+		Usable:                     4,
+		Dispatchable:               4,
+		Idle:                       4,
+		MaxInflightPerAccount:      3,
+		DispatchableSlots:          12,
+		KnownRemainingQuota:        20,
+		KnownQuotaAccounts:         4,
+		AverageKnownRemainingQuota: 5,
+	}
+
+	factors, estimate := estimateImagePoolCapacity(cfg, imagePoolTaskPressure{}, imagePoolRecentTaskStats{}, accountStats)
+	if factors.MaxInflightPerAccount != 3 || estimate.ConcurrentSlotsPerAccount != 3 {
+		t.Fatalf("concurrency factors=%#v estimate=%#v", factors, estimate)
+	}
+	if estimate.EstimatedImagesPerUsableAccount != 5 || estimate.EstimatedPoolImages != 20 {
+		t.Fatalf("quota estimate=%#v", estimate)
+	}
+	if estimate.CurrentEffectiveInflightSlots != 12 {
+		t.Fatalf("current concurrent slots=%d, want 12", estimate.CurrentEffectiveInflightSlots)
+	}
+}
+
+func TestImagePoolCapacityDoesNotOverregisterFromUnknownQuota(t *testing.T) {
+	cfg := config.Default()
+	pressure := imagePoolTaskPressure{Queued: 20, Pending: 20}
+	accountStats := accounts.ImageDispatchStats{
+		Total:              20,
+		Usable:             20,
+		Dispatchable:       20,
+		UnknownQuotaUsable: 20,
+		DispatchableSlots:  20,
+	}
+
+	_, estimate := estimateImagePoolCapacity(cfg, pressure, imagePoolRecentTaskStats{}, accountStats)
+	if estimate.RequiredByQuota != 0 {
+		t.Fatalf("unknown quota should not force quota-based registration: estimate=%#v", estimate)
+	}
+}
+
+func TestImagePoolCapacityRegistersWhenUsableAccountsAreUnavailable(t *testing.T) {
+	cfg := config.Default()
+	cfg.ImagePoolMinUsableAccounts = 0
+	cfg.ImagePoolIdleFloorAccounts = 0
+	cfg.ImagePoolMaxUsableAccounts = 200
+	factors := imagePoolCapacityFactors{MaxInflightPerAccount: 1}
+	pressure := imagePoolTaskPressure{Queued: 4, Pending: 4}
+	accountStats := accounts.ImageDispatchStats{Total: 4, Usable: 4, Dispatchable: 0}
+	estimate := alignImagePoolRegistrationEstimate(cfg, pressure, factors, accountStats, imagePoolCapacityEstimate{})
+
+	if estimate.RecommendedRequiredUsableAccounts != 4 || estimate.RecommendedAddUsableAccounts != 4 || estimate.RecommendedRegisterAccounts != 4 {
+		t.Fatalf("unavailable account estimate=%#v", estimate)
+	}
+}
+
 func TestImagePoolCapacityEstimateAlignsWithAutoRegistrationTarget(t *testing.T) {
 	cfg := config.Default()
 	cfg.ImagePoolMinUsableAccounts = 0

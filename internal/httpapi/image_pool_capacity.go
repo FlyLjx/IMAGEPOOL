@@ -90,6 +90,9 @@ type imagePoolCapacityEstimate struct {
 	ExpectedAttemptsForPendingTasks   float64 `json:"expected_attempts_for_pending_tasks"`
 	EstimatedQuotaCapacity            float64 `json:"estimated_quota_capacity"`
 	AverageQuotaPerUsableAccount      float64 `json:"average_quota_per_usable_account"`
+	EstimatedImagesPerUsableAccount   float64 `json:"estimated_images_per_usable_account"`
+	EstimatedPoolImages               float64 `json:"estimated_pool_images"`
+	ConcurrentSlotsPerAccount         int     `json:"concurrent_slots_per_account"`
 	Status                            string  `json:"status"`
 	Message                           string  `json:"message"`
 }
@@ -305,8 +308,12 @@ func estimateImagePoolCapacity(cfg config.Config, pressure imagePoolTaskPressure
 	if accountStats.UnknownQuotaUsable > 0 {
 		estimatedQuotaCapacity += float64(accountStats.UnknownQuotaUsable) * avgQuota
 	}
+	estimatedImagesPerAccount := 0.0
+	if accountStats.Usable > 0 {
+		estimatedImagesPerAccount = estimatedQuotaCapacity / float64(accountStats.Usable)
+	}
 	requiredByQuota := 0
-	if expectedAttempts > 0 && avgQuota > 0 && estimatedQuotaCapacity < expectedAttempts {
+	if accountStats.KnownQuotaAccounts > 0 && expectedAttempts > 0 && avgQuota > 0 && estimatedQuotaCapacity < expectedAttempts {
 		requiredByQuota = int(math.Ceil(expectedAttempts / avgQuota))
 	}
 	requiredByBurst := cfg.ImageCapacityBurstParallel
@@ -377,6 +384,9 @@ func estimateImagePoolCapacity(cfg config.Config, pressure imagePoolTaskPressure
 		ExpectedAttemptsForPendingTasks:   roundFloat(expectedAttempts, 2),
 		EstimatedQuotaCapacity:            roundFloat(estimatedQuotaCapacity, 2),
 		AverageQuotaPerUsableAccount:      roundFloat(avgQuota, 2),
+		EstimatedImagesPerUsableAccount:   roundFloat(estimatedImagesPerAccount, 2),
+		EstimatedPoolImages:               roundFloat(estimatedQuotaCapacity, 2),
+		ConcurrentSlotsPerAccount:         maxInflightPerAccount,
 	}
 	estimate.Status, estimate.Message = imagePoolCapacityStatus(pressure, accountStats, estimate)
 	return factors, estimate
@@ -392,8 +402,8 @@ func alignImagePoolRegistrationEstimate(cfg config.Config, pressure imagePoolTas
 	if target > estimate.RecommendedRequiredUsableAccounts {
 		estimate.RecommendedRequiredUsableAccounts = target
 	}
-	currentUsable := maxInt(0, accountStats.Usable)
-	estimate.RecommendedAddUsableAccounts = maxInt(0, estimate.RecommendedRequiredUsableAccounts-currentUsable)
+	currentDispatchable := maxInt(0, accountStats.Dispatchable)
+	estimate.RecommendedAddUsableAccounts = maxInt(0, estimate.RecommendedRequiredUsableAccounts-currentDispatchable)
 	if estimate.RecommendedAddUsableAccounts > 0 {
 		factor := registrationAdjustmentFactor(accountStats.DeadRate / 100)
 		estimate.RecommendedRegisterAccounts = int(math.Ceil(float64(estimate.RecommendedAddUsableAccounts) * factor))

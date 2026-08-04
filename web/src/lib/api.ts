@@ -760,6 +760,7 @@ export type ImagePoolCapacity = {
     dead: number;
     known_remaining_quota: number;
     known_quota_accounts: number;
+    quota_exhausted?: number;
     unknown_quota_usable: number;
     total_image_success: number;
     total_image_failures: number;
@@ -822,6 +823,9 @@ export type ImagePoolCapacity = {
     expected_attempts_for_pending_tasks: number;
     estimated_quota_capacity: number;
     average_quota_per_usable_account: number;
+    estimated_images_per_usable_account: number;
+    estimated_pool_images: number;
+    concurrent_slots_per_account: number;
     status: "idle" | "enough" | "saturated" | "shortage" | string;
     message: string;
   };

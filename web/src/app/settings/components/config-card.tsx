@@ -250,7 +250,7 @@ export function ConfigCard() {
               value={String(config.image_account_max_inflight_per_account || "")}
               onChange={setImageAccountMaxInflightPerAccount}
               placeholder="1"
-              help="每个账号同时允许的上游生图任务数；1 最稳，最高 20。"
+              help="每个账号同时允许的上游生图任务数；容量预测按可调度账号数 × 此值计算，1 最稳，最高 20。"
             />
           </Col>
         </Row>

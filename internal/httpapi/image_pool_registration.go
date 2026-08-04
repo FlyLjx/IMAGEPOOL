@@ -143,7 +143,7 @@ func (s *Server) reconcileImagePoolAutoRegistration(now time.Time) {
 
 	target := estimate.RecommendedRequiredUsableAccounts
 	status.TargetUsableAccounts = target
-	status.NeedUsableAccounts = maxInt(0, target-accountStats.Usable)
+	status.NeedUsableAccounts = maxInt(0, target-accountStats.Dispatchable)
 
 	// When the queue is empty, a completed active batch is enough. The idle
 	// floor is only filled during the configured quiet grace period; after that
@@ -168,14 +168,14 @@ func (s *Server) reconcileImagePoolAutoRegistration(now time.Time) {
 		}
 	}
 
-	if accountStats.Usable >= target {
+	if accountStats.Dispatchable >= target {
 		if automatic {
 			s.register.Stop()
 			status.Running = s.register.IsRunning()
 			status.Automatic = false
 		}
 		status.Status = "enough"
-		status.Reason = fmt.Sprintf("当前有效账号 %d 个，已达到任务所需目标 %d 个。", accountStats.Usable, target)
+		status.Reason = fmt.Sprintf("当前可调度账号 %d 个，按单号并发已达到任务所需目标 %d 个。", accountStats.Dispatchable, target)
 		s.setImagePoolAutoRegistrationStatus(status)
 		return
 	}
@@ -191,11 +191,17 @@ func (s *Server) reconcileImagePoolAutoRegistration(now time.Time) {
 		// An automatic batch owns the current manager run. Re-evaluate its
 		// bounded attempt count as the pool changes, but never take over a
 		// manually started run.
-		batch := autoRegistrationBatchSize(cfg, target, accountStats.Usable)
+		batch := autoRegistrationBatchSizeForPool(cfg, target, accountStats.Dispatchable, accountStats.Usable)
 		if batch <= 0 {
 			s.register.Stop()
-			status.Status = "enough"
-			status.Reason = "当前批次已不再需要，已请求停止注册。"
+			status.Running = s.register.IsRunning()
+			if cfg.ImagePoolMaxUsableAccounts > 0 && accountStats.Usable >= cfg.ImagePoolMaxUsableAccounts {
+				status.Status = "max_reached"
+				status.Reason = fmt.Sprintf("当前有效账号已达到上限 %d 个，无法再增加替补账号。", cfg.ImagePoolMaxUsableAccounts)
+			} else {
+				status.Status = "enough"
+				status.Reason = "当前批次已不再需要，已请求停止注册。"
+			}
 		} else {
 			threads := normalizedRegistrationThreads(registrationConfig.Threads, batch)
 			if registrationConfig.Mode != "total" || registrationConfig.Total != batch || registrationConfig.Threads != threads {
@@ -220,10 +226,15 @@ func (s *Server) reconcileImagePoolAutoRegistration(now time.Time) {
 		return
 	}
 
-	batch := autoRegistrationBatchSize(cfg, target, accountStats.Usable)
+	batch := autoRegistrationBatchSizeForPool(cfg, target, accountStats.Dispatchable, accountStats.Usable)
 	if batch <= 0 {
-		status.Status = "enough"
-		status.Reason = "当前没有需要补充的有效账号。"
+		if cfg.ImagePoolMaxUsableAccounts > 0 && accountStats.Usable >= cfg.ImagePoolMaxUsableAccounts {
+			status.Status = "max_reached"
+			status.Reason = fmt.Sprintf("当前有效账号已达到上限 %d 个，无法再增加替补账号。", cfg.ImagePoolMaxUsableAccounts)
+		} else {
+			status.Status = "enough"
+			status.Reason = "当前没有需要补充的有效账号。"
+		}
 		s.setImagePoolAutoRegistrationStatus(status)
 		return
 	}
@@ -278,6 +289,15 @@ func autoRegistrationBatchSize(cfg config.Config, target, current int) int {
 		limit = 1
 	}
 	return minInt(need, limit)
+}
+
+func autoRegistrationBatchSizeForPool(cfg config.Config, target, currentDispatchable, currentUsable int) int {
+	batch := autoRegistrationBatchSize(cfg, target, currentDispatchable)
+	if cfg.ImagePoolMaxUsableAccounts > 0 {
+		room := maxInt(0, cfg.ImagePoolMaxUsableAccounts-currentUsable)
+		batch = minInt(batch, room)
+	}
+	return batch
 }
 
 func normalizedRegistrationThreads(configured, batch int) int {

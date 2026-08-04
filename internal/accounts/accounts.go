@@ -337,6 +337,7 @@ type ImageDispatchStats struct {
 	Dead                       int        `json:"dead"`
 	KnownRemainingQuota        int        `json:"known_remaining_quota"`
 	KnownQuotaAccounts         int        `json:"known_quota_accounts"`
+	QuotaExhausted             int        `json:"quota_exhausted"`
 	UnknownQuotaUsable         int        `json:"unknown_quota_usable"`
 	TotalImageSuccess          int        `json:"total_image_success"`
 	TotalImageFailures         int        `json:"total_image_failures"`
@@ -594,11 +595,17 @@ func (s *Store) ImageDispatchStats() ImageDispatchStats {
 		if imageReferenceUploadCooldownUntil(account).After(now) {
 			stats.ReferenceUploadCooling++
 		}
-		if account.ImageQuotaUnknown {
-			stats.UnknownQuotaUsable++
-		} else {
+		if remaining, known := imageQuotaRemaining(account); known {
 			stats.KnownQuotaAccounts++
-			stats.KnownRemainingQuota += max(0, account.Quota)
+			stats.KnownRemainingQuota += remaining
+			if remaining <= 0 {
+				stats.QuotaExhausted++
+			}
+		} else {
+			stats.UnknownQuotaUsable++
+		}
+		if imageQuotaExhausted(account) {
+			continue
 		}
 		if until := imageCooldownUntil(account); until.After(now) {
 			stats.Cooling++
@@ -1700,10 +1707,111 @@ func cooldownUntilFromExtra(extra map[string]any, key string) time.Time {
 }
 
 func isImageDispatchBlocked(account Account, requirements ImageDispatchRequirements, now time.Time) bool {
+	if imageQuotaExhausted(account) {
+		return true
+	}
 	if isImageCooling(account, now) {
 		return true
 	}
 	return requirements.NeedsReferenceUpload && imageReferenceUploadCooldownUntil(account).After(now)
+}
+
+func imageQuotaKnown(account Account) bool {
+	if account.ImageQuotaUnknown {
+		return false
+	}
+	if account.Quota > 0 {
+		return true
+	}
+	if isStatus(account.Status, "no_quota", "限流") {
+		return true
+	}
+	for _, key := range []string{"quota", "image_quota_total", "image_quota_synced_at"} {
+		if _, ok := account.Extra[key]; ok {
+			return true
+		}
+	}
+	return imageQuotaProgressPresent(account.Extra)
+}
+
+func imageQuotaExhausted(account Account) bool {
+	remaining, known := imageQuotaRemaining(account)
+	return known && remaining <= 0
+}
+
+func imageQuotaRemaining(account Account) (int, bool) {
+	if account.ImageQuotaUnknown {
+		return 0, false
+	}
+	if account.Quota > 0 {
+		return account.Quota, true
+	}
+	if remaining, ok := imageQuotaProgressRemaining(account.Extra); ok {
+		return max(0, remaining), true
+	}
+	if imageQuotaKnown(account) {
+		return max(0, account.Quota), true
+	}
+	return 0, false
+}
+
+func imageQuotaProgressPresent(extra map[string]any) bool {
+	if extra == nil {
+		return false
+	}
+	match := func(value any) bool {
+		item, ok := value.(map[string]any)
+		if !ok {
+			return false
+		}
+		return strings.TrimSpace(fmt.Sprint(item["feature_name"])) == "image_gen"
+	}
+	switch progress := extra["limits_progress"].(type) {
+	case []map[string]any:
+		for _, item := range progress {
+			if match(item) {
+				return true
+			}
+		}
+	case []any:
+		for _, item := range progress {
+			if match(item) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func imageQuotaProgressRemaining(extra map[string]any) (int, bool) {
+	if extra == nil {
+		return 0, false
+	}
+	read := func(value any) (int, bool) {
+		item, ok := value.(map[string]any)
+		if !ok || strings.TrimSpace(fmt.Sprint(item["feature_name"])) != "image_gen" {
+			return 0, false
+		}
+		if _, exists := item["remaining"]; !exists {
+			return 0, false
+		}
+		return asInt(item["remaining"]), true
+	}
+	switch progress := extra["limits_progress"].(type) {
+	case []map[string]any:
+		for _, item := range progress {
+			if remaining, ok := read(item); ok {
+				return remaining, true
+			}
+		}
+	case []any:
+		for _, item := range progress {
+			if remaining, ok := read(item); ok {
+				return remaining, true
+			}
+		}
+	}
+	return 0, false
 }
 
 func imageDispatchCooldownUntil(account Account, requirements ImageDispatchRequirements) time.Time {

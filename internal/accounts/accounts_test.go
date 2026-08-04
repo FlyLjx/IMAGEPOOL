@@ -751,6 +751,22 @@ func TestMarkImageSuccessUpdatesKnownQuotaEstimate(t *testing.T) {
 	}
 }
 
+func TestKnownExhaustedImageQuotaIsNotDispatched(t *testing.T) {
+	store := NewStore([]Account{
+		{Email: "exhausted@example.com", AccessToken: "exhausted", Status: "正常", Extra: map[string]any{"quota": 0, "image_quota_total": 5}},
+		{Email: "available@example.com", AccessToken: "available", Status: "正常", Quota: 3},
+	}, "")
+
+	stats := store.ImageDispatchStats()
+	if stats.QuotaExhausted != 1 || stats.Dispatchable != 1 || stats.KnownRemainingQuota != 3 {
+		t.Fatalf("quota dispatch stats=%#v", stats)
+	}
+	selected, err := store.SelectForImage(nil)
+	if err != nil || selected.AccessToken != "available" {
+		t.Fatalf("selected=%#v err=%v", selected, err)
+	}
+}
+
 func TestRemoveQuotaExhaustedDeletesAccount(t *testing.T) {
 	store := NewStore([]Account{{AccessToken: "token", Quota: 1, Status: "正常", Extra: map[string]any{}}}, "")
 	removed, err := store.RemoveQuotaExhausted("token", errors.New("no available free image quota"))

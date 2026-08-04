@@ -373,7 +373,9 @@ function ImagePoolConcurrency({ capacity }: { capacity: ImagePoolCapacity | null
           <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500">
             <span>等待 {numberText(concurrency.global.waiting)}</span>
             <span>租约 {numberText(capacity.accounts.leased)}</span>
+            <span>空闲并发槽 {numberText(capacity.accounts.idle_slots)}</span>
             <span>冷却 {numberText(capacity.accounts.cooling)}</span>
+            <span>额度耗尽 {numberText(capacity.accounts.quota_exhausted)}</span>
             <span>卡住切号 {numberText(concurrency.stalled_attempts)}</span>
           </div>
         </div>
@@ -399,6 +401,10 @@ function ImagePoolConcurrency({ capacity }: { capacity: ImagePoolCapacity | null
         </div>
         <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500">
           <span>排队/运行 {numberText(capacity.tasks.pending)}</span>
+          <span>单号并发 {numberText(estimate.concurrent_slots_per_account)}</span>
+          <span>当前并发槽 {numberText(estimate.current_effective_inflight_slots)}</span>
+          <span>单号余量约 {numberText(estimate.estimated_images_per_usable_account)} 张</span>
+          <span>号池余量约 {numberText(estimate.estimated_pool_images)} 张</span>
           <span>预估注册尝试 {numberText(estimate.recommended_register_accounts)}</span>
           {registration ? <span>自动补号：{registration.enabled ? registration.status : "关闭"}</span> : null}
           {registration?.inflight_registrations ? <span>注册中 {numberText(registration.inflight_registrations)}</span> : null}
