@@ -123,45 +123,46 @@ type AccountUsage struct {
 }
 
 type Task struct {
-	ID                     string           `json:"id"`
-	OwnerID                string           `json:"owner_id,omitempty"`
-	ClientTaskID           string           `json:"client_task_id,omitempty"`
-	Mode                   string           `json:"mode"`
-	Status                 string           `json:"status"`
-	Progress               string           `json:"progress,omitempty"`
-	ProgressPercent        int              `json:"progress_percent"`
-	RealtimeStatus         string           `json:"realtime_status,omitempty"`
-	Prompt                 string           `json:"prompt,omitempty"`
-	Model                  string           `json:"model,omitempty"`
-	Size                   string           `json:"size,omitempty"`
-	Quality                string           `json:"quality,omitempty"`
-	ResponseFormat         string           `json:"response_format,omitempty"`
-	OutputFormat           string           `json:"output_format,omitempty"`
-	CallbackURL            string           `json:"callback_url,omitempty"`
-	HDRepair               bool             `json:"hd_repair,omitempty"`
-	CreatedAt              time.Time        `json:"created_at"`
-	StartedAt              *time.Time       `json:"started_at,omitempty"`
-	FinishedAt             *time.Time       `json:"finished_at,omitempty"`
-	UpdatedAt              time.Time        `json:"updated_at"`
-	Result                 *images.Response `json:"-"`
-	Data                   []images.Data    `json:"data,omitempty"`
-	ConversationID         string           `json:"conversation_id,omitempty"`
-	UsedAccountCount       int              `json:"used_account_count,omitempty"`
-	FailedAccountCount     int              `json:"failed_account_count,omitempty"`
-	ImageRouteAttemptCount int              `json:"image_route_attempt_count,omitempty"`
-	UsedAccounts           []AccountUsage   `json:"used_accounts,omitempty"`
-	DurationMS             int64            `json:"duration_ms,omitempty"`
-	ElapsedSecs            float64          `json:"elapsed_secs,omitempty"`
-	Error                  string           `json:"error,omitempty"`
-	ErrorCode              string           `json:"error_code,omitempty"`
-	ErrorTitle             string           `json:"error_title,omitempty"`
-	ErrorCategory          string           `json:"error_category,omitempty"`
-	ErrorCategoryLabel     string           `json:"error_category_label,omitempty"`
-	ErrorRetryable         bool             `json:"error_retryable,omitempty"`
-	ErrorAction            string           `json:"error_action,omitempty"`
-	ErrorHint              string           `json:"error_hint,omitempty"`
-	StatusLogCount         int              `json:"status_log_count"`
-	StatusLogs             []LogEntry       `json:"status_logs,omitempty"`
+	ID                     string                 `json:"id"`
+	OwnerID                string                 `json:"owner_id,omitempty"`
+	ClientTaskID           string                 `json:"client_task_id,omitempty"`
+	Mode                   string                 `json:"mode"`
+	Status                 string                 `json:"status"`
+	Progress               string                 `json:"progress,omitempty"`
+	ProgressPercent        int                    `json:"progress_percent"`
+	RealtimeStatus         string                 `json:"realtime_status,omitempty"`
+	Prompt                 string                 `json:"prompt,omitempty"`
+	Model                  string                 `json:"model,omitempty"`
+	Size                   string                 `json:"size,omitempty"`
+	Quality                string                 `json:"quality,omitempty"`
+	ResponseFormat         string                 `json:"response_format,omitempty"`
+	OutputFormat           string                 `json:"output_format,omitempty"`
+	CallbackURL            string                 `json:"callback_url,omitempty"`
+	HDRepair               bool                   `json:"hd_repair,omitempty"`
+	CreatedAt              time.Time              `json:"created_at"`
+	StartedAt              *time.Time             `json:"started_at,omitempty"`
+	FinishedAt             *time.Time             `json:"finished_at,omitempty"`
+	UpdatedAt              time.Time              `json:"updated_at"`
+	Result                 *images.Response       `json:"-"`
+	Data                   []images.Data          `json:"data,omitempty"`
+	ConversationID         string                 `json:"conversation_id,omitempty"`
+	UsedAccountCount       int                    `json:"used_account_count,omitempty"`
+	FailedAccountCount     int                    `json:"failed_account_count,omitempty"`
+	ImageRouteAttemptCount int                    `json:"image_route_attempt_count,omitempty"`
+	ImageAttempts          []openaiweb.AttemptLog `json:"attempts,omitempty"`
+	UsedAccounts           []AccountUsage         `json:"used_accounts,omitempty"`
+	DurationMS             int64                  `json:"duration_ms,omitempty"`
+	ElapsedSecs            float64                `json:"elapsed_secs,omitempty"`
+	Error                  string                 `json:"error,omitempty"`
+	ErrorCode              string                 `json:"error_code,omitempty"`
+	ErrorTitle             string                 `json:"error_title,omitempty"`
+	ErrorCategory          string                 `json:"error_category,omitempty"`
+	ErrorCategoryLabel     string                 `json:"error_category_label,omitempty"`
+	ErrorRetryable         bool                   `json:"error_retryable,omitempty"`
+	ErrorAction            string                 `json:"error_action,omitempty"`
+	ErrorHint              string                 `json:"error_hint,omitempty"`
+	StatusLogCount         int                    `json:"status_log_count"`
+	StatusLogs             []LogEntry             `json:"status_logs,omitempty"`
 }
 
 type HistoryPage struct {
@@ -590,6 +591,7 @@ func applyAttemptStats(task *Task, result images.Response) {
 	}
 	task.ConversationID = result.ConversationID
 	task.ImageRouteAttemptCount = len(result.Attempts)
+	task.ImageAttempts = append([]openaiweb.AttemptLog(nil), result.Attempts...)
 	task.UsedAccountCount = 0
 	task.FailedAccountCount = 0
 	previousQuotas := map[string]*int{}
@@ -1098,6 +1100,10 @@ func (m *Manager) copyTask(task *Task) Task {
 			quota := *task.UsedAccounts[index].AvailableQuota
 			cp.UsedAccounts[index].AvailableQuota = &quota
 		}
+	}
+	cp.ImageAttempts = append([]openaiweb.AttemptLog(nil), task.ImageAttempts...)
+	for index := range cp.ImageAttempts {
+		cp.ImageAttempts[index].Error = openaiweb.PublicErrorText(cp.ImageAttempts[index].Error)
 	}
 	cp.StatusLogs = make([]LogEntry, len(task.StatusLogs))
 	copy(cp.StatusLogs, task.StatusLogs)

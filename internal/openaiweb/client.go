@@ -391,16 +391,31 @@ func (c *Client) GenerateImage(ctx context.Context, account accounts.Account, re
 	}
 	urls, diagnostics, err := c.resolveConversationImageURLsWithDiagnostics(generationCtx, account, conversationID, fileIDs, sedimentIDs, true, progress, uploadedFileIDs...)
 	if err != nil {
-		return ImageResult{}, imageAttemptError(ctx, generationCtx, err)
+		return ImageResult{
+			ConversationID: conversationID,
+			AccountEmail:   account.Email,
+			BackendModel:   backendModel,
+			Diagnostics:    diagnostics,
+		}, imageAttemptError(ctx, generationCtx, err)
 	}
 	if len(urls) == 0 {
-		return ImageResult{}, fmt.Errorf("upstream completed without generating images")
+		return ImageResult{
+			ConversationID: conversationID,
+			AccountEmail:   account.Email,
+			BackendModel:   backendModel,
+			Diagnostics:    diagnostics,
+		}, fmt.Errorf("upstream completed without generating images")
 	}
 	out := ImageResult{URLs: urls, ConversationID: conversationID, AccountEmail: account.Email, BackendModel: backendModel, Diagnostics: diagnostics}
 	if strings.EqualFold(req.ResponseFormat, "b64_json") {
 		b64, err := c.downloadBase64(generationCtx, account, urls)
 		if err != nil {
-			return ImageResult{}, imageAttemptError(ctx, generationCtx, err)
+			return ImageResult{
+				ConversationID: conversationID,
+				AccountEmail:   account.Email,
+				BackendModel:   backendModel,
+				Diagnostics:    diagnostics,
+			}, imageAttemptError(ctx, generationCtx, err)
 		}
 		out.B64JSON = b64
 		out.URLs = nil

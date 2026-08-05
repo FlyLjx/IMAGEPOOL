@@ -730,6 +730,7 @@ func (c *Client) pollImageResultsWithProgressAndDiagnostics(ctx context.Context,
 	emptyStartedAt := startedAt
 	if len(fileIDs) > 0 || len(sedimentIDs) > 0 {
 		emptyStartedAt = time.Time{}
+		diagnostics.ImageReferenceSeen = true
 	}
 	pollTimeout := c.pollTimeout
 	if pollTimeout <= 0 {
@@ -782,7 +783,18 @@ func (c *Client) pollImageResultsWithProgressAndDiagnostics(ctx context.Context,
 		progress(ProgressEvent{
 			Progress: "polling_image",
 			Message:  fmt.Sprintf("图片仍在生成，已等待 %d 秒", elapsed),
-			Details:  map[string]any{"conversation_id": conversationID, "elapsed_secs": elapsed},
+			Details: map[string]any{
+				"conversation_id":      conversationID,
+				"elapsed_secs":         elapsed,
+				"poll_count":           diagnostics.PollCount,
+				"last_http_status":     diagnostics.LastHTTPStatus,
+				"empty_result_secs":    diagnostics.EmptyResultSecs,
+				"tool_seen":            diagnostics.ToolSeen,
+				"image_reference_seen": diagnostics.ImageReferenceSeen,
+				"assistant_text_seen":  diagnostics.AssistantTextSeen,
+				"last_role":            diagnostics.LastRole,
+				"result_signature":     diagnostics.ResultSignature,
+			},
 		})
 		lastHeartbeat = now
 	}
@@ -835,6 +847,7 @@ func (c *Client) pollImageResultsWithProgressAndDiagnostics(ctx context.Context,
 			return nil, nil, diagnostics, err
 		}
 		diagnostics.LastHTTPStatus = http.StatusOK
+		MergeImageConversationSignals(&diagnostics, conversation)
 		if terminalErr := findImageGenerationTerminalError(conversation); terminalErr != nil {
 			return nil, nil, diagnostics, terminalErr
 		}

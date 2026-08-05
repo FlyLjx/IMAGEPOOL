@@ -251,6 +251,9 @@ func (m *RefreshManager) refreshOne(token string, lightweight bool) RefreshItem 
 		} else if found {
 			item.Email = updated.Email
 			item.Quota = updated.Quota
+			if m.removeRateLimitedRefreshAccount(token, updated, &item, refreshErr) {
+				return item
+			}
 		}
 		item.Status = "error"
 		if item.Error == "" {
@@ -265,9 +268,30 @@ func (m *RefreshManager) refreshOne(token string, lightweight bool) RefreshItem 
 	if found {
 		item.Email = updated.Email
 		item.Quota = updated.Quota
+		if m.removeRateLimitedRefreshAccount(token, updated, &item, nil) {
+			return item
+		}
 	}
 	item.Status = "success"
 	return item
+}
+
+func (m *RefreshManager) removeRateLimitedRefreshAccount(token string, account Account, item *RefreshItem, reason error) bool {
+	if m == nil || m.store == nil || item == nil || !isRateLimitedAccount(account) {
+		return false
+	}
+	if reason == nil {
+		reason = fmt.Errorf("account status=%s quota=%d", account.Status, account.Quota)
+	}
+	_, removeErr := m.store.RemoveRateLimited(token, reason)
+	if removeErr != nil {
+		item.Status = "error"
+		item.Error = removeErr.Error()
+		return true
+	}
+	item.Status = "removed"
+	item.Error = "账号因限流被自动移除"
+	return true
 }
 
 func compactRefreshError(err error) string {

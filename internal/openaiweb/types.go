@@ -57,27 +57,42 @@ type ProgressEvent struct {
 }
 
 type AttemptLog struct {
-	Attempt         int    `json:"attempt,omitempty"`
-	AccountID       string `json:"account_id,omitempty"`
-	AccountEmail    string `json:"account_email,omitempty"`
-	BackendModel    string `json:"backend_model,omitempty"`
-	ConversationID  string `json:"conversation_id,omitempty"`
-	Status          string `json:"status"`
-	Phase           string `json:"phase,omitempty"`
-	PollCount       int    `json:"poll_count,omitempty"`
-	LastHTTPStatus  int    `json:"last_http_status,omitempty"`
-	EmptyResultSecs int    `json:"empty_result_secs,omitempty"`
-	SwitchReason    string `json:"switch_reason,omitempty"`
-	CooldownUntil   string `json:"cooldown_until,omitempty"`
-	Error           string `json:"error,omitempty"`
-	RemovedAccount  bool   `json:"removed_account,omitempty"`
+	Attempt            int    `json:"attempt,omitempty"`
+	AccountID          string `json:"account_id,omitempty"`
+	AccountEmail       string `json:"account_email,omitempty"`
+	LeaseID            string `json:"lease_id,omitempty"`
+	BackendModel       string `json:"backend_model,omitempty"`
+	ConversationID     string `json:"conversation_id,omitempty"`
+	Status             string `json:"status"`
+	Phase              string `json:"phase,omitempty"`
+	PollCount          int    `json:"poll_count,omitempty"`
+	LastHTTPStatus     int    `json:"last_http_status,omitempty"`
+	EmptyResultSecs    int    `json:"empty_result_secs,omitempty"`
+	ToolSeen           bool   `json:"tool_seen"`
+	ImageReferenceSeen bool   `json:"image_reference_seen"`
+	AssistantTextSeen  bool   `json:"assistant_text_seen"`
+	LastRole           string `json:"last_role,omitempty"`
+	ResultSignature    string `json:"result_signature,omitempty"`
+	SwitchReason       string `json:"switch_reason,omitempty"`
+	CooldownUntil      string `json:"cooldown_until,omitempty"`
+	ActiveSlots        int    `json:"active_slots,omitempty"`
+	EffectiveLimit     int    `json:"effective_limit,omitempty"`
+	ConfiguredCeiling  int    `json:"configured_ceiling,omitempty"`
+	DurationMS         int64  `json:"duration_ms,omitempty"`
+	Error              string `json:"error,omitempty"`
+	RemovedAccount     bool   `json:"removed_account,omitempty"`
 }
 
 type ImageAttemptDiagnostics struct {
-	Phase           string
-	PollCount       int
-	LastHTTPStatus  int
-	EmptyResultSecs int
+	Phase              string
+	PollCount          int
+	LastHTTPStatus     int
+	EmptyResultSecs    int
+	ToolSeen           bool
+	ImageReferenceSeen bool
+	AssistantTextSeen  bool
+	LastRole           string
+	ResultSignature    string
 }
 
 type ImageResult struct {

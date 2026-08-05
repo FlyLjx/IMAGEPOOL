@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Alert, Button, Card, DatePicker, Empty, Progress, Segmented, Skeleton, Tag, Typography } from "antd";
 import {
   Activity,
@@ -19,7 +19,16 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
-import { fetchDashboard, fetchImagePoolCapacity, fetchSchedulerDiagnostics, fetchSystemLoad, type DashboardSummary, type ImagePoolCapacity, type SchedulerDiagnostics, type SystemLoad } from "@/lib/api";
+import {
+  fetchDashboard,
+  fetchImagePoolCapacity,
+  fetchSchedulerDiagnostics,
+  fetchSystemLoad,
+  type DashboardSummary,
+  type ImagePoolCapacity,
+  type SchedulerDiagnostics,
+  type SystemLoad,
+} from "@/lib/api";
 import { formatShanghaiDateTime, formatShanghaiDateTimeParts } from "@/lib/datetime";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 import { cn } from "@/lib/utils";
@@ -348,6 +357,13 @@ function ImagePoolConcurrency({ capacity }: { capacity: ImagePoolCapacity | null
   const taskPressure = capacity.tasks.queued + capacity.tasks.running;
   const estimate = capacity.estimate;
   const registration = capacity.registration;
+  const dynamicSlots = Math.max(0, capacity.accounts.dynamic_slots ?? capacity.accounts.dispatchable_slots ?? 0);
+  const leasedSlots = Math.max(0, capacity.accounts.leased_slots ?? capacity.accounts.leased);
+  const idleSlots = Math.max(0, capacity.accounts.idle_slots ?? dynamicSlots - leasedSlots);
+  const dynamicMin = capacity.accounts.dynamic_limit_min ?? 1;
+  const dynamicMax = capacity.accounts.dynamic_limit_max ?? capacity.accounts.max_inflight_per_account ?? 1;
+  const accountSlotPercent = dynamicSlots > 0 ? percent(leasedSlots, dynamicSlots) : 0;
+  const dynamicRange = dynamicSlots > 0 ? `${numberText(dynamicMin)}～${numberText(dynamicMax)}` : "—";
   return (
     <Card
       title={
@@ -361,10 +377,10 @@ function ImagePoolConcurrency({ capacity }: { capacity: ImagePoolCapacity | null
       }
       extra={<span className="font-mono text-xs text-slate-400">任务 {taskPressure} · 账号 {capacity.accounts.dispatchable} 可调度</span>}
     >
-      <div className="grid gap-4 lg:grid-cols-[1.15fr_2fr]">
+      <div className="grid gap-4 lg:grid-cols-2">
         <div className="rounded-lg border border-cyan-100 bg-cyan-50/60 p-4">
           <div className="flex items-center justify-between gap-3">
-            <span className="text-sm font-medium text-slate-600">全局生图槽</span>
+            <span className="text-sm font-medium text-slate-600">全局固定上限</span>
             <span className="font-mono text-lg font-semibold text-slate-900 tabular-nums">
               {numberText(concurrency.global.active)} / {concurrency.global.limit > 0 ? numberText(concurrency.global.limit) : "∞"}
             </span>
@@ -372,25 +388,41 @@ function ImagePoolConcurrency({ capacity }: { capacity: ImagePoolCapacity | null
           <Progress className="!mb-0 !mt-3" percent={globalPercent} showInfo={false} strokeColor="#06b6d4" trailColor="#cffafe" size="small" />
           <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500">
             <span>等待 {numberText(concurrency.global.waiting)}</span>
-            <span>租约 {numberText(capacity.accounts.leased)}</span>
-            <span>空闲并发槽 {numberText(capacity.accounts.idle_slots)}</span>
+            <span>租约 {numberText(leasedSlots)}</span>
+            <span>空闲并发槽 {numberText(idleSlots)}</span>
             <span>冷却 {numberText(capacity.accounts.cooling)}</span>
             <span>额度耗尽 {numberText(capacity.accounts.quota_exhausted)}</span>
             <span>卡住切号 {numberText(concurrency.stalled_attempts)}</span>
           </div>
         </div>
-        <div className="grid gap-3 sm:grid-cols-5">
-          {stages.map(([label, stats]) => (
-            <div key={label} className="rounded-lg border border-slate-200 bg-slate-50/70 p-3">
-              <div className="text-xs font-medium text-slate-500">{label}</div>
-              <div className="mt-2 font-mono text-base font-semibold text-slate-900 tabular-nums">
-                {numberText(stats.active)} / {stats.limit > 0 ? numberText(stats.limit) : "∞"}
-              </div>
-              <Progress className="!mb-0 !mt-2" percent={limiterPercent(stats)} showInfo={false} strokeColor="#64748b" trailColor="#e2e8f0" size="small" />
-              <div className="mt-1 text-[11px] text-slate-400">等待 {numberText(stats.waiting)}</div>
-            </div>
-          ))}
+        <div className="rounded-lg border border-emerald-100 bg-emerald-50/60 p-4">
+          <div className="flex items-center justify-between gap-3">
+            <span className="text-sm font-medium text-slate-600">账号动态槽位</span>
+            <span className="font-mono text-lg font-semibold text-slate-900 tabular-nums">
+              {numberText(leasedSlots)} / {numberText(dynamicSlots)}
+            </span>
+          </div>
+          <Progress className="!mb-0 !mt-3" percent={accountSlotPercent} showInfo={false} strokeColor="#10b981" trailColor="#d1fae5" size="small" />
+          <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500">
+            <span>可调度账号 {numberText(capacity.accounts.dispatchable)}</span>
+            <span>空闲槽 {numberText(idleSlots)}</span>
+            <span>动态范围 {dynamicRange}</span>
+            <span>限流账号 {numberText(capacity.accounts.limited)}</span>
+          </div>
+          <div className="mt-2 text-xs text-slate-400">每个账号独立升降槽位；异常只取消该账号在途任务。</div>
         </div>
+      </div>
+      <div className="mt-4 grid gap-3 sm:grid-cols-5">
+        {stages.map(([label, stats]) => (
+          <div key={label} className="rounded-lg border border-slate-200 bg-slate-50/70 p-3">
+            <div className="text-xs font-medium text-slate-500">{label}</div>
+            <div className="mt-2 font-mono text-base font-semibold text-slate-900 tabular-nums">
+              {numberText(stats.active)} / {stats.limit > 0 ? numberText(stats.limit) : "∞"}
+            </div>
+            <Progress className="!mb-0 !mt-2" percent={limiterPercent(stats)} showInfo={false} strokeColor="#64748b" trailColor="#e2e8f0" size="small" />
+            <div className="mt-1 text-[11px] text-slate-400">等待 {numberText(stats.waiting)}</div>
+          </div>
+        ))}
       </div>
       <div className="mt-4 rounded-lg border border-slate-200 bg-slate-50/70 px-4 py-3">
         <div className="flex flex-wrap items-center justify-between gap-2">
@@ -798,14 +830,14 @@ function RecentFailures({ items }: { items: DashboardSummary["calls"]["recent_fa
 function DashboardContent() {
   const [data, setData] = useState<DashboardSummary | null>(null);
   const [systemLoad, setSystemLoad] = useState<SystemLoad | null>(null);
-	const [scheduler, setScheduler] = useState<SchedulerDiagnostics | null>(null);
+  const [scheduler, setScheduler] = useState<SchedulerDiagnostics | null>(null);
   const [capacity, setCapacity] = useState<ImagePoolCapacity | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [runtimeWindow, setRuntimeWindow] = useState<number | "custom">(7 * 24 * 60);
   const [customRuntimeRange, setCustomRuntimeRange] = useState<RuntimeRange | null>(null);
 
-  const loadDashboard = async (silent = false, window = runtimeWindow, range = customRuntimeRange) => {
+  const loadDashboard = useCallback(async (silent = false, window = runtimeWindow, range = customRuntimeRange) => {
     if (silent) {
       setIsRefreshing(true);
     } else {
@@ -823,13 +855,13 @@ function DashboardContent() {
       setIsLoading(false);
       setIsRefreshing(false);
     }
-  };
+  }, [customRuntimeRange, runtimeWindow]);
 
   useEffect(() => {
     void loadDashboard();
-		void fetchSchedulerDiagnostics().then(setScheduler).catch(() => undefined);
+    void fetchSchedulerDiagnostics().then(setScheduler).catch(() => undefined);
     void fetchImagePoolCapacity().then(setCapacity).catch(() => undefined);
-  }, []);
+  }, [loadDashboard]);
 
   useEffect(() => {
     if (!data) {
@@ -844,14 +876,14 @@ function DashboardContent() {
       }
       inFlight = true;
       try {
-				const [latest, latestScheduler] = await Promise.all([
-					fetchSystemLoad(),
-					fetchSchedulerDiagnostics().catch(() => null),
-				]);
-				const latestCapacity = await fetchImagePoolCapacity().catch(() => null);
+        const [latest, latestScheduler] = await Promise.all([
+          fetchSystemLoad(),
+          fetchSchedulerDiagnostics().catch(() => null),
+        ]);
+        const latestCapacity = await fetchImagePoolCapacity().catch(() => null);
         if (active) {
           setSystemLoad((current) => newerSystemLoad(current, latest));
-					if (latestScheduler) setScheduler(latestScheduler);
+          if (latestScheduler) setScheduler(latestScheduler);
           if (latestCapacity) setCapacity(latestCapacity);
         }
       } catch {
@@ -866,7 +898,7 @@ function DashboardContent() {
       active = false;
       window.clearInterval(timer);
     };
-  }, [data]);
+  }, [data, loadDashboard]);
 
   const handleRuntimeWindowChange = (value: number | "custom") => {
     setRuntimeWindow(value);

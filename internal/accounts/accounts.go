@@ -3,9 +3,11 @@ package accounts
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"math"
 	"os"
 	"path/filepath"
@@ -19,9 +21,25 @@ import (
 )
 
 var (
-	ErrNoAvailableAccount = errors.New("no available account")
-	ErrAccountNotFound    = errors.New("account not found")
+	ErrNoAvailableAccount  = errors.New("no available account")
+	ErrAccountNotFound     = errors.New("account not found")
+	ErrImageAccountEvicted = errors.New("image account evicted")
 )
+
+func IsImageAccountEvicted(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	return errors.Is(context.Cause(ctx), ErrImageAccountEvicted)
+}
+
+func imageAccountEvictedError(reason string) error {
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		return ErrImageAccountEvicted
+	}
+	return fmt.Errorf("%w: %s", ErrImageAccountEvicted, reason)
+}
 
 const (
 	StatusCredentialInvalid  = "失效"
@@ -65,6 +83,37 @@ const (
 // plain text-to-image requests do not.
 type ImageDispatchRequirements struct {
 	NeedsReferenceUpload bool
+}
+
+// ImageLease is the account-scoped reservation held by one image attempt.
+// The context is canceled when the account is evicted, so parallel requests
+// using the same account stop together instead of waiting for their task
+// deadline independently.
+type ImageLease struct {
+	ID      string
+	Token   string
+	Account Account
+	Context context.Context
+}
+
+type imageLeaseRecord struct {
+	ID        string
+	Token     string
+	cancel    context.CancelCauseFunc
+	counted   bool
+	createdAt time.Time
+}
+
+type imageAccountRuntime struct {
+	EffectiveLimit       int
+	Successes            int
+	Failures             int
+	ConsecutiveSuccesses int
+	ConsecutiveFailures  int
+	HealthScore          float64
+	LastReason           string
+	LastSuccessAt        time.Time
+	LastFailureAt        time.Time
 }
 
 const (
@@ -295,6 +344,11 @@ func round2(value float64) float64 {
 	return math.Round(value*100) / 100
 }
 
+func accountTokenHash(token string) string {
+	digest := sha256.Sum256([]byte(strings.TrimSpace(token)))
+	return fmt.Sprintf("%x", digest[:6])
+}
+
 type Store struct {
 	mu                         sync.RWMutex
 	persist                    sync.Mutex
@@ -304,7 +358,11 @@ type Store struct {
 	credentialRecoveryLogs     []CredentialRecoveryLog
 	credentialRecoverySequence uint64
 	imageLeases                map[string]int
+	imageLeaseRecords          map[string]*imageLeaseRecord
+	imageAccountRuntime        map[string]*imageAccountRuntime
+	imageLeaseSequence         uint64
 	imageMaxInflightPerAccount int
+	imageDynamicInitialLimit   int
 	imageLeaseChanged          chan struct{}
 	imageWaiters               []*imageWaiter
 	now                        func() time.Time
@@ -324,6 +382,9 @@ type ImageDispatchStats struct {
 	Leased                     int        `json:"leased"`
 	Saturated                  int        `json:"saturated"`
 	MaxInflightPerAccount      int        `json:"max_inflight_per_account"`
+	DynamicLimitMin            int        `json:"dynamic_limit_min"`
+	DynamicLimitMax            int        `json:"dynamic_limit_max"`
+	DynamicSlots               int        `json:"dynamic_slots"`
 	DispatchableSlots          int        `json:"dispatchable_slots"`
 	IdleSlots                  int        `json:"idle_slots"`
 	LeasedSlots                int        `json:"leased_slots"`
@@ -379,8 +440,37 @@ func (s *Store) SetImageMaxInflightPerAccount(value int) {
 	s.mu.Lock()
 	if s.imageMaxInflightPerAccount != normalized {
 		s.imageMaxInflightPerAccount = normalized
+		s.imageDynamicInitialLimit = normalized
+		for token, runtime := range s.imageAccountRuntime {
+			if runtime == nil {
+				continue
+			}
+			if runtime.EffectiveLimit <= 0 || runtime.EffectiveLimit > normalized {
+				runtime.EffectiveLimit = 1
+			}
+			log.Printf("image_account_slot_config event=limit_updated account_token_hash=%s effective_limit=%d ceiling=%d", accountTokenHash(token), runtime.EffectiveLimit, normalized)
+		}
 		s.signalImageAvailabilityLocked()
 	}
+	s.mu.Unlock()
+}
+
+// ResetImageDynamicLimits sets every account back to the conservative warm-up
+// slot. The configured image max remains the ceiling; this method is used when
+// the service applies a new configuration.
+func (s *Store) ResetImageDynamicLimits() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.imageDynamicInitialLimit = 1
+	for _, runtime := range s.imageAccountRuntime {
+		if runtime != nil {
+			runtime.EffectiveLimit = 1
+			runtime.ConsecutiveSuccesses = 0
+		}
+	}
+	s.signalImageAvailabilityLocked()
 	s.mu.Unlock()
 }
 
@@ -391,6 +481,271 @@ func (s *Store) ImageMaxInflightPerAccount() int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return NormalizeImageMaxInflightPerAccount(s.imageMaxInflightPerAccount)
+}
+
+// ImageAccountLeaseStats returns the live account-scoped slot state used by
+// image dispatch. It is intentionally a snapshot: callers use it for logs and
+// diagnostics, while lease admission remains the authoritative operation.
+func (s *Store) ImageAccountLeaseStats(token string) (active, effectiveLimit, configuredCeiling int) {
+	if s == nil {
+		return 0, 0, 0
+	}
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return 0, 0, 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, found := s.accountByTokenLocked(token); !found {
+		return 0, 0, NormalizeImageMaxInflightPerAccount(s.imageMaxInflightPerAccount)
+	}
+	configuredCeiling = NormalizeImageMaxInflightPerAccount(s.imageMaxInflightPerAccount)
+	effectiveLimit = s.imageEffectiveLimitLocked(token)
+	active = max(0, s.imageLeases[token])
+	return active, effectiveLimit, configuredCeiling
+}
+
+func (s *Store) imageRuntimeLocked(token string) *imageAccountRuntime {
+	if s.imageAccountRuntime == nil {
+		s.imageAccountRuntime = map[string]*imageAccountRuntime{}
+	}
+	runtime := s.imageAccountRuntime[token]
+	if runtime == nil {
+		initial := s.imageDynamicInitialLimit
+		if initial <= 0 {
+			initial = 1
+		}
+		runtime = &imageAccountRuntime{EffectiveLimit: initial, HealthScore: 0.5}
+		s.imageAccountRuntime[token] = runtime
+	}
+	ceiling := NormalizeImageMaxInflightPerAccount(s.imageMaxInflightPerAccount)
+	if runtime.EffectiveLimit <= 0 || runtime.EffectiveLimit > ceiling {
+		runtime.EffectiveLimit = 1
+	}
+	return runtime
+}
+
+func (s *Store) imageEffectiveLimitLocked(token string) int {
+	runtime := s.imageRuntimeLocked(token)
+	return max(1, minImageInt(runtime.EffectiveLimit, NormalizeImageMaxInflightPerAccount(s.imageMaxInflightPerAccount)))
+}
+
+func minImageInt(left, right int) int {
+	if left < right {
+		return left
+	}
+	return right
+}
+
+func (s *Store) newImageLeaseLocked(ctx context.Context, account Account) ImageLease {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	leaseCtx, cancel := context.WithCancelCause(ctx)
+	s.imageLeaseSequence++
+	leaseID := fmt.Sprintf("imglease_%d_%d", s.now().UnixNano(), s.imageLeaseSequence)
+	if s.imageLeaseRecords == nil {
+		s.imageLeaseRecords = map[string]*imageLeaseRecord{}
+	}
+	s.imageLeaseRecords[leaseID] = &imageLeaseRecord{ID: leaseID, Token: account.AccessToken, cancel: cancel, counted: true, createdAt: s.now()}
+	s.imageLeases[account.AccessToken]++
+	return ImageLease{ID: leaseID, Token: account.AccessToken, Account: cloneAccount(account), Context: leaseCtx}
+}
+
+// TryAcquireImageLeaseWithRequirements reserves one account slot and returns
+// an independently cancellable lease. The global limiter remains outside this
+// type; this method only changes account-level capacity.
+func (s *Store) TryAcquireImageLeaseWithRequirements(ctx context.Context, exclude map[string]bool, requirements ImageDispatchRequirements) (ImageLease, bool, error) {
+	if s == nil {
+		return ImageLease{}, false, ErrNoAvailableAccount
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return ImageLease{}, false, err
+	}
+	s.mu.Lock()
+	account, available := s.selectForImageLocked(exclude, true, requirements)
+	if available {
+		lease := s.newImageLeaseLocked(ctx, account)
+		active := s.imageLeases[account.AccessToken]
+		limit := s.imageEffectiveLimitLocked(account.AccessToken)
+		s.mu.Unlock()
+		log.Printf("image_account_lease event=acquired lease_id=%s account=%s active=%d limit=%d", lease.ID, accountLogIdentity(account), active, limit)
+		return lease, true, nil
+	}
+	_, eligible := s.selectForImageLocked(exclude, false, requirements)
+	_, cooling := s.earliestImageCooldownLocked(exclude, requirements)
+	s.mu.Unlock()
+	if !eligible && !cooling {
+		return ImageLease{}, false, ErrNoAvailableAccount
+	}
+	return ImageLease{}, false, nil
+}
+
+// AcquireAccountImageLease reserves a specific account slot with the same
+// cancellable lease semantics used by normal dispatch.
+func (s *Store) AcquireAccountImageLease(ctx context.Context, token string, requirements ImageDispatchRequirements, onWait func()) (ImageLease, error) {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return ImageLease{}, ErrAccountNotFound
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	waited := false
+	for {
+		s.mu.Lock()
+		var account Account
+		found := false
+		for _, candidate := range s.accounts {
+			if candidate.AccessToken == token {
+				account = candidate
+				found = true
+				break
+			}
+		}
+		if !found {
+			s.mu.Unlock()
+			return ImageLease{}, ErrAccountNotFound
+		}
+		if !usable(account) || isImageDispatchBlocked(account, requirements, s.now()) {
+			s.mu.Unlock()
+			return ImageLease{}, ErrNoAvailableAccount
+		}
+		limit := s.imageEffectiveLimitLocked(token)
+		if s.imageLeases[token] < limit {
+			lease := s.newImageLeaseLocked(ctx, account)
+			active := s.imageLeases[token]
+			s.mu.Unlock()
+			log.Printf("image_account_lease event=acquired_specific lease_id=%s account=%s active=%d limit=%d", lease.ID, accountLogIdentity(account), active, limit)
+			return lease, nil
+		}
+		changed := s.imageLeaseChanged
+		s.mu.Unlock()
+
+		if !waited && onWait != nil {
+			onWait()
+			waited = true
+		}
+		select {
+		case <-changed:
+		case <-ctx.Done():
+			return ImageLease{}, ctx.Err()
+		}
+	}
+}
+
+// ReleaseImageLease releases exactly one lease. A late completion from an
+// evicted account therefore cannot decrement a newer lease for the same token.
+func (s *Store) ReleaseImageLease(leaseID string) {
+	leaseID = strings.TrimSpace(leaseID)
+	if s == nil || leaseID == "" {
+		return
+	}
+	var cancel context.CancelCauseFunc
+	var token string
+	var active, limit int
+	s.mu.Lock()
+	record := s.imageLeaseRecords[leaseID]
+	if record == nil {
+		s.mu.Unlock()
+		return
+	}
+	delete(s.imageLeaseRecords, leaseID)
+	token = record.Token
+	cancel = record.cancel
+	if record.counted && s.imageLeases[token] > 0 {
+		s.imageLeases[token]--
+		if s.imageLeases[token] == 0 {
+			delete(s.imageLeases, token)
+		}
+	}
+	active = s.imageLeases[token]
+	limit = s.imageEffectiveLimitLocked(token)
+	s.signalImageAvailabilityLocked()
+	s.mu.Unlock()
+	if cancel != nil {
+		cancel(nil)
+	}
+	log.Printf("image_account_lease event=released lease_id=%s account_token_hash=%s active=%d limit=%d", leaseID, accountTokenHash(token), active, limit)
+}
+
+// EvictImageAccount cancels all active image leases for an account. It is
+// intentionally separate from persistence so callers can use it for account
+// state transitions without exposing credentials in logs.
+func (s *Store) EvictImageAccount(token string, reason error) {
+	token = strings.TrimSpace(token)
+	if s == nil || token == "" {
+		return
+	}
+	if reason == nil {
+		reason = ErrImageAccountEvicted
+	} else if !errors.Is(reason, ErrImageAccountEvicted) {
+		reason = fmt.Errorf("%w: %s", ErrImageAccountEvicted, compactAccountLogError(reason))
+	}
+	s.mu.Lock()
+	cancelers := s.evictImageLeasesLocked(token)
+	s.signalImageAvailabilityLocked()
+	s.mu.Unlock()
+	for _, cancel := range cancelers {
+		if cancel != nil {
+			cancel(reason)
+		}
+	}
+	log.Printf("image_account_lease event=evicted account_token_hash=%s active_cancelled=%d reason=%s", accountTokenHash(token), len(cancelers), compactAccountLogError(reason))
+}
+
+func cancelImageLeaseContexts(cancelers []context.CancelCauseFunc, reason error) {
+	for _, cancel := range cancelers {
+		if cancel != nil {
+			cancel(reason)
+		}
+	}
+}
+
+func (s *Store) evictImageLeasesLocked(token string) []context.CancelCauseFunc {
+	if s.imageLeases == nil {
+		s.imageLeases = map[string]int{}
+	}
+	if s.imageLeaseRecords == nil {
+		s.imageLeaseRecords = map[string]*imageLeaseRecord{}
+	}
+	cancelers := make([]context.CancelCauseFunc, 0)
+	for leaseID, record := range s.imageLeaseRecords {
+		if record == nil || record.Token != token {
+			continue
+		}
+		if record.cancel != nil {
+			cancelers = append(cancelers, record.cancel)
+		}
+		delete(s.imageLeaseRecords, leaseID)
+	}
+	delete(s.imageLeases, token)
+	delete(s.imageAccountRuntime, token)
+	return cancelers
+}
+
+func accountLogIdentity(account Account) string {
+	if email := strings.TrimSpace(account.Email); email != "" {
+		return email
+	}
+	if id := strings.TrimSpace(account.ID); id != "" {
+		return id
+	}
+	return accountTokenHash(account.AccessToken)
+}
+
+func compactAccountLogError(err error) string {
+	if err == nil {
+		return ""
+	}
+	message := strings.Join(strings.Fields(err.Error()), " ")
+	if len(message) > 240 {
+		message = message[:240]
+	}
+	return message
 }
 
 func NewStore(items []Account, path string) *Store {
@@ -416,7 +771,10 @@ func newStore(items []Account, recoveryLogs []CredentialRecoveryLog, path string
 		accounts:                   copied,
 		credentialRecoveryLogs:     logs,
 		imageLeases:                map[string]int{},
+		imageLeaseRecords:          map[string]*imageLeaseRecord{},
+		imageAccountRuntime:        map[string]*imageAccountRuntime{},
 		imageMaxInflightPerAccount: 1,
+		imageDynamicInitialLimit:   1,
 		imageLeaseChanged:          make(chan struct{}),
 		now:                        time.Now,
 	}
@@ -617,7 +975,14 @@ func (s *Store) ImageDispatchStats() ImageDispatchStats {
 		}
 		stats.Dispatchable++
 		leaseCount := max(0, s.imageLeases[token])
-		maxInflight := NormalizeImageMaxInflightPerAccount(s.imageMaxInflightPerAccount)
+		maxInflight := s.imageEffectiveLimitLocked(token)
+		stats.DynamicSlots += maxInflight
+		if stats.DynamicLimitMin == 0 || maxInflight < stats.DynamicLimitMin {
+			stats.DynamicLimitMin = maxInflight
+		}
+		if maxInflight > stats.DynamicLimitMax {
+			stats.DynamicLimitMax = maxInflight
+		}
 		stats.DispatchableSlots += maxInflight
 		stats.LeasedSlots += leaseCount
 		availableSlots := max(0, maxInflight-leaseCount)
@@ -712,9 +1077,10 @@ func (s *Store) Delete(tokens []string) (int, error) {
 	s.mu.Lock()
 	next := s.accounts[:0]
 	removed := 0
+	cancelers := make([]context.CancelCauseFunc, 0)
 	for _, account := range s.accounts {
 		if wanted[account.AccessToken] {
-			delete(s.imageLeases, account.AccessToken)
+			cancelers = append(cancelers, s.evictImageLeasesLocked(account.AccessToken)...)
 			removed++
 			continue
 		}
@@ -729,6 +1095,7 @@ func (s *Store) Delete(tokens []string) (int, error) {
 	s.markDirtyLocked()
 	snapshot, revision := s.snapshotLocked()
 	s.mu.Unlock()
+	cancelImageLeaseContexts(cancelers, imageAccountEvictedError("account deleted"))
 	return removed, s.persistSnapshot(snapshot, revision)
 }
 
@@ -1189,7 +1556,7 @@ func (s *Store) AcquireAccountForImageWithRequirements(ctx context.Context, toke
 			s.mu.Unlock()
 			return Account{}, ErrNoAvailableAccount
 		}
-		maxInflight := NormalizeImageMaxInflightPerAccount(s.imageMaxInflightPerAccount)
+		maxInflight := s.imageEffectiveLimitLocked(account.AccessToken)
 		if s.imageLeases[token] < maxInflight {
 			s.imageLeases[token]++
 			s.mu.Unlock()
@@ -1216,18 +1583,45 @@ func (s *Store) ReleaseImage(token string) {
 	if token == "" {
 		return
 	}
+	var cancel context.CancelCauseFunc
+	var leaseID string
+	var active, limit int
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	leaseCount := s.imageLeases[token]
-	if leaseCount <= 0 {
-		return
+	for candidateID, record := range s.imageLeaseRecords {
+		if record == nil || record.Token != token {
+			continue
+		}
+		leaseID = candidateID
+		cancel = record.cancel
+		delete(s.imageLeaseRecords, candidateID)
+		break
 	}
-	if leaseCount <= 1 {
+	leaseCount := s.imageLeases[token]
+	if leaseID != "" && leaseCount > 0 {
+		leaseCount--
+	}
+	if leaseID == "" {
+		if leaseCount <= 0 {
+			s.mu.Unlock()
+			return
+		}
+		leaseCount--
+	}
+	if leaseCount <= 0 {
 		delete(s.imageLeases, token)
 	} else {
-		s.imageLeases[token] = leaseCount - 1
+		s.imageLeases[token] = leaseCount
 	}
+	active = max(0, leaseCount)
+	limit = s.imageEffectiveLimitLocked(token)
 	s.signalImageAvailabilityLocked()
+	s.mu.Unlock()
+	if cancel != nil {
+		cancel(nil)
+	}
+	if leaseID != "" {
+		log.Printf("image_account_lease event=released_legacy lease_id=%s account_token_hash=%s active=%d limit=%d", leaseID, accountTokenHash(token), active, limit)
+	}
 }
 
 func (s *Store) enqueueImageWaiterLocked() *imageWaiter {
@@ -1290,7 +1684,6 @@ func (s *Store) selectForImageLocked(exclude map[string]bool, skipOccupied bool,
 	var selected Account
 	selectedLeases := 0
 	found := false
-	maxInflight := NormalizeImageMaxInflightPerAccount(s.imageMaxInflightPerAccount)
 	for _, a := range s.accounts {
 		if !usable(a) {
 			continue
@@ -1302,6 +1695,7 @@ func (s *Store) selectForImageLocked(exclude map[string]bool, skipOccupied bool,
 			continue
 		}
 		leaseCount := max(0, s.imageLeases[a.AccessToken])
+		maxInflight := s.imageEffectiveLimitLocked(a.AccessToken)
 		if skipOccupied && leaseCount >= maxInflight {
 			continue
 		}
@@ -1411,7 +1805,7 @@ func (s *Store) MarkSuccess(token string) error {
 // MarkImageSuccess records an image result and immediately updates the local
 // remaining-quota estimate. A later account refresh remains authoritative.
 func (s *Store) MarkImageSuccess(token string) error {
-	return s.updateByToken(token, func(a *Account) {
+	err := s.updateByToken(token, func(a *Account) {
 		now := s.now()
 		recordSuccess(a, now)
 		if a.ImageQuotaUnknown {
@@ -1427,11 +1821,101 @@ func (s *Store) MarkImageSuccess(token string) error {
 			a.Extra["image_quota_refresh_required"] = true
 		}
 	})
+	s.recordImageHealthSuccess(token)
+	return err
+}
+
+func (s *Store) recordImageHealthSuccess(token string) {
+	token = strings.TrimSpace(token)
+	if s == nil || token == "" {
+		return
+	}
+	s.mu.Lock()
+	account, found := s.accountByTokenLocked(token)
+	if !found {
+		s.mu.Unlock()
+		return
+	}
+	runtime := s.imageRuntimeLocked(token)
+	runtime.Successes++
+	runtime.ConsecutiveSuccesses++
+	runtime.ConsecutiveFailures = 0
+	runtime.LastSuccessAt = s.now()
+	runtime.LastReason = "success"
+	if runtime.HealthScore <= 0 {
+		runtime.HealthScore = 0.5
+	}
+	runtime.HealthScore = minFloat(1, runtime.HealthScore*0.8+0.2)
+	ceiling := NormalizeImageMaxInflightPerAccount(s.imageMaxInflightPerAccount)
+	oldLimit := runtime.EffectiveLimit
+	if runtime.EffectiveLimit < ceiling && runtime.Successes >= 10 && runtime.ConsecutiveSuccesses >= 5 && runtime.HealthScore >= 0.8 {
+		runtime.EffectiveLimit++
+	}
+	active := s.imageLeases[token]
+	limit := runtime.EffectiveLimit
+	identity := accountLogIdentity(account)
+	health := runtime.HealthScore
+	successes := runtime.Successes
+	failures := runtime.Failures
+	shouldLog := limit != oldLimit || successes%10 == 0
+	if limit != oldLimit {
+		s.signalImageAvailabilityLocked()
+	}
+	s.mu.Unlock()
+	if shouldLog {
+		log.Printf("image_account_health event=success account=%s active=%d limit=%d previous_limit=%d health=%.3f successes=%d failures=%d", identity, active, limit, oldLimit, health, successes, failures)
+	}
+}
+
+func (s *Store) recordImageHealthFailure(token, reason string) {
+	token = strings.TrimSpace(token)
+	if s == nil || token == "" {
+		return
+	}
+	s.mu.Lock()
+	account, found := s.accountByTokenLocked(token)
+	if !found {
+		s.mu.Unlock()
+		return
+	}
+	runtime := s.imageRuntimeLocked(token)
+	runtime.Failures++
+	runtime.ConsecutiveFailures++
+	runtime.ConsecutiveSuccesses = 0
+	runtime.LastFailureAt = s.now()
+	runtime.LastReason = strings.TrimSpace(reason)
+	if runtime.HealthScore <= 0 {
+		runtime.HealthScore = 0.5
+	}
+	runtime.HealthScore = maxFloat(0, runtime.HealthScore*0.65)
+	oldLimit := runtime.EffectiveLimit
+	if runtime.EffectiveLimit > 1 {
+		runtime.EffectiveLimit = 1
+	}
+	active := s.imageLeases[token]
+	limit := runtime.EffectiveLimit
+	identity := accountLogIdentity(account)
+	health := runtime.HealthScore
+	successes := runtime.Successes
+	failures := runtime.Failures
+	if limit != oldLimit {
+		s.signalImageAvailabilityLocked()
+	}
+	s.mu.Unlock()
+	log.Printf("image_account_health event=failure account=%s active=%d limit=%d previous_limit=%d health=%.3f successes=%d failures=%d reason=%s", identity, active, limit, oldLimit, health, successes, failures, compactAccountLogError(errors.New(reason)))
+}
+
+func (s *Store) accountByTokenLocked(token string) (Account, bool) {
+	for _, account := range s.accounts {
+		if account.AccessToken == token {
+			return account, true
+		}
+	}
+	return Account{}, false
 }
 
 // RemoveQuotaExhausted removes an account as soon as the upstream image
-// service confirms that its image quota is exhausted. Temporary HTTP 429
-// responses use the separate cooldown path and do not call this method.
+// service confirms that its image quota is exhausted.
 func (s *Store) RemoveQuotaExhausted(token string, err error) (bool, error) {
 	token = strings.TrimSpace(token)
 	if token == "" {
@@ -1454,11 +1938,47 @@ func (s *Store) RemoveQuotaExhausted(token string, err error) (bool, error) {
 		s.mu.Unlock()
 		return false, nil
 	}
-	delete(s.imageLeases, token)
+	cancelers := s.evictImageLeasesLocked(token)
 	s.signalImageAvailabilityLocked()
 	s.markDirtyLocked()
 	snapshot, revision := s.snapshotLocked()
 	s.mu.Unlock()
+	cancelImageLeaseContexts(cancelers, imageAccountEvictedError("quota exhausted"))
+	return true, s.persistSnapshot(snapshot, revision)
+}
+
+// RemoveRateLimited removes an account as soon as an upstream response or an
+// account refresh explicitly identifies it as rate limited. Rate-limited
+// accounts are not eligible for later reuse, so retaining a cooldown record
+// would only keep dead capacity in the pool.
+func (s *Store) RemoveRateLimited(token string, err error) (bool, error) {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return false, nil
+	}
+	reason := strings.TrimSpace(fmt.Sprint(err))
+	s.mu.Lock()
+	next := s.accounts[:0]
+	removed := false
+	for _, account := range s.accounts {
+		if account.AccessToken == token {
+			removed = true
+			s.appendCredentialRecoveryLogLocked(account, "warning", "account_deleted", "账号因限流被自动移除", reason, 0)
+			continue
+		}
+		next = append(next, account)
+	}
+	s.accounts = next
+	if !removed {
+		s.mu.Unlock()
+		return false, nil
+	}
+	cancelers := s.evictImageLeasesLocked(token)
+	s.signalImageAvailabilityLocked()
+	s.markDirtyLocked()
+	snapshot, revision := s.snapshotLocked()
+	s.mu.Unlock()
+	cancelImageLeaseContexts(cancelers, imageAccountEvictedError("rate limited"))
 	return true, s.persistSnapshot(snapshot, revision)
 }
 
@@ -1548,15 +2068,14 @@ func (s *Store) MarkFailure(token string, err error) error {
 	})
 }
 
-// MarkImageRateLimited temporarily removes an account from image dispatch.
-// A positive retryAfter is honored when it exceeds the local backoff.
+// MarkImageRateLimited removes an account from image dispatch immediately.
 func (s *Store) MarkImageRateLimited(token string, retryAfter time.Duration, err error) error {
-	return s.markImageCooldown(token, ImageCooldownRateLimited, retryAfter, err)
+	_, removeErr := s.RemoveRateLimited(token, err)
+	return removeErr
 }
 
-// MarkImageReferenceUploadRateLimited quarantines only the reference-image
-// upload capability. The account remains eligible for plain text-to-image
-// requests while this cooldown is active.
+// MarkImageReferenceUploadRateLimited freezes only the reference-upload
+// capability. Plain text-to-image requests may continue using the account.
 func (s *Store) MarkImageReferenceUploadRateLimited(token string, retryAfter time.Duration, err error) error {
 	return s.updateByToken(token, func(a *Account) {
 		now := s.now()
@@ -1612,7 +2131,7 @@ func (s *Store) MarkImageHTTPFailure(token string, statusCode int, retryAfter ti
 }
 
 func (s *Store) markImageCooldown(token string, reason ImageCooldownReason, retryAfter time.Duration, err error) error {
-	return s.updateByToken(token, func(a *Account) {
+	updateErr := s.updateByToken(token, func(a *Account) {
 		now := s.now()
 		if a.Extra == nil {
 			a.Extra = map[string]any{}
@@ -1630,6 +2149,8 @@ func (s *Store) markImageCooldown(token string, reason ImageCooldownReason, retr
 		a.Extra[imageCooldownLastErrorKey] = a.LastError
 		a.Extra[imageCooldownLastAtKey] = now.UTC().Format(time.RFC3339Nano)
 	})
+	s.recordImageHealthFailure(token, string(reason))
+	return updateErr
 }
 
 func imageCooldownDelay(reason ImageCooldownReason, retryAfter time.Duration, failures int) time.Duration {
@@ -1911,6 +2432,7 @@ func (s *Store) replaceOAuthTokens(token, accessToken, refreshToken, idToken, ev
 	if token == "" || accessToken == "" {
 		return Account{}, false, fmt.Errorf("access token is required")
 	}
+	var cancelers []context.CancelCauseFunc
 	s.mu.Lock()
 	for index := range s.accounts {
 		if s.accounts[index].AccessToken != token {
@@ -1944,12 +2466,13 @@ func (s *Store) replaceOAuthTokens(token, accessToken, refreshToken, idToken, ev
 			"",
 			asInt(account.Extra[tokenRecoveryAttemptsKey])+1,
 		)
-		delete(s.imageLeases, token)
+		cancelers = s.evictImageLeasesLocked(token)
 		s.signalImageAvailabilityLocked()
 		result := cloneAccount(*account)
 		s.markDirtyLocked()
 		snapshot, revision := s.snapshotLocked()
 		s.mu.Unlock()
+		cancelImageLeaseContexts(cancelers, imageAccountEvictedError("credential recovery started"))
 		if err := s.persistSnapshot(snapshot, revision); err != nil {
 			return result, true, err
 		}
@@ -2073,11 +2596,12 @@ func (s *Store) FailTokenRecovery(token, reason string, maxAttempts int, retryAf
 				attempts,
 			)
 			s.accounts = append(s.accounts[:index], s.accounts[index+1:]...)
-			delete(s.imageLeases, token)
+			cancelers := s.evictImageLeasesLocked(token)
 			s.signalImageAvailabilityLocked()
 			s.markDirtyLocked()
 			snapshot, revision := s.snapshotLocked()
 			s.mu.Unlock()
+			cancelImageLeaseContexts(cancelers, imageAccountEvictedError("credential recovery deleted"))
 			return true, s.persistSnapshot(snapshot, revision)
 		}
 		account.Status = StatusCredentialInvalid
@@ -2151,11 +2675,12 @@ func (s *Store) RemoveInvalidToken(token, reason string) (bool, error) {
 	}
 	s.accounts = next
 	if removed {
-		delete(s.imageLeases, token)
+		cancelers := s.evictImageLeasesLocked(token)
 		s.signalImageAvailabilityLocked()
 		s.markDirtyLocked()
 		snapshot, revision := s.snapshotLocked()
 		s.mu.Unlock()
+		cancelImageLeaseContexts(cancelers, imageAccountEvictedError("authentication failed"))
 		return true, s.persistSnapshot(snapshot, revision)
 	}
 	s.mu.Unlock()
@@ -2633,6 +3158,11 @@ func isStatus(value string, values ...string) bool {
 func isRateLimitMessage(value string) bool {
 	value = strings.ToLower(value)
 	return strings.Contains(value, "rate limit") || strings.Contains(value, "429") || strings.Contains(value, "quota") || strings.Contains(value, "限流")
+}
+
+func isRateLimitedAccount(account Account) bool {
+	return isStatus(account.Status, "limited", "rate_limited", "no_quota", "限流") ||
+		(!account.ImageQuotaUnknown && account.Quota <= 0)
 }
 
 func sumImageOK(items []Account) int {

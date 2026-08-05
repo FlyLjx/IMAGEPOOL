@@ -4,8 +4,136 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 )
+
+// ImageConversationSignals is the compact signature of one conversation
+// response. It lets the scheduler distinguish a real image-tool execution
+// from a successful HTTP response that only contains ordinary chat messages.
+type ImageConversationSignals struct {
+	ToolSeen           bool
+	ImageReferenceSeen bool
+	AssistantTextSeen  bool
+	LastRole           string
+	Signature          string
+}
+
+func AnalyzeImageConversation(v any) ImageConversationSignals {
+	signals := ImageConversationSignals{}
+	roles := map[string]bool{}
+	var walk func(any)
+	walk = func(value any) {
+		switch item := value.(type) {
+		case map[string]any:
+			if role, ok := nodeRole(item); ok {
+				role = strings.ToLower(strings.TrimSpace(role))
+				if role != "" {
+					roles[role] = true
+					signals.LastRole = role
+				}
+				if role == "assistant" && hasAssistantText(item) {
+					signals.AssistantTextSeen = true
+				}
+				if role == "tool" {
+					metadata, _ := item["metadata"].(map[string]any)
+					if isImageGenerationTool(item, metadata) {
+						signals.ToolSeen = true
+					}
+				}
+			}
+			for _, child := range item {
+				walk(child)
+			}
+		case []any:
+			for _, child := range item {
+				walk(child)
+			}
+		}
+	}
+	walk(v)
+	fileIDs, sedimentIDs := ExtractGeneratedImageReferenceIDs(v)
+	signals.ImageReferenceSeen = len(fileIDs) > 0 || len(sedimentIDs) > 0
+	roleNames := make([]string, 0, len(roles))
+	for role := range roles {
+		roleNames = append(roleNames, role)
+	}
+	sort.Strings(roleNames)
+	switch {
+	case signals.ToolSeen && signals.ImageReferenceSeen:
+		signals.Signature = "image_tool_with_reference"
+	case signals.ToolSeen:
+		signals.Signature = "image_tool_without_reference"
+	case signals.AssistantTextSeen:
+		signals.Signature = "assistant_text_only"
+	case len(roleNames) > 0:
+		signals.Signature = "roles_" + strings.Join(roleNames, "+")
+	default:
+		signals.Signature = "empty"
+	}
+	return signals
+}
+
+// MergeImageConversationSignals folds one conversation response into the
+// attempt diagnostics. Polling receives many snapshots, so the diagnostic
+// state is deliberately cumulative: a tool node or image reference observed
+// on an earlier snapshot must remain visible on the final attempt record.
+func MergeImageConversationSignals(diagnostics *ImageAttemptDiagnostics, value any) {
+	if diagnostics == nil {
+		return
+	}
+	signals := AnalyzeImageConversation(value)
+	diagnostics.ToolSeen = diagnostics.ToolSeen || signals.ToolSeen
+	diagnostics.ImageReferenceSeen = diagnostics.ImageReferenceSeen || signals.ImageReferenceSeen
+	diagnostics.AssistantTextSeen = diagnostics.AssistantTextSeen || signals.AssistantTextSeen
+	if signals.LastRole != "" {
+		diagnostics.LastRole = signals.LastRole
+	}
+	if imageSignalRank(signals.Signature) >= imageSignalRank(diagnostics.ResultSignature) {
+		diagnostics.ResultSignature = signals.Signature
+	}
+}
+
+func imageSignalRank(signature string) int {
+	switch signature {
+	case "image_tool_with_reference":
+		return 5
+	case "image_tool_without_reference":
+		return 4
+	case "assistant_text_only":
+		return 3
+	case "roles_assistant+tool", "roles_tool+user", "roles_assistant+user+tool":
+		return 2
+	case "empty":
+		return 0
+	default:
+		if strings.HasPrefix(signature, "roles_") {
+			return 1
+		}
+		return 0
+	}
+}
+
+func hasAssistantText(value map[string]any) bool {
+	content, ok := value["content"].(map[string]any)
+	if !ok {
+		if nested, nestedOK := value["message"].(map[string]any); nestedOK {
+			return hasAssistantText(nested)
+		}
+		return false
+	}
+	if strings.TrimSpace(str(content["text"])) != "" {
+		return true
+	}
+	if parts, ok := content["parts"].([]any); ok {
+		for _, part := range parts {
+			if strings.TrimSpace(str(part)) != "" {
+				return true
+			}
+		}
+	}
+	return false
+}
 
 var (
 	fileServiceRE    = regexp.MustCompile(`file-service://([A-Za-z0-9_-]+)`)

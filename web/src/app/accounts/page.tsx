@@ -1008,9 +1008,11 @@ function AccountsPageContent() {
     setIsTestingProxy(true);
     try {
       const data = await testProxy(candidate);
-      data.result.ok
-        ? toast.success(`代理可用（${data.result.latency_ms} ms，HTTP ${data.result.status}）`)
-        : toast.error(`代理不可用：${data.result.error ?? "未知错误"}`);
+      if (data.result.ok) {
+        toast.success(`代理可用（${data.result.latency_ms} ms，HTTP ${data.result.status}）`);
+      } else {
+        toast.error(`代理不可用：${data.result.error ?? "未知错误"}`);
+      }
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "测试代理失败");
     } finally {
@@ -1346,7 +1348,7 @@ function AccountsPageContent() {
               Account Pool
             </div>
             <h1 className="text-2xl font-semibold tracking-tight text-slate-950">号池管理</h1>
-            <p className="text-sm text-slate-500">管理账号状态、额度、Codex 使用率和批量刷新任务。</p>
+            <p className="text-sm text-slate-500">管理账号状态、可用额度和调度健康；每个账号的并发槽位会独立自动调整。</p>
           </div>
 
           <Space wrap>

@@ -335,6 +335,33 @@ export type ImageTaskStatusLog = {
   details?: Record<string, unknown>;
 };
 
+export type ImageTaskAttempt = {
+  attempt?: number;
+  account_id?: string;
+  account_email?: string;
+  lease_id?: string;
+  backend_model?: string;
+  conversation_id?: string;
+  status?: string;
+  phase?: string;
+  poll_count?: number;
+  last_http_status?: number;
+  empty_result_secs?: number;
+  tool_seen?: boolean;
+  image_reference_seen?: boolean;
+  assistant_text_seen?: boolean;
+  last_role?: string;
+  result_signature?: string;
+  switch_reason?: string;
+  cooldown_until?: string;
+  active_slots?: number;
+  effective_limit?: number;
+  configured_ceiling?: number;
+  duration_ms?: number;
+  error?: string;
+  removed_account?: boolean;
+};
+
 export type ImageTask = {
   id: string;
   status: "queued" | "running" | "success" | "error";
@@ -351,6 +378,7 @@ export type ImageTask = {
   used_account_count?: number;
   failed_account_count?: number;
   image_route_attempt_count?: number;
+  attempts?: ImageTaskAttempt[];
   used_accounts?: Array<{
     id?: string;
     email?: string;
@@ -643,6 +671,9 @@ export type SchedulerPoolStats = {
   leased: number;
   saturated?: number;
   max_inflight_per_account?: number;
+  dynamic_limit_min?: number;
+  dynamic_limit_max?: number;
+  dynamic_slots?: number;
   dispatchable_slots?: number;
   idle_slots?: number;
   leased_slots?: number;
@@ -748,6 +779,9 @@ export type ImagePoolCapacity = {
     leased: number;
     saturated?: number;
     max_inflight_per_account?: number;
+    dynamic_limit_min?: number;
+    dynamic_limit_max?: number;
+    dynamic_slots?: number;
     dispatchable_slots?: number;
     idle_slots?: number;
     leased_slots?: number;

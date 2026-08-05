@@ -2557,6 +2557,14 @@ func compactTaskListResponse(items []tasks.Task, includeData, includeAccountInfo
 	out := append([]tasks.Task(nil), items...)
 	for i := range out {
 		out[i] = taskResponse(out[i], includeAccountInfo)
+		if includeAccountInfo {
+			// Compact lists keep the lease diagnostics but leave account identity
+			// to the full per-task status response.
+			for index := range out[i].ImageAttempts {
+				out[i].ImageAttempts[index].AccountID = ""
+				out[i].ImageAttempts[index].AccountEmail = ""
+			}
+		}
 		out[i].StatusLogs = nil
 		if !includeData {
 			out[i].Data = nil
@@ -2576,8 +2584,19 @@ func taskResponses(items []tasks.Task, includeAccountInfo bool) []tasks.Task {
 	out := append([]tasks.Task(nil), items...)
 	for index := range out {
 		out[index] = taskResponse(out[index], includeAccountInfo)
+		stripAttemptAccountIdentity(&out[index])
 	}
 	return out
+}
+
+func stripAttemptAccountIdentity(task *tasks.Task) {
+	if task == nil {
+		return
+	}
+	for index := range task.ImageAttempts {
+		task.ImageAttempts[index].AccountID = ""
+		task.ImageAttempts[index].AccountEmail = ""
+	}
 }
 
 func publicTask(task tasks.Task) tasks.Task {
@@ -2590,6 +2609,10 @@ func taskResponse(task tasks.Task, includeAccountInfo bool) tasks.Task {
 		task.UsedAccountCount = 0
 		task.FailedAccountCount = 0
 		task.ImageRouteAttemptCount = 0
+		task.ImageAttempts = nil
+	}
+	for index := range task.ImageAttempts {
+		task.ImageAttempts[index].Error = openaiweb.PublicErrorText(task.ImageAttempts[index].Error)
 	}
 	if task.Error != "" && task.ErrorCode == "" {
 		classified := errorinfo.ClassifyText(task.Error, 0)

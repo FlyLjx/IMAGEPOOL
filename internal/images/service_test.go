@@ -421,9 +421,8 @@ func TestGenerateRateLimitedAccountCoolsAndSwitchesImmediately(t *testing.T) {
 	if err != nil || backend.calls != 2 || response.AccountEmail != "fallback" {
 		t.Fatalf("response=%#v err=%v calls=%d", response, err, backend.calls)
 	}
-	limited, found := store.Get("limited")
-	if !found || limited.ImageFailures != 1 || limited.Extra["image_cooldown_until"] == nil || limited.Extra["image_cooldown_reason"] != "rate_limited" {
-		t.Fatalf("limited=%#v found=%v", limited, found)
+	if _, found := store.Get("limited"); found {
+		t.Fatal("rate-limited account should be removed immediately")
 	}
 }
 
@@ -598,7 +597,14 @@ func TestGenerateWithAccountHonorsPerAccountInflightConfig(t *testing.T) {
 		started:     make(chan struct{}, 2),
 		release:     make(chan struct{}),
 	}
-	service := NewService(cfg, store, backend)
+	warmup := &fakeBackend{}
+	service := NewService(cfg, store, warmup)
+	for index := 0; index < 10; index++ {
+		if _, err := service.GenerateWithAccount(context.Background(), "one", Request{Prompt: "warm up"}); err != nil {
+			t.Fatalf("warm-up generation %d failed: %v", index+1, err)
+		}
+	}
+	service.backend = backend
 	done := make(chan error, 2)
 	for i := 0; i < 2; i++ {
 		go func() {

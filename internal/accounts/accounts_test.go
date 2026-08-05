@@ -925,7 +925,7 @@ func TestPublicListIsSafeDuringConcurrentImageUpdates(t *testing.T) {
 	}
 }
 
-func TestImageCooldownSkipsAndPersists(t *testing.T) {
+func TestImageRateLimitedRemovesAndPersists(t *testing.T) {
 	now := time.Date(2026, time.July, 14, 1, 2, 3, 0, time.UTC)
 	path := filepath.Join(t.TempDir(), "accounts.json")
 	store := NewStore([]Account{
@@ -938,14 +938,13 @@ func TestImageCooldownSkipsAndPersists(t *testing.T) {
 	if err := store.MarkImageRateLimited("cool", 45*time.Second, errors.New("upstream 429")); err != nil {
 		t.Fatal(err)
 	}
-	cooling, found := store.Get("cool")
-	if !found || !isImageCooling(cooling, now) || imageCooldownUntil(cooling) != now.Add(45*time.Second) {
-		t.Fatalf("cooling=%#v found=%v until=%v", cooling, found, imageCooldownUntil(cooling))
+	if _, found := store.Get("cool"); found {
+		t.Fatal("rate-limited account should be removed immediately")
 	}
 	if got, err := store.SelectForImage(nil); err != nil || got.AccessToken != "fallback" {
 		t.Fatalf("selected=%#v err=%v", got, err)
 	}
-	if _, err := store.AcquireAccountForImage(context.Background(), "cool", nil); !errors.Is(err, ErrNoAvailableAccount) {
+	if _, err := store.AcquireAccountForImage(context.Background(), "cool", nil); !errors.Is(err, ErrAccountNotFound) {
 		t.Fatalf("cooled specific account err=%v", err)
 	}
 	if err := store.Flush(); err != nil {
@@ -962,8 +961,8 @@ func TestImageCooldownSkipsAndPersists(t *testing.T) {
 		t.Fatalf("persisted selected=%#v err=%v", got, err)
 	}
 	now = now.Add(46 * time.Second)
-	if got, err := persisted.SelectForImage(nil); err != nil || got.AccessToken != "cool" {
-		t.Fatalf("expired selected=%#v err=%v", got, err)
+	if _, err := persisted.SelectForImage(nil); err != nil {
+		t.Fatalf("fallback after removal err=%v", err)
 	}
 }
 

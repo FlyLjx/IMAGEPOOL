@@ -6,7 +6,7 @@ import type { ColumnsType } from "antd/es/table";
 import { Activity, Ban, LoaderCircle, RefreshCw, TimerReset } from "lucide-react";
 import { toast } from "sonner";
 
-import { cancelImageTask, fetchImageTaskHistory, fetchImageTaskStatus, type ImageTask, type ImageTaskStatusLog } from "@/lib/api";
+import { cancelImageTask, fetchImageTaskHistory, fetchImageTaskStatus, type ImageTask, type ImageTaskAttempt, type ImageTaskStatusLog } from "@/lib/api";
 import { formatShanghaiDateTime } from "@/lib/datetime";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 
@@ -69,6 +69,79 @@ function accountUsage(item: ImageTask | null | undefined) {
           </div>
         );
       })}
+    </div>
+  );
+}
+
+function attemptSignalLabel(attempt: ImageTaskAttempt) {
+  if (attempt.tool_seen && attempt.image_reference_seen) return "tool + 图片";
+  if (attempt.tool_seen) return "tool";
+  if (attempt.assistant_text_seen) return "仅文本";
+  return "未发现图片节点";
+}
+
+function attemptSignalColor(attempt: ImageTaskAttempt) {
+  if (attempt.tool_seen && attempt.image_reference_seen) return "green";
+  if (attempt.tool_seen) return "blue";
+  if (attempt.assistant_text_seen) return "orange";
+  return "red";
+}
+
+function attemptDiagnostics(item: ImageTask | null | undefined) {
+  const attempts = item?.attempts || [];
+  if (!attempts.length) {
+    return <Typography.Text type="secondary">暂无租约诊断</Typography.Text>;
+  }
+  const latest = attempts[attempts.length - 1];
+  return (
+    <div className="flex min-w-[270px] flex-col gap-1.5">
+      <div className="flex flex-wrap items-center gap-1.5">
+        <Tag color={latest.status === "success" ? "green" : latest.status === "failed" ? "red" : "blue"} className="m-0">
+          {attempts.length} 次尝试
+        </Tag>
+        <Tag color={attemptSignalColor(latest)} className="m-0">{attemptSignalLabel(latest)}</Tag>
+        {latest.switch_reason ? <Tag color="orange" className="m-0">切号：{latest.switch_reason}</Tag> : null}
+      </div>
+      <div className="grid grid-cols-2 gap-x-3 gap-y-0.5 text-[11px] text-slate-500">
+        <span>轮询 {latest.poll_count ?? 0} 次</span>
+        <span>HTTP {latest.last_http_status ?? "-"}</span>
+        <span>动态槽位 {latest.active_slots ?? 0}/{latest.effective_limit ?? "-"}</span>
+        <span>结果 {latest.result_signature || "-"}</span>
+      </div>
+      <Typography.Text ellipsis className="!text-[11px] !text-slate-400" title={latest.lease_id || ""}>
+        Lease {latest.lease_id || "-"}
+      </Typography.Text>
+    </div>
+  );
+}
+
+function attemptDiagnosticsList(attempts: ImageTaskAttempt[] | undefined) {
+  if (!attempts?.length) {
+    return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无账号租约诊断" />;
+  }
+  return (
+    <div className="space-y-2">
+      {attempts.map((attempt, index) => (
+        <div key={`${attempt.lease_id || "attempt"}-${index}`} className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <Tag className="m-0">尝试 {attempt.attempt ?? index + 1}</Tag>
+            <Tag color={attempt.status === "success" ? "green" : attempt.status === "failed" ? "red" : "blue"} className="m-0">{attempt.status || "处理中"}</Tag>
+            <Tag color={attemptSignalColor(attempt)} className="m-0">{attemptSignalLabel(attempt)}</Tag>
+            {attempt.switch_reason ? <Tag color="orange" className="m-0">切号：{attempt.switch_reason}</Tag> : null}
+          </div>
+          <div className="mt-2 grid gap-x-4 gap-y-1 text-xs text-slate-600 sm:grid-cols-2">
+            <div>账号：{attempt.account_email || attempt.account_id || "-"}</div>
+            <div>Lease ID：<Typography.Text copyable={Boolean(attempt.lease_id)} className="font-mono text-xs">{attempt.lease_id || "-"}</Typography.Text></div>
+            <div>会话 ID：<Typography.Text copyable={Boolean(attempt.conversation_id)} className="font-mono text-xs">{attempt.conversation_id || "-"}</Typography.Text></div>
+            <div>阶段：{attempt.phase || "-"}</div>
+            <div>轮询：{attempt.poll_count ?? 0} 次 · HTTP {attempt.last_http_status ?? "-"}</div>
+            <div>空结果：{attempt.empty_result_secs ?? 0}s · 耗时 {attempt.duration_ms ? `${(attempt.duration_ms / 1000).toFixed(1)}s` : "-"}</div>
+            <div>结果签名：{attempt.result_signature || "-"}</div>
+            <div>槽位：{attempt.active_slots ?? 0}/{attempt.effective_limit ?? "-"}（上限 {attempt.configured_ceiling ?? "-"}）</div>
+          </div>
+          {attempt.error ? <div className="mt-2 rounded border border-rose-100 bg-rose-50 px-2 py-1 text-xs text-rose-700">{attempt.error}</div> : null}
+        </div>
+      ))}
     </div>
   );
 }
@@ -246,6 +319,7 @@ function TasksContent() {
       { title: "状态", dataIndex: "status", width: 96, render: statusTag },
       { title: "模型", dataIndex: "model", width: 150, ellipsis: true },
       { title: "使用账号", dataIndex: "used_accounts", width: 260, render: (_, item) => accountUsage(item) },
+      { title: "调度诊断", dataIndex: "attempts", width: 310, render: (_, item) => attemptDiagnostics(item) },
       { title: "进度", dataIndex: "progress_percent", width: 230, render: (_, item) => taskProgress(item) },
       {
         title: "实时状态",
@@ -301,7 +375,7 @@ function TasksContent() {
       <section className="flex flex-col gap-4 rounded-lg border border-slate-200 bg-white px-5 py-5 shadow-sm lg:flex-row lg:items-center lg:justify-between">
         <div>
           <Typography.Title level={2} className="!mb-1 !text-2xl">任务队列</Typography.Title>
-          <Typography.Text type="secondary">读取数据库持久化任务历史；完成任务从内存释放后仍可分页查看。</Typography.Text>
+          <Typography.Text type="secondary">读取数据库持久化任务历史，并展示使用账号、可用额度、租约、轮询信号和切号原因。</Typography.Text>
         </div>
         <Button icon={<RefreshCw className="size-4" />} onClick={() => void load(true)}>
           刷新
@@ -338,7 +412,7 @@ function TasksContent() {
               setPage(nextPage);
             },
           }}
-          scroll={{ x: 1480 }}
+          scroll={{ x: 1780 }}
           locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无任务" /> }}
         />
       </Card>
@@ -381,7 +455,7 @@ function TasksContent() {
               <div>进度：<Typography.Text>{statusTask?.progress_percent ?? 0}%</Typography.Text></div>
             </div>
           </div>
-          {statusTask?.status === "error" ? (
+           {statusTask?.status === "error" ? (
             <Alert
               type="error"
               showIcon
@@ -400,7 +474,11 @@ function TasksContent() {
                 </div>
               }
             />
-          ) : null}
+           ) : null}
+          <div>
+            <div className="mb-2 text-sm font-medium text-slate-700">账号租约与上游诊断</div>
+            {attemptDiagnosticsList(statusTask?.attempts)}
+          </div>
           {statusLogList(statusTask?.status_logs)}
         </div>
       </Modal>

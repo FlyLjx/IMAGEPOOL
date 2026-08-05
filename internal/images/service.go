@@ -99,6 +99,7 @@ func NewService(cfg config.Config, store *accounts.Store, backend openaiweb.Back
 	cfg = cfg.Normalize()
 	if store != nil {
 		store.SetImageMaxInflightPerAccount(cfg.ImageAccountMaxInflightPerAccount)
+		store.ResetImageDynamicLimits()
 	}
 	service := &Service{cfg: cfg, store: store, backend: backend, global: limiters.New(cfg.ImageGlobalMaxInflight)}
 	if len(imageStorage) > 0 {
@@ -114,6 +115,7 @@ func (s *Service) UpdateConfig(cfg config.Config) {
 	next := cfg.Normalize()
 	if s.store != nil {
 		s.store.SetImageMaxInflightPerAccount(next.ImageAccountMaxInflightPerAccount)
+		s.store.ResetImageDynamicLimits()
 	}
 	if s.global == nil {
 		s.global = limiters.New(next.ImageGlobalMaxInflight)
@@ -329,26 +331,29 @@ func (s *Service) GenerateWithAccount(ctx context.Context, token string, req Req
 	if !ok {
 		return Response{}, fmt.Errorf("account not found")
 	}
-	account, err := s.store.AcquireAccountForImageWithRequirements(ctx, token, imageDispatchRequirements(req), func() {
+	lease, err := s.store.AcquireAccountImageLease(ctx, token, imageDispatchRequirements(req), func() {
 		reportAccountWait(req, account)
 	})
 	if err != nil {
 		return Response{}, err
 	}
+	account = lease.Account
 	releaseGlobal, err := s.acquireGlobal(ctx)
 	if err != nil {
-		s.store.ReleaseImage(account.AccessToken)
+		s.store.ReleaseImageLease(lease.ID)
 		return Response{}, err
 	}
 	defer releaseGlobal()
 	taskCtx, cancel := s.taskContext(ctx, req)
 	defer cancel()
+	leaseCtx, cancelLeaseContext := bindImageLeaseContext(taskCtx, lease)
+	defer cancelLeaseContext()
 	released := false
 	release := func() {
 		if released {
 			return
 		}
-		s.store.ReleaseImage(account.AccessToken)
+		s.store.ReleaseImageLease(lease.ID)
 		released = true
 	}
 	defer release()
@@ -374,7 +379,7 @@ func (s *Service) GenerateWithAccount(ctx context.Context, token string, req Req
 	if err != nil {
 		return Response{}, err
 	}
-	result, err := s.backend.GenerateImage(taskCtx, account, req)
+	result, err := s.backend.GenerateImage(leaseCtx, account, s.instrumentImageRequest(req, lease, account, nil))
 	if err != nil {
 		s.recordImageFailure(account.AccessToken, err)
 		if openaiweb.IsAuthenticationError(err) {
@@ -424,9 +429,32 @@ func (s *Service) acquireGlobal(ctx context.Context) (func(), error) {
 	return s.global.Acquire(ctx)
 }
 
+// bindImageLeaseContext starts the task budget after admission succeeds while
+// still propagating an account eviction into the upstream request context.
+// Waiting for a global/account slot is capacity backpressure, not generation
+// time, so it must not consume the image task timeout.
+func bindImageLeaseContext(taskCtx context.Context, lease accounts.ImageLease) (context.Context, context.CancelFunc) {
+	if taskCtx == nil {
+		taskCtx = context.Background()
+	}
+	boundCtx, cancelCause := context.WithCancelCause(taskCtx)
+	go func() {
+		select {
+		case <-lease.Context.Done():
+			cause := context.Cause(lease.Context)
+			if cause == nil {
+				cause = context.Canceled
+			}
+			cancelCause(cause)
+		case <-boundCtx.Done():
+		}
+	}()
+	return boundCtx, func() { cancelCause(nil) }
+}
+
 // acquireImageDispatch coordinates the global generation budget and account
 // lease without holding either one while the other resource is unavailable.
-func (s *Service) acquireImageDispatch(ctx context.Context, exclude map[string]bool, requirements accounts.ImageDispatchRequirements, onWait, onReady func()) (accounts.Account, func(), error) {
+func (s *Service) acquireImageDispatch(ctx context.Context, exclude map[string]bool, requirements accounts.ImageDispatchRequirements, onWait, onReady func()) (accounts.ImageLease, func(), error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -446,7 +474,7 @@ func (s *Service) acquireImageDispatch(ctx context.Context, exclude map[string]b
 		if !available {
 			reportWait()
 			if err := s.global.Wait(ctx); err != nil {
-				return accounts.Account{}, nil, err
+				return accounts.ImageLease{}, nil, err
 			}
 			if onReady != nil {
 				onReady()
@@ -454,18 +482,18 @@ func (s *Service) acquireImageDispatch(ctx context.Context, exclude map[string]b
 			waitReported = false
 			continue
 		}
-		account, acquired, err := s.store.TryAcquireForImageWithRequirements(exclude, requirements)
+		lease, acquired, err := s.store.TryAcquireImageLeaseWithRequirements(ctx, exclude, requirements)
 		if err != nil {
 			releaseGlobal()
-			return accounts.Account{}, nil, err
+			return accounts.ImageLease{}, nil, err
 		}
 		if acquired {
-			return account, releaseGlobal, nil
+			return lease, releaseGlobal, nil
 		}
 		releaseGlobal()
 		reportWait()
 		if err := s.store.WaitForImageAvailabilityWithRequirements(ctx, exclude, requirements); err != nil {
-			return accounts.Account{}, nil, err
+			return accounts.ImageLease{}, nil, err
 		}
 		if onReady != nil {
 			onReady()
@@ -476,6 +504,123 @@ func (s *Service) acquireImageDispatch(ctx context.Context, exclude map[string]b
 
 func imageDispatchRequirements(req Request) accounts.ImageDispatchRequirements {
 	return accounts.ImageDispatchRequirements{NeedsReferenceUpload: len(req.References) > 0}
+}
+
+func accountLogLabel(account accounts.Account) string {
+	if email := strings.TrimSpace(account.Email); email != "" {
+		return email
+	}
+	if id := strings.TrimSpace(account.ID); id != "" {
+		return id
+	}
+	return "unknown"
+}
+
+func copyProgressDetails(source map[string]any) map[string]any {
+	if len(source) == 0 {
+		return map[string]any{}
+	}
+	out := make(map[string]any, len(source)+8)
+	for key, value := range source {
+		out[key] = value
+	}
+	return out
+}
+
+func progressDetailInt(details map[string]any, key string) int {
+	switch value := details[key].(type) {
+	case int:
+		return value
+	case int64:
+		return int(value)
+	case float64:
+		return int(value)
+	case float32:
+		return int(value)
+	case string:
+		var parsed int
+		_, _ = fmt.Sscanf(strings.TrimSpace(value), "%d", &parsed)
+		return parsed
+	default:
+		return 0
+	}
+}
+
+func progressDetailBool(details map[string]any, key string) bool {
+	value, ok := details[key].(bool)
+	return ok && value
+}
+
+func progressDetailString(details map[string]any, key string) string {
+	if value, ok := details[key].(string); ok {
+		return strings.TrimSpace(value)
+	}
+	return ""
+}
+
+// instrumentImageRequest enriches task progress with the account lease and
+// poll diagnostics. The account email is used only by the process log; public
+// task details are sanitized by openaiweb.PublicDetails.
+func (s *Service) instrumentImageRequest(req Request, lease accounts.ImageLease, account accounts.Account, attempt *openaiweb.AttemptLog) Request {
+	upstreamProgress := req.Progress
+	req.Progress = func(event openaiweb.ProgressEvent) {
+		details := copyProgressDetails(event.Details)
+		details["task_id"] = strings.TrimSpace(req.TaskID)
+		details["lease_id"] = lease.ID
+		details["account_id"] = strings.TrimSpace(account.ID)
+		details["account_email"] = strings.TrimSpace(account.Email)
+		active, effectiveLimit, configuredCeiling := 0, 0, 0
+		if s != nil && s.store != nil {
+			active, effectiveLimit, configuredCeiling = s.store.ImageAccountLeaseStats(account.AccessToken)
+		}
+		details["active_slots"] = active
+		details["effective_limit"] = effectiveLimit
+		details["configured_ceiling"] = configuredCeiling
+		if attempt != nil {
+			if conversationID := progressDetailString(details, "conversation_id"); conversationID != "" {
+				attempt.ConversationID = conversationID
+			}
+			attempt.Phase = event.Progress
+			attempt.PollCount = max(attempt.PollCount, progressDetailInt(details, "poll_count"))
+			attempt.LastHTTPStatus = max(attempt.LastHTTPStatus, progressDetailInt(details, "last_http_status"))
+			attempt.EmptyResultSecs = max(attempt.EmptyResultSecs, progressDetailInt(details, "empty_result_secs"))
+			attempt.ToolSeen = attempt.ToolSeen || progressDetailBool(details, "tool_seen")
+			attempt.ImageReferenceSeen = attempt.ImageReferenceSeen || progressDetailBool(details, "image_reference_seen")
+			attempt.AssistantTextSeen = attempt.AssistantTextSeen || progressDetailBool(details, "assistant_text_seen")
+			if role := progressDetailString(details, "last_role"); role != "" {
+				attempt.LastRole = role
+			}
+			if signature := progressDetailString(details, "result_signature"); signature != "" {
+				attempt.ResultSignature = signature
+			}
+			attempt.ActiveSlots = active
+			attempt.EffectiveLimit = effectiveLimit
+			attempt.ConfiguredCeiling = configuredCeiling
+		}
+		if event.Progress == "polling_image" {
+			log.Printf("image_poll event=heartbeat task_id=%s attempt=%d lease_id=%s account=%s conversation_id=%s phase=%s poll_count=%d last_http_status=%d empty_result_secs=%d tool_seen=%t image_reference_seen=%t assistant_text_seen=%t result_signature=%s active_slots=%d effective_limit=%d configured_ceiling=%d", strings.TrimSpace(req.TaskID), attemptNumber(attempt), lease.ID, accountLogLabel(account), progressDetailString(details, "conversation_id"), event.Progress, progressDetailInt(details, "poll_count"), progressDetailInt(details, "last_http_status"), progressDetailInt(details, "empty_result_secs"), progressDetailBool(details, "tool_seen"), progressDetailBool(details, "image_reference_seen"), progressDetailBool(details, "assistant_text_seen"), progressDetailString(details, "result_signature"), active, effectiveLimit, configuredCeiling)
+		}
+		event.Details = details
+		if upstreamProgress != nil {
+			upstreamProgress(event)
+		}
+	}
+	return req
+}
+
+func attemptNumber(attempt *openaiweb.AttemptLog) int {
+	if attempt == nil {
+		return 0
+	}
+	return attempt.Attempt
+}
+
+func logImageAttemptSwitch(req Request, lease accounts.ImageLease, account accounts.Account, attempt *openaiweb.AttemptLog, reason string) {
+	if attempt == nil {
+		return
+	}
+	attempt.SwitchReason = strings.TrimSpace(reason)
+	log.Printf("image_attempt event=switch task_id=%s attempt=%d lease_id=%s account=%s conversation_id=%s reason=%s poll_count=%d last_http_status=%d empty_result_secs=%d tool_seen=%t image_reference_seen=%t result_signature=%s", strings.TrimSpace(req.TaskID), attempt.Attempt, lease.ID, accountLogLabel(account), attempt.ConversationID, attempt.SwitchReason, attempt.PollCount, attempt.LastHTTPStatus, attempt.EmptyResultSecs, attempt.ToolSeen, attempt.ImageReferenceSeen, attempt.ResultSignature)
 }
 
 func (s *Service) generateOne(ctx context.Context, req Request) (openaiweb.ImageResult, error) {
@@ -504,7 +649,7 @@ func (s *Service) generateOne(ctx context.Context, req Request) (openaiweb.Image
 		if taskCtx != nil {
 			acquireCtx = taskCtx
 		}
-		account, releaseGlobal, err := s.acquireImageDispatch(acquireCtx, exclude, imageDispatchRequirements(req), func() {
+		lease, releaseGlobal, err := s.acquireImageDispatch(acquireCtx, exclude, imageDispatchRequirements(req), func() {
 			reportAccountWait(req, accounts.Account{})
 			if req.DispatchState != nil {
 				req.DispatchState("waiting")
@@ -520,88 +665,115 @@ func (s *Service) generateOne(ctx context.Context, req Request) (openaiweb.Image
 			}
 			return openaiweb.ImageResult{Attempts: attempts}, err
 		}
-		exclude[account.AccessToken] = true
 		if taskCtx == nil {
 			taskCtx, cancelTask = s.taskContext(ctx, req)
 		}
-		log := openaiweb.AttemptLog{Attempt: len(attempts) + 1, AccountID: account.ID, AccountEmail: account.Email, Status: "running"}
-		log.Phase = "preparing"
+		account := lease.Account
+		exclude[account.AccessToken] = true
+		attemptStarted := time.Now()
+		attemptLog := openaiweb.AttemptLog{Attempt: len(attempts) + 1, AccountID: account.ID, AccountEmail: account.Email, LeaseID: lease.ID, Status: "running"}
+		attemptLog.Phase = "preparing"
+		activeSlots, effectiveLimit, configuredCeiling := s.store.ImageAccountLeaseStats(account.AccessToken)
+		attemptLog.ActiveSlots = activeSlots
+		attemptLog.EffectiveLimit = effectiveLimit
+		attemptLog.ConfiguredCeiling = configuredCeiling
+		log.Printf("image_attempt event=acquired task_id=%s attempt=%d lease_id=%s account=%s phase=preparing active_slots=%d effective_limit=%d configured_ceiling=%d", strings.TrimSpace(req.TaskID), attemptLog.Attempt, lease.ID, accountLogLabel(account), activeSlots, effectiveLimit, configuredCeiling)
+		finishAttempt := func() openaiweb.AttemptLog {
+			attemptLog.DurationMS = time.Since(attemptStarted).Milliseconds()
+			attemptLog.ActiveSlots, attemptLog.EffectiveLimit, attemptLog.ConfiguredCeiling = s.store.ImageAccountLeaseStats(account.AccessToken)
+			log.Printf("image_attempt event=finished task_id=%s attempt=%d lease_id=%s account=%s conversation_id=%s phase=%s status=%s duration_ms=%d poll_count=%d last_http_status=%d empty_result_secs=%d tool_seen=%t image_reference_seen=%t assistant_text_seen=%t result_signature=%s switch_reason=%s active_slots=%d effective_limit=%d configured_ceiling=%d removed_account=%t error=%s", strings.TrimSpace(req.TaskID), attemptLog.Attempt, lease.ID, accountLogLabel(account), attemptLog.ConversationID, attemptLog.Phase, attemptLog.Status, attemptLog.DurationMS, attemptLog.PollCount, attemptLog.LastHTTPStatus, attemptLog.EmptyResultSecs, attemptLog.ToolSeen, attemptLog.ImageReferenceSeen, attemptLog.AssistantTextSeen, attemptLog.ResultSignature, attemptLog.SwitchReason, attemptLog.ActiveSlots, attemptLog.EffectiveLimit, attemptLog.ConfiguredCeiling, attemptLog.RemovedAccount, compactImageAttemptError(attemptLog.Error))
+			return attemptLog
+		}
 		account, err = s.prepareAccountForDispatch(account, req)
 		if err != nil {
-			s.store.ReleaseImage(account.AccessToken)
+			s.store.ReleaseImageLease(lease.ID)
 			releaseGlobal()
 			lastErr = err
-			log.Status = "failed"
-			log.Error = err.Error()
+			attemptLog.Status = "failed"
+			attemptLog.Error = err.Error()
 			if openaiweb.IsAuthenticationError(err) {
 				removed, _ := s.store.RemoveInvalidToken(account.AccessToken, err.Error())
-				log.RemovedAccount = removed
+				attemptLog.RemovedAccount = removed
 			}
 			if openaiweb.IsNoFreeImageQuotaError(err) {
 				removed, _ := s.store.RemoveQuotaExhausted(account.AccessToken, err)
-				log.RemovedAccount = removed
+				attemptLog.RemovedAccount = removed
 			}
-			attempts = append(attempts, log)
+			attempts = append(attempts, finishAttempt())
 			continue
 		}
-		log.AccountEmail = account.Email
+		attemptLog.AccountEmail = account.Email
 		imageAttempts++
-		log.Phase = "generating"
-		result, err := s.backend.GenerateImage(taskCtx, account, req)
-		applyAttemptDiagnostics(&log, result, err)
+		attemptLog.Phase = "generating"
+		attemptReq := s.instrumentImageRequest(req, lease, account, &attemptLog)
+		leaseCtx, cancelLeaseContext := bindImageLeaseContext(taskCtx, lease)
+		result, err := s.backend.GenerateImage(leaseCtx, account, attemptReq)
+		cancelLeaseContext()
+		applyAttemptDiagnostics(&attemptLog, result, err)
 		if err == nil {
 			_ = s.store.MarkImageSuccess(account.AccessToken)
 			s.reportAccountIdentity(req, account.AccessToken)
-			s.store.ReleaseImage(account.AccessToken)
+			s.store.ReleaseImageLease(lease.ID)
 			releaseGlobal()
 			result, err = s.finalizeResult(taskCtx, account, result, req)
 			if err != nil {
 				lastErr = err
-				log.Status = "failed"
-				log.Error = err.Error()
+				attemptLog.Status = "failed"
+				attemptLog.Error = err.Error()
 				if openaiweb.IsAuthenticationError(err) {
-					log.RemovedAccount = s.removeInvalidImageAccount(account.AccessToken, err)
+					attemptLog.RemovedAccount = s.removeInvalidImageAccount(account.AccessToken, err)
 					if authenticationRetries < maxAuthenticationRetries {
 						authenticationRetries++
 						if imageAttempts >= maxAttempts {
 							maxAttempts++
 						}
-						attempts = append(attempts, log)
+						attempts = append(attempts, finishAttempt())
 						reportAuthenticationRetry(req, account, err, authenticationRetries)
 						continue
 					}
 				}
-				attempts = append(attempts, log)
+				attempts = append(attempts, finishAttempt())
 				result.Attempts = append(result.Attempts, attempts...)
 				return result, err
 			}
-			log.Status = "success"
-			log.BackendModel = result.BackendModel
-			log.ConversationID = result.ConversationID
-			attempts = append(attempts, log)
+			attemptLog.Status = "success"
+			attemptLog.BackendModel = result.BackendModel
+			attemptLog.ConversationID = result.ConversationID
+			attempts = append(attempts, finishAttempt())
 			result.Attempts = append(result.Attempts, attempts...)
 			return result, nil
 		}
 		lastErr = err
-		log.Status = "failed"
-		log.Error = err.Error()
-		s.recordImageFailure(account.AccessToken, err)
+		attemptLog.Status = "failed"
+		attemptLog.Error = err.Error()
+		accountEvicted := accounts.IsImageAccountEvicted(lease.Context)
+		if !accountEvicted {
+			s.recordImageFailure(account.AccessToken, err)
+		}
 		authenticationError := openaiweb.IsAuthenticationError(err)
 		if authenticationError {
-			log.RemovedAccount = s.removeInvalidImageAccount(account.AccessToken, err)
+			attemptLog.RemovedAccount = s.removeInvalidImageAccount(account.AccessToken, err)
 		} else if openaiweb.IsNoFreeImageQuotaError(err) {
 			removed, _ := s.store.RemoveQuotaExhausted(account.AccessToken, err)
-			log.RemovedAccount = removed
+			attemptLog.RemovedAccount = removed
 		}
-		s.store.ReleaseImage(account.AccessToken)
+		s.store.ReleaseImageLease(lease.ID)
 		releaseGlobal()
+		if accountEvicted {
+			logImageAttemptSwitch(req, lease, account, &attemptLog, "account_evicted")
+			attempts = append(attempts, finishAttempt())
+			if taskCtx.Err() == nil {
+				continue
+			}
+		}
 		if openaiweb.IsInteractiveChallengeError(err) {
-			attempts = append(attempts, log)
+			attempts = append(attempts, finishAttempt())
 			return openaiweb.ImageResult{Attempts: attempts}, err
 		}
 		if authenticationError {
+			logImageAttemptSwitch(req, lease, account, &attemptLog, "authentication_failed")
 			if authenticationRetries >= maxAuthenticationRetries {
-				attempts = append(attempts, log)
+				attempts = append(attempts, finishAttempt())
 				return openaiweb.ImageResult{Attempts: attempts}, err
 			}
 			authenticationRetries++
@@ -609,18 +781,21 @@ func (s *Service) generateOne(ctx context.Context, req Request) (openaiweb.Image
 				maxAttempts++
 			}
 			reportAuthenticationRetry(req, account, err, authenticationRetries)
-			attempts = append(attempts, log)
+			attempts = append(attempts, finishAttempt())
 			continue
 		}
 		if openaiweb.IsImageGenerationStalled(err) {
 			switches++
-			log.SwitchReason = "generation_stalled"
+			logImageAttemptSwitch(req, lease, account, &attemptLog, "generation_stalled")
 			if switches > s.currentConfig().ImageMaxSwitchesPerTask {
-				attempts = append(attempts, log)
+				attempts = append(attempts, finishAttempt())
 				return openaiweb.ImageResult{Attempts: attempts}, err
 			}
 		}
-		attempts = append(attempts, log)
+		if attemptLog.SwitchReason == "" && openaiweb.IsRetryableImageError(err) {
+			logImageAttemptSwitch(req, lease, account, &attemptLog, "retryable_error")
+		}
+		attempts = append(attempts, finishAttempt())
 		if !openaiweb.IsRetryableImageError(err) {
 			return openaiweb.ImageResult{Attempts: attempts}, err
 		}
@@ -671,6 +846,23 @@ func applyAttemptDiagnostics(log *openaiweb.AttemptLog, result openaiweb.ImageRe
 	if diagnostics.EmptyResultSecs > 0 {
 		log.EmptyResultSecs = diagnostics.EmptyResultSecs
 	}
+	log.ToolSeen = log.ToolSeen || diagnostics.ToolSeen
+	log.ImageReferenceSeen = log.ImageReferenceSeen || diagnostics.ImageReferenceSeen
+	log.AssistantTextSeen = log.AssistantTextSeen || diagnostics.AssistantTextSeen
+	if diagnostics.LastRole != "" {
+		log.LastRole = diagnostics.LastRole
+	}
+	if diagnostics.ResultSignature != "" {
+		log.ResultSignature = diagnostics.ResultSignature
+	}
+}
+
+func compactImageAttemptError(message string) string {
+	message = strings.Join(strings.Fields(message), " ")
+	if len(message) > 240 {
+		return message[:240]
+	}
+	return message
 }
 
 // recordImageFailure applies dispatch backoff once for each failed attempt.
