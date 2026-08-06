@@ -816,7 +816,7 @@ func TestAccountImportRemovesInvalidTokens(t *testing.T) {
 	srv := httptest.NewServer(newTestServerWithBackend(cfg, backend))
 	defer srv.Close()
 
-	request, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/accounts", strings.NewReader(`{"tokens":["good","bad"]}`))
+	request, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/accounts", strings.NewReader(`{"tokens":["good","bad"],"refresh":true}`))
 	request.Header.Set("Authorization", "Bearer k")
 	response, err := http.DefaultClient.Do(request)
 	if err != nil {
@@ -846,6 +846,93 @@ func TestAccountImportRemovesInvalidTokens(t *testing.T) {
 	}
 	if valid != 1 || backend.readinessCheckCount() != 2 {
 		t.Fatalf("valid=%d readinessChecks=%d payload=%#v", valid, backend.readinessCheckCount(), payload)
+	}
+}
+
+func TestAccountImportSkipsValidationByDefault(t *testing.T) {
+	cfg := config.Default()
+	cfg.AuthKeyFile = filepath.Join(t.TempDir(), "auth-keys.json")
+	cfg.ImageOutputDir = filepath.Join(t.TempDir(), "images")
+	cfg.CallLogFile = filepath.Join(t.TempDir(), "calls.json")
+	cfg.ImageTagsFile = filepath.Join(t.TempDir(), "tags.json")
+	cfg.RegisterFile = filepath.Join(t.TempDir(), "register.json")
+	backend := &validatingAPIBackend{readinessErrs: map[string]error{"bad": errors.New("token invalidated")}}
+	srv := httptest.NewServer(newTestServerWithBackend(cfg, backend))
+	defer srv.Close()
+
+	request, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/accounts", strings.NewReader(`{"tokens":["good","bad"]}`))
+	request.Header.Set("Authorization", "Bearer k")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	var payload struct {
+		Added     int                 `json:"added"`
+		Refreshed int                 `json:"refreshed"`
+		Errors    []map[string]string `json:"errors"`
+		Items     []map[string]any    `json:"items"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusOK || payload.Added != 2 || payload.Refreshed != 0 || len(payload.Errors) != 0 || len(payload.Items) != 3 {
+		t.Fatalf("status=%d payload=%#v", response.StatusCode, payload)
+	}
+	if backend.readinessCheckCount() != 0 {
+		t.Fatalf("default account import performed %d readiness checks", backend.readinessCheckCount())
+	}
+	seen := map[string]bool{}
+	for _, item := range payload.Items {
+		if token, _ := item["access_token"].(string); token != "" {
+			seen[token] = true
+		}
+	}
+	if !seen["good"] || !seen["bad"] {
+		t.Fatalf("uploaded accounts were not retained: %#v", payload.Items)
+	}
+}
+
+func TestExternalAccountImportHonorsRefreshFlag(t *testing.T) {
+	cfg := config.Default()
+	cfg.AuthKeyFile = filepath.Join(t.TempDir(), "auth-keys.json")
+	cfg.ImageOutputDir = filepath.Join(t.TempDir(), "images")
+	cfg.CallLogFile = filepath.Join(t.TempDir(), "calls.json")
+	cfg.ImageTagsFile = filepath.Join(t.TempDir(), "tags.json")
+	cfg.RegisterFile = filepath.Join(t.TempDir(), "register.json")
+	backend := &validatingAPIBackend{readinessErrs: map[string]error{"bad": errors.New("token invalidated")}}
+	srv := httptest.NewServer(newTestServerWithBackend(cfg, backend))
+	defer srv.Close()
+
+	post := func(body string) (int, map[string]any) {
+		request, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/external/accounts/import", strings.NewReader(body))
+		request.Header.Set("Authorization", "Bearer k")
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		var payload map[string]any
+		if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+		return response.StatusCode, payload
+	}
+
+	status, payload := post(`{"tokens":["fast"]}`)
+	if status != http.StatusOK || int(payload["added"].(float64)) != 1 || int(payload["refreshed"].(float64)) != 0 {
+		t.Fatalf("default external import status=%d payload=%#v", status, payload)
+	}
+	if backend.readinessCheckCount() != 0 {
+		t.Fatalf("default external import performed readiness checks: %d", backend.readinessCheckCount())
+	}
+
+	status, payload = post(`{"tokens":["bad"],"refresh":true}`)
+	if status != http.StatusOK || int(payload["added"].(float64)) != 1 || len(payload["errors"].([]any)) != 1 {
+		t.Fatalf("refresh external import status=%d payload=%#v", status, payload)
+	}
+	if backend.readinessCheckCount() != 1 {
+		t.Fatalf("refresh=true did not perform exactly one readiness check: %d", backend.readinessCheckCount())
 	}
 }
 

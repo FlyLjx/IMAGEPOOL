@@ -1113,6 +1113,7 @@ func (s *Server) handleAccountImport(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Tokens   []string           `json:"tokens"`
 		Accounts []accounts.Account `json:"accounts"`
+		Refresh  bool               `json:"refresh"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeError(w, http.StatusBadRequest, err)
@@ -1128,12 +1129,30 @@ func (s *Server) handleAccountImport(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, fmt.Errorf("tokens or accounts is required"))
 		return
 	}
-	added, skipped, refreshed, issues, err := s.importAccountsAndValidate(items)
+	added, skipped, refreshed, issues, err := s.importAccounts(items, body.Refresh)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"added": added, "skipped": skipped, "refreshed": refreshed, "errors": issues, "items": s.publicAccounts()})
+}
+
+func (s *Server) importAccounts(items []accounts.Account, refresh bool) (added, skipped, refreshed int, issues []map[string]string, err error) {
+	if !refresh {
+		return s.importAccountsWithoutValidation(items)
+	}
+	return s.importAccountsAndValidate(items)
+}
+
+// importAccountsWithoutValidation persists newly uploaded accounts immediately.
+// The normal account scheduler treats an empty status as dispatchable, while
+// periodic refresh and image requests continue to detect unusable accounts.
+func (s *Server) importAccountsWithoutValidation(items []accounts.Account) (added, skipped, refreshed int, issues []map[string]string, err error) {
+	for i := range items {
+		items[i].AccessToken = strings.TrimSpace(items[i].AccessToken)
+	}
+	added, skipped, err = s.accounts.AddWithResult(items)
+	return added, skipped, 0, nil, err
 }
 
 func (s *Server) importAccountsAndValidate(items []accounts.Account) (added, skipped, refreshed int, issues []map[string]string, err error) {
@@ -1470,7 +1489,7 @@ func (s *Server) handleExternalAccountsImport(w http.ResponseWriter, r *http.Req
 		writeError(w, http.StatusBadRequest, fmt.Errorf("tokens or accounts is required"))
 		return
 	}
-	added, skipped, refreshed, issues, err := s.importAccountsAndValidate(items)
+	added, skipped, refreshed, issues, err := s.importAccounts(items, body.Refresh)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return

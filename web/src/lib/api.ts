@@ -932,10 +932,14 @@ export async function debugChatGPTWeb(payload: ChatGPTWebDebugPayload) {
   });
 }
 
-export async function createAccounts(tokens: string[], accounts: AccountImportPayload[] = []) {
+export async function createAccounts(
+  tokens: string[],
+  accounts: AccountImportPayload[] = [],
+  options: { refresh?: boolean } = {},
+) {
   return httpRequest<AccountMutationResponse>("/api/accounts", {
     method: "POST",
-    body: { tokens, accounts },
+    body: { tokens, accounts, refresh: options.refresh ?? true },
   });
 }
 
