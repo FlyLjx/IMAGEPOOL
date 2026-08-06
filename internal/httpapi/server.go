@@ -224,11 +224,18 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"version": "go-image-pool"})
 		return
 	}
-	if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/images/") {
+	if isPublicImagePath(r.URL.Path) {
+		writePublicImageCORS(w)
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+	}
+	if (r.Method == http.MethodGet || r.Method == http.MethodHead) && strings.HasPrefix(r.URL.Path, "/images/") {
 		s.handleImageFile(w, r)
 		return
 	}
-	if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/image-thumbnails/") {
+	if (r.Method == http.MethodGet || r.Method == http.MethodHead) && strings.HasPrefix(r.URL.Path, "/image-thumbnails/") {
 		s.handleImageThumbnail(w, r)
 		return
 	}
@@ -1769,6 +1776,17 @@ func baseURL(r *http.Request) string {
 func firstForwardedValue(value string) string {
 	value = strings.TrimSpace(strings.Split(value, ",")[0])
 	return strings.TrimSpace(value)
+}
+
+func isPublicImagePath(path string) bool {
+	return strings.HasPrefix(path, "/images/") || strings.HasPrefix(path, "/image-thumbnails/")
+}
+
+func writePublicImageCORS(w http.ResponseWriter) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, Range")
+	w.Header().Set("Access-Control-Expose-Headers", "Accept-Ranges, Content-Length, Content-Range, ETag, Last-Modified")
 }
 
 func (s *Server) handleImageFile(w http.ResponseWriter, r *http.Request) {

@@ -2011,6 +2011,40 @@ func TestImageTagsAndThumbnailEndpoints(t *testing.T) {
 	}
 }
 
+func TestPublicImageFilesAllowCrossOriginFetch(t *testing.T) {
+	cfg := config.Default()
+	dir := t.TempDir()
+	cfg.AuthKeyFile = filepath.Join(dir, "auth-keys.json")
+	cfg.ImageTagsFile = filepath.Join(dir, "tags.json")
+	cfg.ImageOutputDir = filepath.Join(dir, "images")
+	cfg.CallLogFile = filepath.Join(dir, "calls.json")
+	imagePath := filepath.Join(cfg.ImageOutputDir, "2026", "08", "06", "cors.png")
+	if err := os.MkdirAll(filepath.Dir(imagePath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(imagePath, []byte{0x89, 'P', 'N', 'G'}, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	handler := newTestServer(cfg)
+
+	imageRequest := httptest.NewRequest(http.MethodGet, "/images/2026/08/06/cors.png", nil)
+	imageRequest.Header.Set("Origin", "https://test.lyaiapp.com")
+	imageResponse := httptest.NewRecorder()
+	handler.ServeHTTP(imageResponse, imageRequest)
+	if imageResponse.Code != http.StatusOK || imageResponse.Header().Get("Access-Control-Allow-Origin") != "*" {
+		t.Fatalf("image status=%d headers=%#v", imageResponse.Code, imageResponse.Header())
+	}
+
+	preflightRequest := httptest.NewRequest(http.MethodOptions, "/images/2026/08/06/cors.png", nil)
+	preflightRequest.Header.Set("Origin", "https://test.lyaiapp.com")
+	preflightRequest.Header.Set("Access-Control-Request-Method", http.MethodGet)
+	preflightResponse := httptest.NewRecorder()
+	handler.ServeHTTP(preflightResponse, preflightRequest)
+	if preflightResponse.Code != http.StatusNoContent || preflightResponse.Header().Get("Access-Control-Allow-Origin") != "*" || preflightResponse.Header().Get("Access-Control-Allow-Methods") != "GET, HEAD, OPTIONS" {
+		t.Fatalf("preflight status=%d headers=%#v", preflightResponse.Code, preflightResponse.Header())
+	}
+}
+
 func TestReleaseImagesBeforeTodayKeepsTodayImages(t *testing.T) {
 	cfg := config.Default()
 	dir := t.TempDir()
