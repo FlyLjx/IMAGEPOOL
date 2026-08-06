@@ -558,6 +558,24 @@ func progressDetailString(details map[string]any, key string) string {
 	return ""
 }
 
+func progressDetailStringList(details map[string]any, key string) string {
+	value := details[key]
+	switch typed := value.(type) {
+	case []string:
+		return strings.Join(typed, ",")
+	case []any:
+		values := make([]string, 0, len(typed))
+		for _, item := range typed {
+			if text, ok := item.(string); ok && strings.TrimSpace(text) != "" {
+				values = append(values, strings.TrimSpace(text))
+			}
+		}
+		return strings.Join(values, ",")
+	default:
+		return ""
+	}
+}
+
 // instrumentImageRequest enriches task progress with the account lease and
 // poll diagnostics. The account email is used only by the process log; public
 // task details are sanitized by openaiweb.PublicDetails.
@@ -598,7 +616,7 @@ func (s *Service) instrumentImageRequest(req Request, lease accounts.ImageLease,
 			attempt.ConfiguredCeiling = configuredCeiling
 		}
 		if event.Progress == "polling_image" {
-			log.Printf("image_poll event=heartbeat task_id=%s attempt=%d lease_id=%s account=%s conversation_id=%s phase=%s poll_count=%d last_http_status=%d empty_result_secs=%d tool_seen=%t image_reference_seen=%t assistant_text_seen=%t result_signature=%s active_slots=%d effective_limit=%d configured_ceiling=%d", strings.TrimSpace(req.TaskID), attemptNumber(attempt), lease.ID, accountLogLabel(account), progressDetailString(details, "conversation_id"), event.Progress, progressDetailInt(details, "poll_count"), progressDetailInt(details, "last_http_status"), progressDetailInt(details, "empty_result_secs"), progressDetailBool(details, "tool_seen"), progressDetailBool(details, "image_reference_seen"), progressDetailBool(details, "assistant_text_seen"), progressDetailString(details, "result_signature"), active, effectiveLimit, configuredCeiling)
+			log.Printf("image_poll event=heartbeat task_id=%s attempt=%d lease_id=%s account=%s conversation_id=%s phase=%s poll_count=%d last_http_status=%d empty_result_secs=%d tool_seen=%t image_reference_seen=%t assistant_text_seen=%t result_signature=%s response_snapshots=%d response_bytes=%d response_fingerprint=%s response_roles=%s response_tools=%s response_statuses=%s response_references=%s response_candidate_keys=%s response_candidate_values=%d response_raw_file_refs=%d response_raw_sediment_refs=%d response_file_refs=%d response_sediment_refs=%d active_slots=%d effective_limit=%d configured_ceiling=%d", strings.TrimSpace(req.TaskID), attemptNumber(attempt), lease.ID, accountLogLabel(account), progressDetailString(details, "conversation_id"), event.Progress, progressDetailInt(details, "poll_count"), progressDetailInt(details, "last_http_status"), progressDetailInt(details, "empty_result_secs"), progressDetailBool(details, "tool_seen"), progressDetailBool(details, "image_reference_seen"), progressDetailBool(details, "assistant_text_seen"), progressDetailString(details, "result_signature"), progressDetailInt(details, "response_snapshots"), progressDetailInt(details, "response_bytes"), progressDetailString(details, "response_fingerprint"), progressDetailStringList(details, "response_roles"), progressDetailStringList(details, "response_tools"), progressDetailStringList(details, "response_statuses"), progressDetailStringList(details, "response_references"), progressDetailStringList(details, "response_candidate_keys"), progressDetailInt(details, "response_candidate_values"), progressDetailInt(details, "response_raw_file_refs"), progressDetailInt(details, "response_raw_sediment_refs"), progressDetailInt(details, "response_file_refs"), progressDetailInt(details, "response_sediment_refs"), active, effectiveLimit, configuredCeiling)
 		}
 		event.Details = details
 		if upstreamProgress != nil {
@@ -620,7 +638,7 @@ func logImageAttemptSwitch(req Request, lease accounts.ImageLease, account accou
 		return
 	}
 	attempt.SwitchReason = strings.TrimSpace(reason)
-	log.Printf("image_attempt event=switch task_id=%s attempt=%d lease_id=%s account=%s conversation_id=%s reason=%s poll_count=%d last_http_status=%d empty_result_secs=%d tool_seen=%t image_reference_seen=%t result_signature=%s", strings.TrimSpace(req.TaskID), attempt.Attempt, lease.ID, accountLogLabel(account), attempt.ConversationID, attempt.SwitchReason, attempt.PollCount, attempt.LastHTTPStatus, attempt.EmptyResultSecs, attempt.ToolSeen, attempt.ImageReferenceSeen, attempt.ResultSignature)
+	log.Printf("image_attempt event=switch task_id=%s attempt=%d lease_id=%s account=%s conversation_id=%s reason=%s poll_count=%d last_http_status=%d empty_result_secs=%d tool_seen=%t image_reference_seen=%t result_signature=%s %s", strings.TrimSpace(req.TaskID), attempt.Attempt, lease.ID, accountLogLabel(account), attempt.ConversationID, attempt.SwitchReason, attempt.PollCount, attempt.LastHTTPStatus, attempt.EmptyResultSecs, attempt.ToolSeen, attempt.ImageReferenceSeen, attempt.ResultSignature, attempt.ResponseDiagnostics.LogFields())
 }
 
 func (s *Service) generateOne(ctx context.Context, req Request) (openaiweb.ImageResult, error) {
@@ -681,7 +699,7 @@ func (s *Service) generateOne(ctx context.Context, req Request) (openaiweb.Image
 		finishAttempt := func() openaiweb.AttemptLog {
 			attemptLog.DurationMS = time.Since(attemptStarted).Milliseconds()
 			attemptLog.ActiveSlots, attemptLog.EffectiveLimit, attemptLog.ConfiguredCeiling = s.store.ImageAccountLeaseStats(account.AccessToken)
-			log.Printf("image_attempt event=finished task_id=%s attempt=%d lease_id=%s account=%s conversation_id=%s phase=%s status=%s duration_ms=%d poll_count=%d last_http_status=%d empty_result_secs=%d tool_seen=%t image_reference_seen=%t assistant_text_seen=%t result_signature=%s switch_reason=%s active_slots=%d effective_limit=%d configured_ceiling=%d removed_account=%t error=%s", strings.TrimSpace(req.TaskID), attemptLog.Attempt, lease.ID, accountLogLabel(account), attemptLog.ConversationID, attemptLog.Phase, attemptLog.Status, attemptLog.DurationMS, attemptLog.PollCount, attemptLog.LastHTTPStatus, attemptLog.EmptyResultSecs, attemptLog.ToolSeen, attemptLog.ImageReferenceSeen, attemptLog.AssistantTextSeen, attemptLog.ResultSignature, attemptLog.SwitchReason, attemptLog.ActiveSlots, attemptLog.EffectiveLimit, attemptLog.ConfiguredCeiling, attemptLog.RemovedAccount, compactImageAttemptError(attemptLog.Error))
+			log.Printf("image_attempt event=finished task_id=%s attempt=%d lease_id=%s account=%s conversation_id=%s phase=%s status=%s duration_ms=%d poll_count=%d last_http_status=%d empty_result_secs=%d tool_seen=%t image_reference_seen=%t assistant_text_seen=%t result_signature=%s switch_reason=%s active_slots=%d effective_limit=%d configured_ceiling=%d removed_account=%t error=%s %s", strings.TrimSpace(req.TaskID), attemptLog.Attempt, lease.ID, accountLogLabel(account), attemptLog.ConversationID, attemptLog.Phase, attemptLog.Status, attemptLog.DurationMS, attemptLog.PollCount, attemptLog.LastHTTPStatus, attemptLog.EmptyResultSecs, attemptLog.ToolSeen, attemptLog.ImageReferenceSeen, attemptLog.AssistantTextSeen, attemptLog.ResultSignature, attemptLog.SwitchReason, attemptLog.ActiveSlots, attemptLog.EffectiveLimit, attemptLog.ConfiguredCeiling, attemptLog.RemovedAccount, compactImageAttemptError(attemptLog.Error), attemptLog.ResponseDiagnostics.LogFields())
 			return attemptLog
 		}
 		account, err = s.prepareAccountForDispatch(account, req)
@@ -855,6 +873,7 @@ func applyAttemptDiagnostics(log *openaiweb.AttemptLog, result openaiweb.ImageRe
 	if diagnostics.ResultSignature != "" {
 		log.ResultSignature = diagnostics.ResultSignature
 	}
+	log.ResponseDiagnostics = diagnostics.Response
 }
 
 func compactImageAttemptError(message string) string {

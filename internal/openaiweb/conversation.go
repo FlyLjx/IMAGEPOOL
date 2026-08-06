@@ -58,6 +58,7 @@ type imageStreamState struct {
 	offset         int
 	fileIDs        []string
 	sedimentIDs    []string
+	response       ImageResponseDiagnostics
 }
 
 type imageGenerationStartedAtKey struct{}
@@ -159,6 +160,7 @@ func (c *Client) startImageGenerationWithinBudgetWithState(ctx context.Context, 
 	defer resp.Body.Close()
 	state := &imageStreamState{}
 	foundReferences, streamDone, streamErr := c.consumeImageStream(ctx, resp.Body, refs, state)
+	logImageStreamDiagnostics("initial", state)
 	if streamErr != nil {
 		if ctx.Err() != nil {
 			return state.conversationID, state.fileIDs, state.sedimentIDs, imageGenerationErrorForConversation(ctx, ctx.Err(), state.conversationID)
@@ -194,6 +196,7 @@ func (c *Client) startImageGenerationWithinBudgetWithState(ctx context.Context, 
 			continue
 		}
 		foundReferences, streamDone, streamErr = c.consumeImageStream(ctx, resumeBody, refs, state)
+		logImageStreamDiagnostics("resume", state)
 		if streamErr != nil {
 			if ctx.Err() != nil {
 				return state.conversationID, state.fileIDs, state.sedimentIDs, imageGenerationErrorForConversation(ctx, ctx.Err(), state.conversationID)
@@ -358,6 +361,9 @@ func (c *Client) consumeImageStream(ctx context.Context, body io.ReadCloser, ref
 	readCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	uploadedFileIDs := uploadedReferenceFileSet(refs)
+	if state != nil {
+		state.response = ImageResponseDiagnostics{}
+	}
 	payloads := make(chan string, 1)
 	activity := make(chan struct{}, 1)
 	readErrors := make(chan error, 1)
@@ -434,6 +440,9 @@ func (c *Client) consumeImageStream(ctx context.Context, body io.ReadCloser, ref
 			if json.Unmarshal([]byte(payload), &value) != nil {
 				continue
 			}
+			if state != nil {
+				state.response.Observe(summarizeImageResponse(value, len(payload), uploadedFileIDs))
+			}
 			if terminalErr := findImageGenerationTerminalError(value); terminalErr != nil {
 				return false, false, terminalErr
 			}
@@ -480,6 +489,13 @@ func (c *Client) consumeImageStream(ctx context.Context, body io.ReadCloser, ref
 			return false, false, ctx.Err()
 		}
 	}
+}
+
+func logImageStreamDiagnostics(phase string, state *imageStreamState) {
+	if state == nil {
+		return
+	}
+	log.Printf("image_upstream event=stream_summary phase=%s conversation_id=%s %s", strings.TrimSpace(phase), strings.TrimSpace(state.conversationID), state.response.LogFields())
 }
 
 func extractResumeConversationToken(value any) (token, conversationID string, ok bool) {
@@ -784,16 +800,29 @@ func (c *Client) pollImageResultsWithProgressAndDiagnostics(ctx context.Context,
 			Progress: "polling_image",
 			Message:  fmt.Sprintf("图片仍在生成，已等待 %d 秒", elapsed),
 			Details: map[string]any{
-				"conversation_id":      conversationID,
-				"elapsed_secs":         elapsed,
-				"poll_count":           diagnostics.PollCount,
-				"last_http_status":     diagnostics.LastHTTPStatus,
-				"empty_result_secs":    diagnostics.EmptyResultSecs,
-				"tool_seen":            diagnostics.ToolSeen,
-				"image_reference_seen": diagnostics.ImageReferenceSeen,
-				"assistant_text_seen":  diagnostics.AssistantTextSeen,
-				"last_role":            diagnostics.LastRole,
-				"result_signature":     diagnostics.ResultSignature,
+				"conversation_id":            conversationID,
+				"elapsed_secs":               elapsed,
+				"poll_count":                 diagnostics.PollCount,
+				"last_http_status":           diagnostics.LastHTTPStatus,
+				"empty_result_secs":          diagnostics.EmptyResultSecs,
+				"tool_seen":                  diagnostics.ToolSeen,
+				"image_reference_seen":       diagnostics.ImageReferenceSeen,
+				"assistant_text_seen":        diagnostics.AssistantTextSeen,
+				"last_role":                  diagnostics.LastRole,
+				"result_signature":           diagnostics.ResultSignature,
+				"response_snapshots":         diagnostics.Response.SnapshotCount,
+				"response_bytes":             diagnostics.Response.LastBytes,
+				"response_fingerprint":       diagnostics.Response.LastFingerprint,
+				"response_roles":             diagnostics.Response.LastRoles,
+				"response_tools":             diagnostics.Response.LastToolMarkers,
+				"response_statuses":          diagnostics.Response.LastStatusMarkers,
+				"response_references":        diagnostics.Response.LastReferenceMarkers,
+				"response_candidate_keys":    diagnostics.Response.LastCandidateKeys,
+				"response_candidate_values":  diagnostics.Response.LastCandidateValues,
+				"response_raw_file_refs":     diagnostics.Response.LastRawFileReferences,
+				"response_raw_sediment_refs": diagnostics.Response.LastRawSediments,
+				"response_file_refs":         diagnostics.Response.LastFileReferences,
+				"response_sediment_refs":     diagnostics.Response.LastSediments,
 			},
 		})
 		lastHeartbeat = now
@@ -847,6 +876,7 @@ func (c *Client) pollImageResultsWithProgressAndDiagnostics(ctx context.Context,
 			return nil, nil, diagnostics, err
 		}
 		diagnostics.LastHTTPStatus = http.StatusOK
+		diagnostics.Response.Observe(summarizeImageResponse(conversation, 0, excludedFileIDs))
 		MergeImageConversationSignals(&diagnostics, conversation)
 		if terminalErr := findImageGenerationTerminalError(conversation); terminalErr != nil {
 			return nil, nil, diagnostics, terminalErr
