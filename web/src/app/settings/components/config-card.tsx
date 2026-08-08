@@ -113,6 +113,7 @@ export function ConfigCard() {
   const setImageDownloadParallel = useSettingsStore((state) => state.setImageDownloadParallel);
   const setImageUploadParallel = useSettingsStore((state) => state.setImageUploadParallel);
   const setImageAccountMaxInflightPerAccount = useSettingsStore((state) => state.setImageAccountMaxInflightPerAccount);
+  const setImageAccountDynamicSlots = useSettingsStore((state) => state.setImageAccountDynamicSlots);
   const setImageStallTimeoutSecs = useSettingsStore((state) => state.setImageStallTimeoutSecs);
   const setImageMaxSwitchesPerTask = useSettingsStore((state) => state.setImageMaxSwitchesPerTask);
   const setImageWebModelSlug = useSettingsStore((state) => state.setImageWebModelSlug);
@@ -187,7 +188,7 @@ export function ConfigCard() {
           message="常用配置保持简单；管理员密钥和用户 Key 在右侧单独管理。"
         />
 
-        <SectionTitle title="生图调度" description="通常只需要设置这两项；每个账号的槽位会从 1 开始，稳定成功后自动提升，异常后自动降级。" />
+        <SectionTitle title="生图调度" description="通常只需要设置这两项；单号槽位可按账号自动升降，也可固定使用上限。" />
         <Row gutter={[16, 16]}>
           <Col xs={24} md={12}>
             <NumberInput
@@ -199,13 +200,26 @@ export function ConfigCard() {
             />
           </Col>
           <Col xs={24} md={12}>
-            <NumberInput
-              label="单号最大并发"
-              value={String(config.image_account_max_inflight_per_account || "")}
-              onChange={setImageAccountMaxInflightPerAccount}
-              placeholder="1"
-              help="每个账号的动态槽位最高值，不代表每个账号始终占满。"
-            />
+            <div className="flex flex-wrap items-start gap-x-4">
+              <div className="min-w-44 flex-1">
+                <NumberInput
+                  label="单号最大并发"
+                  value={String(config.image_account_max_inflight_per_account || "")}
+                  onChange={setImageAccountMaxInflightPerAccount}
+                  placeholder="1"
+                  help={config.image_account_dynamic_slots !== false ? "动态模式的每个账号槽位最高值。" : "静态模式下每个账号直接使用这个上限。"}
+                />
+              </div>
+              <Form.Item label="槽位模式" extra="动态 / 静态">
+                <Switch
+                  checked={config.image_account_dynamic_slots !== false}
+                  checkedChildren="动态"
+                  unCheckedChildren="静态"
+                  disabled={isSavingConfig}
+                  onChange={setImageAccountDynamicSlots}
+                />
+              </Form.Item>
+            </div>
           </Col>
         </Row>
 
@@ -283,7 +297,7 @@ export function ConfigCard() {
             </Row>
 
             <Divider />
-            <SectionTitle title="调度高级参数" description="阶段并发和卡住切号阈值；动态账号槽位由程序自动调整。" />
+            <SectionTitle title="调度高级参数" description="阶段并发和卡住切号阈值；账号槽位模式按上方选择执行。" />
             <Row gutter={[16, 16]}>
               <Col xs={24} md={12} xl={6}>
                 <NumberInput

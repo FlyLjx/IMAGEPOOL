@@ -13,7 +13,7 @@ export function SettingsHeader() {
           设置
         </Typography.Title>
         <Typography.Text type="secondary" className="block !mt-2">
-          常用配置保持简单；账号动态槽位、切号和补号由调度器自动处理。
+          常用配置保持简单；账号槽位模式、切号和补号由调度器统一处理。
         </Typography.Text>
       </div>
     </Card>

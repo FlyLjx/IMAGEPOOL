@@ -32,6 +32,9 @@ func TestDefaultNormalize(t *testing.T) {
 	if cfg.ImageAccountMaxInflightPerAccount != 1 {
 		t.Fatalf("image account max inflight=%d", cfg.ImageAccountMaxInflightPerAccount)
 	}
+	if !Default().Normalize().ImageAccountDynamicSlots {
+		t.Fatal("image account dynamic slots should default to enabled")
+	}
 	if cfg.ImageGlobalMaxInflight != 120 || cfg.ImagePrepareParallel != 20 || cfg.ImageSubmitParallel != 20 || cfg.ImagePollParallel != 80 || cfg.ImageDownloadParallel != 20 || cfg.ImageUploadParallel != 12 {
 		t.Fatalf("image concurrency=%d/%d/%d/%d/%d/%d", cfg.ImageGlobalMaxInflight, cfg.ImagePrepareParallel, cfg.ImageSubmitParallel, cfg.ImagePollParallel, cfg.ImageDownloadParallel, cfg.ImageUploadParallel)
 	}
@@ -110,6 +113,12 @@ func TestNormalizeCapsImageAccountMaxInflight(t *testing.T) {
 	}
 	if got := (Config{ImageAccountMaxInflightPerAccount: 99}).Normalize().ImageAccountMaxInflightPerAccount; got != 20 {
 		t.Fatalf("capped max inflight=%d", got)
+	}
+}
+
+func TestImageAccountDynamicSlotsCanBeDisabled(t *testing.T) {
+	if (Config{ImageAccountDynamicSlots: false}).Normalize().ImageAccountDynamicSlots {
+		t.Fatal("static image account slots were normalized back to dynamic")
 	}
 }
 

@@ -48,6 +48,7 @@ type Config struct {
 	ImageDownloadParallel               int          `json:"image_download_parallel"`
 	ImageUploadParallel                 int          `json:"image_upload_parallel"`
 	ImageAccountMaxInflightPerAccount   int          `json:"image_account_max_inflight_per_account"`
+	ImageAccountDynamicSlots            bool         `json:"image_account_dynamic_slots"`
 	ImageStallTimeoutSecs               float64      `json:"image_stall_timeout_secs"`
 	ImageMaxSwitchesPerTask             int          `json:"image_max_switches_per_task"`
 	ImageAccountPrecheckIntervalMinutes int          `json:"image_account_precheck_interval_minutes"`
@@ -135,6 +136,7 @@ func Default() Config {
 		ImageDownloadParallel:               20,
 		ImageUploadParallel:                 12,
 		ImageAccountMaxInflightPerAccount:   1,
+		ImageAccountDynamicSlots:            true,
 		ImageStallTimeoutSecs:               150,
 		ImageMaxSwitchesPerTask:             2,
 		ImageAccountPrecheckIntervalMinutes: 10,

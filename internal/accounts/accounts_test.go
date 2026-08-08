@@ -364,6 +364,37 @@ func TestAcquireForImageAllowsConfiguredPerAccountInflight(t *testing.T) {
 	store.ReleaseImage("one")
 }
 
+func TestStaticImageSlotsUseConfiguredCeiling(t *testing.T) {
+	store := NewStore([]Account{{Email: "one@example.com", AccessToken: "one", CreatedAt: 1}}, "")
+	store.SetImageMaxInflightPerAccount(3)
+	store.SetImageDynamicSlots(false)
+	store.ResetImageDynamicLimits()
+
+	leases := make([]Account, 0, 3)
+	for index := 0; index < 3; index++ {
+		account, err := store.AcquireForImage(context.Background(), nil, nil)
+		if err != nil {
+			t.Fatalf("static lease %d: %v", index+1, err)
+		}
+		leases = append(leases, account)
+	}
+	if _, available, err := store.TryAcquireForImage(nil); err != nil || available {
+		t.Fatalf("static mode exceeded configured account ceiling: available=%v err=%v", available, err)
+	}
+	active, limit, ceiling := store.ImageAccountLeaseStats("one")
+	if active != 3 || limit != 3 || ceiling != 3 {
+		t.Fatalf("static lease stats=%d/%d/%d", active, limit, ceiling)
+	}
+	store.recordImageHealthFailure("one", "upstream failure")
+	_, limit, _ = store.ImageAccountLeaseStats("one")
+	if limit != 3 {
+		t.Fatalf("static failure changed effective limit=%d", limit)
+	}
+	for _, account := range leases {
+		store.ReleaseImage(account.AccessToken)
+	}
+}
+
 func TestAcquireForImageWaitersAreFIFO(t *testing.T) {
 	store := NewStore([]Account{{Email: "one@example.com", AccessToken: "one", CreatedAt: 1}}, "")
 	first, err := store.AcquireForImage(context.Background(), nil, nil)

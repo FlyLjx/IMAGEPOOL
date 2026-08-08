@@ -362,6 +362,7 @@ type Store struct {
 	imageAccountRuntime        map[string]*imageAccountRuntime
 	imageLeaseSequence         uint64
 	imageMaxInflightPerAccount int
+	imageDynamicSlots          bool
 	imageDynamicInitialLimit   int
 	imageLeaseChanged          chan struct{}
 	imageWaiters               []*imageWaiter
@@ -455,18 +456,63 @@ func (s *Store) SetImageMaxInflightPerAccount(value int) {
 	s.mu.Unlock()
 }
 
-// ResetImageDynamicLimits sets every account back to the conservative warm-up
-// slot. The configured image max remains the ceiling; this method is used when
-// the service applies a new configuration.
+// SetImageDynamicSlots selects whether account slots warm up and back off
+// independently (dynamic) or always use the configured per-account ceiling
+// (static). Existing runtime accounts are updated immediately.
+func (s *Store) SetImageDynamicSlots(enabled bool) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	previous := s.imageDynamicSlots
+	s.imageDynamicSlots = enabled
+	ceiling := NormalizeImageMaxInflightPerAccount(s.imageMaxInflightPerAccount)
+	target := ceiling
+	if enabled {
+		target = 1
+	}
+	s.imageDynamicInitialLimit = target
+	for token, runtime := range s.imageAccountRuntime {
+		if runtime == nil {
+			continue
+		}
+		oldLimit := runtime.EffectiveLimit
+		runtime.EffectiveLimit = target
+		runtime.ConsecutiveSuccesses = 0
+		if previous != enabled || oldLimit != target {
+			log.Printf("image_account_slot_config event=mode_updated account_token_hash=%s mode=%s effective_limit=%d ceiling=%d", accountTokenHash(token), imageSlotMode(enabled), target, ceiling)
+		}
+	}
+	s.signalImageAvailabilityLocked()
+	s.mu.Unlock()
+}
+
+// ImageDynamicSlots reports whether per-account slots use the adaptive policy.
+func (s *Store) ImageDynamicSlots() bool {
+	if s == nil {
+		return true
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.imageDynamicSlots
+}
+
+// ResetImageDynamicLimits resets every account to the configured mode's
+// starting slot. Dynamic mode starts conservatively at one; static mode starts
+// at the configured per-account ceiling.
 func (s *Store) ResetImageDynamicLimits() {
 	if s == nil {
 		return
 	}
 	s.mu.Lock()
-	s.imageDynamicInitialLimit = 1
+	limit := NormalizeImageMaxInflightPerAccount(s.imageMaxInflightPerAccount)
+	if s.imageDynamicSlots {
+		limit = 1
+	}
+	s.imageDynamicInitialLimit = limit
 	for _, runtime := range s.imageAccountRuntime {
 		if runtime != nil {
-			runtime.EffectiveLimit = 1
+			runtime.EffectiveLimit = limit
 			runtime.ConsecutiveSuccesses = 0
 		}
 	}
@@ -509,25 +555,41 @@ func (s *Store) imageRuntimeLocked(token string) *imageAccountRuntime {
 	if s.imageAccountRuntime == nil {
 		s.imageAccountRuntime = map[string]*imageAccountRuntime{}
 	}
+	ceiling := NormalizeImageMaxInflightPerAccount(s.imageMaxInflightPerAccount)
 	runtime := s.imageAccountRuntime[token]
 	if runtime == nil {
 		initial := s.imageDynamicInitialLimit
+		if !s.imageDynamicSlots {
+			initial = ceiling
+		}
 		if initial <= 0 {
 			initial = 1
 		}
 		runtime = &imageAccountRuntime{EffectiveLimit: initial, HealthScore: 0.5}
 		s.imageAccountRuntime[token] = runtime
 	}
-	ceiling := NormalizeImageMaxInflightPerAccount(s.imageMaxInflightPerAccount)
-	if runtime.EffectiveLimit <= 0 || runtime.EffectiveLimit > ceiling {
+	if !s.imageDynamicSlots {
+		runtime.EffectiveLimit = ceiling
+	} else if runtime.EffectiveLimit <= 0 || runtime.EffectiveLimit > ceiling {
 		runtime.EffectiveLimit = 1
 	}
 	return runtime
 }
 
 func (s *Store) imageEffectiveLimitLocked(token string) int {
+	ceiling := NormalizeImageMaxInflightPerAccount(s.imageMaxInflightPerAccount)
+	if !s.imageDynamicSlots {
+		return ceiling
+	}
 	runtime := s.imageRuntimeLocked(token)
-	return max(1, minImageInt(runtime.EffectiveLimit, NormalizeImageMaxInflightPerAccount(s.imageMaxInflightPerAccount)))
+	return max(1, minImageInt(runtime.EffectiveLimit, ceiling))
+}
+
+func imageSlotMode(dynamic bool) string {
+	if dynamic {
+		return "dynamic"
+	}
+	return "static"
 }
 
 func minImageInt(left, right int) int {
@@ -774,6 +836,7 @@ func newStore(items []Account, recoveryLogs []CredentialRecoveryLog, path string
 		imageLeaseRecords:          map[string]*imageLeaseRecord{},
 		imageAccountRuntime:        map[string]*imageAccountRuntime{},
 		imageMaxInflightPerAccount: 1,
+		imageDynamicSlots:          true,
 		imageDynamicInitialLimit:   1,
 		imageLeaseChanged:          make(chan struct{}),
 		now:                        time.Now,
@@ -1848,11 +1911,11 @@ func (s *Store) recordImageHealthSuccess(token string) {
 	runtime.HealthScore = minFloat(1, runtime.HealthScore*0.8+0.2)
 	ceiling := NormalizeImageMaxInflightPerAccount(s.imageMaxInflightPerAccount)
 	oldLimit := runtime.EffectiveLimit
-	if runtime.EffectiveLimit < ceiling && runtime.Successes >= 10 && runtime.ConsecutiveSuccesses >= 5 && runtime.HealthScore >= 0.8 {
+	if s.imageDynamicSlots && runtime.EffectiveLimit < ceiling && runtime.Successes >= 10 && runtime.ConsecutiveSuccesses >= 5 && runtime.HealthScore >= 0.8 {
 		runtime.EffectiveLimit++
 	}
 	active := s.imageLeases[token]
-	limit := runtime.EffectiveLimit
+	limit := s.imageEffectiveLimitLocked(token)
 	identity := accountLogIdentity(account)
 	health := runtime.HealthScore
 	successes := runtime.Successes
@@ -1889,11 +1952,11 @@ func (s *Store) recordImageHealthFailure(token, reason string) {
 	}
 	runtime.HealthScore = maxFloat(0, runtime.HealthScore*0.65)
 	oldLimit := runtime.EffectiveLimit
-	if runtime.EffectiveLimit > 1 {
+	if s.imageDynamicSlots && runtime.EffectiveLimit > 1 {
 		runtime.EffectiveLimit = 1
 	}
 	active := s.imageLeases[token]
-	limit := runtime.EffectiveLimit
+	limit := s.imageEffectiveLimitLocked(token)
 	identity := accountLogIdentity(account)
 	health := runtime.HealthScore
 	successes := runtime.Successes

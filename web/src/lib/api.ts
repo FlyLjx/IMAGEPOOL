@@ -234,6 +234,7 @@ export type SettingsConfig = {
   image_upload_parallel?: number | string;
   image_account_concurrency?: number | string;
   image_account_max_inflight_per_account?: number | string;
+  image_account_dynamic_slots?: boolean;
   image_stall_timeout_secs?: number | string;
   image_max_switches_per_task?: number | string;
   image_account_precheck_interval_minutes?: number | string;

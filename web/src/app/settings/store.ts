@@ -69,6 +69,7 @@ function normalizeConfig(config: SettingsConfig): SettingsConfig {
     image_download_parallel: Math.min(1000, Math.max(1, Number(config.image_download_parallel) || 20)),
     image_upload_parallel: Math.min(1000, Math.max(1, Number(config.image_upload_parallel) || 12)),
     image_account_max_inflight_per_account: Math.min(20, Math.max(1, Number(config.image_account_max_inflight_per_account) || 1)),
+    image_account_dynamic_slots: config.image_account_dynamic_slots !== false,
     image_stall_timeout_secs: Math.min(599, Math.max(15, Number(config.image_stall_timeout_secs) || 150)),
     image_max_switches_per_task: Math.min(5, Math.max(1, Number(config.image_max_switches_per_task) || 2)),
     image_web_model_slug: String(config.image_web_model_slug || "gpt-5-5"),
@@ -166,6 +167,7 @@ type SettingsStore = {
   setImageDownloadParallel: (value: string) => void;
   setImageUploadParallel: (value: string) => void;
   setImageAccountMaxInflightPerAccount: (value: string) => void;
+  setImageAccountDynamicSlots: (value: boolean) => void;
   setImageStallTimeoutSecs: (value: string) => void;
   setImageMaxSwitchesPerTask: (value: string) => void;
   setImageWebModelSlug: (value: string) => void;
@@ -264,6 +266,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         image_download_parallel: Math.min(1000, Math.max(1, Number(config.image_download_parallel) || 20)),
         image_upload_parallel: Math.min(1000, Math.max(1, Number(config.image_upload_parallel) || 12)),
         image_account_max_inflight_per_account: Math.min(20, Math.max(1, Number(config.image_account_max_inflight_per_account) || 1)),
+        image_account_dynamic_slots: Boolean(config.image_account_dynamic_slots !== false),
         image_stall_timeout_secs: Math.min(599, Math.max(15, Number(config.image_stall_timeout_secs) || 150)),
         image_max_switches_per_task: Math.min(5, Math.max(1, Number(config.image_max_switches_per_task) || 2)),
         image_web_model_slug: String(config.image_web_model_slug || "gpt-5-5").trim() || "gpt-5-5",
@@ -442,6 +445,10 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
 
   setImageAccountMaxInflightPerAccount: (value) => {
     set((state) => (state.config ? { config: { ...state.config, image_account_max_inflight_per_account: value } } : {}));
+  },
+
+  setImageAccountDynamicSlots: (value) => {
+    set((state) => (state.config ? { config: { ...state.config, image_account_dynamic_slots: value } } : {}));
   },
 
   setImageStallTimeoutSecs: (value) => {

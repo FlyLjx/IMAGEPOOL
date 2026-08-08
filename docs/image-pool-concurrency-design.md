@@ -17,6 +17,7 @@
 
 - `internal/tasks/manager.go` 使用容量为 4096 的任务队列和 128 个异步执行槽；任务等待全局/账号租约时会释放本地执行槽，拿到资源前再重新占用。
 - `internal/accounts/accounts.go` 使用 `imageLeases[token]` 记录账号租约，并支持 `image_account_max_inflight_per_account`。
+- 单号槽位支持 `image_account_dynamic_slots`：默认动态模式从 1 个槽位按健康度扩容并在异常后降级；静态模式直接使用单号最大并发上限。
 - 账号选择已经考虑账号状态、冷却时间、当前租约数和最近使用时间。
 - `internal/openaiweb/client.go` 已有参考图上传槽位，默认 12 个。
 - `internal/openaiweb/conversation.go` 已有自适应轮询间隔，轮询预算为 600 秒。
@@ -68,6 +69,7 @@ flowchart TD
 ```text
 image_global_max_inflight              = 120
 image_account_max_inflight_per_account = 1
+image_account_dynamic_slots            = true
 image_prepare_parallel                 = 20
 image_submit_parallel                  = 20
 image_poll_parallel                    = 80
@@ -85,6 +87,7 @@ image_max_switches_per_task            = 2
 
 - `120` 是全局稳定工作上限，入口可以继续接收任务，超出部分留在队列中。
 - 单账号默认使用 `1`，让账号池承担横向并发；如压测确认上游稳定，再逐步提高该值。直接设置为 `10` 会把账号内部的上传、会话和轮询压力叠加在一起。
+- 动态模式会按账号健康度逐步扩容，静态模式会让每个可调度账号直接使用 `image_account_max_inflight_per_account`；两种模式都继续执行账号失效、限流和额度耗尽处理。
 - 提交阶段设置为 `20`，避免大量账号同时进行浏览器初始化、Sentinel 和会话创建。
 - 轮询阶段设置为 `80`，每个请求仍受 20 秒请求级超时约束，整体轮询预算仍由任务控制。
 - `150` 秒是“没有图片引用”的切号阈值，不是所有任务的固定等待时间。正常任务在发现引用后继续执行解析和下载。

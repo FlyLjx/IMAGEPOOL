@@ -397,7 +397,7 @@ function ImagePoolConcurrency({ capacity }: { capacity: ImagePoolCapacity | null
         </div>
         <div className="rounded-lg border border-emerald-100 bg-emerald-50/60 p-4">
           <div className="flex items-center justify-between gap-3">
-            <span className="text-sm font-medium text-slate-600">账号动态槽位</span>
+            <span className="text-sm font-medium text-slate-600">账号并发槽位</span>
             <span className="font-mono text-lg font-semibold text-slate-900 tabular-nums">
               {numberText(leasedSlots)} / {numberText(dynamicSlots)}
             </span>
@@ -406,10 +406,10 @@ function ImagePoolConcurrency({ capacity }: { capacity: ImagePoolCapacity | null
           <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500">
             <span>可调度账号 {numberText(capacity.accounts.dispatchable)}</span>
             <span>空闲槽 {numberText(idleSlots)}</span>
-            <span>动态范围 {dynamicRange}</span>
+            <span>槽位范围 {dynamicRange}</span>
             <span>限流账号 {numberText(capacity.accounts.limited)}</span>
           </div>
-          <div className="mt-2 text-xs text-slate-400">每个账号独立升降槽位；异常只取消该账号在途任务。</div>
+          <div className="mt-2 text-xs text-slate-400">每个账号独立管理槽位；异常只取消该账号在途任务。</div>
         </div>
       </div>
       <div className="mt-4 grid gap-3 sm:grid-cols-5">

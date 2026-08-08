@@ -99,6 +99,7 @@ func NewService(cfg config.Config, store *accounts.Store, backend openaiweb.Back
 	cfg = cfg.Normalize()
 	if store != nil {
 		store.SetImageMaxInflightPerAccount(cfg.ImageAccountMaxInflightPerAccount)
+		store.SetImageDynamicSlots(cfg.ImageAccountDynamicSlots)
 		store.ResetImageDynamicLimits()
 	}
 	service := &Service{cfg: cfg, store: store, backend: backend, global: limiters.New(cfg.ImageGlobalMaxInflight)}
@@ -115,6 +116,7 @@ func (s *Service) UpdateConfig(cfg config.Config) {
 	next := cfg.Normalize()
 	if s.store != nil {
 		s.store.SetImageMaxInflightPerAccount(next.ImageAccountMaxInflightPerAccount)
+		s.store.SetImageDynamicSlots(next.ImageAccountDynamicSlots)
 		s.store.ResetImageDynamicLimits()
 	}
 	if s.global == nil {

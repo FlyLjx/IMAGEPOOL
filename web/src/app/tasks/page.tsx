@@ -105,7 +105,7 @@ function attemptDiagnostics(item: ImageTask | null | undefined) {
       <div className="grid grid-cols-2 gap-x-3 gap-y-0.5 text-[11px] text-slate-500">
         <span>轮询 {latest.poll_count ?? 0} 次</span>
         <span>HTTP {latest.last_http_status ?? "-"}</span>
-        <span>动态槽位 {latest.active_slots ?? 0}/{latest.effective_limit ?? "-"}</span>
+        <span>账号槽位 {latest.active_slots ?? 0}/{latest.effective_limit ?? "-"}</span>
         <span>结果 {latest.result_signature || "-"}</span>
       </div>
       <Typography.Text ellipsis className="!text-[11px] !text-slate-400" title={latest.lease_id || ""}>

@@ -680,6 +680,25 @@ func TestGenerateWithAccountHonorsPerAccountInflightConfig(t *testing.T) {
 	}
 }
 
+func TestServiceAppliesImageAccountSlotMode(t *testing.T) {
+	cfg := config.Default()
+	cfg.ImageAccountMaxInflightPerAccount = 3
+	cfg.ImageAccountDynamicSlots = false
+	store := accounts.NewStore([]accounts.Account{{Email: "one", AccessToken: "one", CreatedAt: 1}}, "")
+	service := NewService(cfg, store, &fakeBackend{})
+	_, limit, ceiling := store.ImageAccountLeaseStats("one")
+	if store.ImageDynamicSlots() || limit != 3 || ceiling != 3 {
+		t.Fatalf("static service mode=%v limit=%d ceiling=%d", store.ImageDynamicSlots(), limit, ceiling)
+	}
+
+	cfg.ImageAccountDynamicSlots = true
+	service.UpdateConfig(cfg)
+	_, limit, ceiling = store.ImageAccountLeaseStats("one")
+	if !store.ImageDynamicSlots() || limit != 1 || ceiling != 3 {
+		t.Fatalf("dynamic service mode=%v limit=%d ceiling=%d", store.ImageDynamicSlots(), limit, ceiling)
+	}
+}
+
 func TestGenerateRemovesNoQuotaAccountAndRetries(t *testing.T) {
 	store := accounts.NewStore([]accounts.Account{{Email: "a", AccessToken: "a", CreatedAt: 1}, {Email: "b", AccessToken: "b", CreatedAt: 2}}, "")
 	fb := &fakeBackend{errs: []error{errors.New("no available free image quota (tried 20 tokens)")}}
