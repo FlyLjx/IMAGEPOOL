@@ -279,6 +279,32 @@ func TestGenerateReturnsReferenceImageRequiredWithoutSwitchingAccount(t *testing
 	}
 }
 
+func TestGenerateWithAccountDoesNotRecordRequestErrors(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want error
+	}{
+		{name: "reference image required", err: openaiweb.NewImageReferenceRequiredError("conv-1", openaiweb.ImageAttemptDiagnostics{}), want: openaiweb.ErrImageReferenceRequired},
+		{name: "content policy", err: openaiweb.ErrContentPolicy, want: openaiweb.ErrContentPolicy},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			store := accounts.NewStore([]accounts.Account{{Email: "one@example.com", AccessToken: "one", CreatedAt: 1}}, "")
+			backend := &fakeBackend{errs: []error{test.err}}
+			_, err := NewService(config.Default(), store, backend).GenerateWithAccount(context.Background(), "one", Request{Prompt: "draw"})
+			if !errors.Is(err, test.want) {
+				t.Fatalf("err=%v want=%v", err, test.want)
+			}
+			account, found := store.Get("one")
+			if !found || account.ImageFailures != 0 || account.LastError != "" {
+				t.Fatalf("request error changed account state: found=%v account=%#v", found, account)
+			}
+		})
+	}
+}
+
 func TestGenerateHidesUpstreamImageModelSlug(t *testing.T) {
 	store := accounts.NewStore([]accounts.Account{{Email: "user@example.test", AccessToken: "token"}}, "")
 	response, err := NewService(config.Default(), store, &fakeBackend{}).Generate(context.Background(), Request{Prompt: "draw", Model: "team-codex-gpt-image-2"})

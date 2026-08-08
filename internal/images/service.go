@@ -898,6 +898,12 @@ func (s *Service) recordImageFailure(token string, err error) {
 	if s == nil || s.store == nil || err == nil || openaiweb.IsInteractiveChallengeError(err) {
 		return
 	}
+	// Request/content results do not describe account health. In particular,
+	// an upstream request for a missing reference image must not increase the
+	// account's abnormal counter when the caller uses a pinned account path.
+	if errors.Is(err, openaiweb.ErrContentPolicy) || openaiweb.IsImageReferenceRequired(err) {
+		return
+	}
 	// A full Turnstile VM pool is process-wide congestion rather than a
 	// failure of this account. Do not cool or mark every waiting account.
 	if errors.Is(err, openaiweb.ErrTurnstileVMCapacity) {
