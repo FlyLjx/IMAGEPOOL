@@ -115,24 +115,57 @@ func imageSignalRank(signature string) int {
 }
 
 func hasAssistantText(value map[string]any) bool {
+	return strings.TrimSpace(assistantTextFromNode(value)) != ""
+}
+
+func assistantTextFromNode(value map[string]any) string {
 	content, ok := value["content"].(map[string]any)
 	if !ok {
 		if nested, nestedOK := value["message"].(map[string]any); nestedOK {
-			return hasAssistantText(nested)
+			return assistantTextFromNode(nested)
 		}
-		return false
+		return ""
 	}
 	if strings.TrimSpace(str(content["text"])) != "" {
-		return true
+		return strings.TrimSpace(str(content["text"]))
 	}
 	if parts, ok := content["parts"].([]any); ok {
 		for _, part := range parts {
-			if strings.TrimSpace(str(part)) != "" {
-				return true
+			if text := strings.TrimSpace(str(part)); text != "" {
+				return text
 			}
 		}
 	}
-	return false
+	return ""
+}
+
+// assistantTextDetails returns the first assistant text found in an upstream
+// response. The full text stays in memory only; callers decide whether a
+// bounded sample should be written to diagnostics.
+func assistantTextDetails(value any) (string, int) {
+	var text string
+	var walk func(any)
+	walk = func(item any) {
+		if text != "" {
+			return
+		}
+		switch typed := item.(type) {
+		case map[string]any:
+			if role, ok := nodeRole(typed); ok && strings.EqualFold(strings.TrimSpace(role), "assistant") {
+				text = assistantTextFromNode(typed)
+			}
+			for _, child := range typed {
+				walk(child)
+			}
+		case []any:
+			for _, child := range typed {
+				walk(child)
+			}
+		}
+	}
+	walk(value)
+	text = strings.Join(strings.Fields(text), " ")
+	return text, len([]rune(text))
 }
 
 var (

@@ -59,6 +59,29 @@ func TestSummarizeImageResponseSeparatesExcludedReferences(t *testing.T) {
 	}
 }
 
+func TestSummarizeImageResponseCapturesBoundedAssistantTextForTerminalDiagnostics(t *testing.T) {
+	value := map[string]any{
+		"message": map[string]any{
+			"author":  map[string]any{"role": "assistant"},
+			"content": map[string]any{"parts": []any{"上游返回的诊断文本\n请稍后重试"}},
+		},
+	}
+	summary := summarizeImageResponse(value, 0, nil)
+	if summary.AssistantTextSample != "上游返回的诊断文本 请稍后重试" || summary.AssistantTextChars != 15 {
+		t.Fatalf("summary assistant text=%#v", summary)
+	}
+
+	var diagnostics ImageResponseDiagnostics
+	diagnostics.Observe(summary)
+	if strings.Contains(diagnostics.LogFields(), "assistant_text_sample") {
+		t.Fatalf("heartbeat diagnostics unexpectedly included text: %s", diagnostics.LogFields())
+	}
+	fields := diagnostics.LogFieldsWithAssistantText()
+	if !strings.Contains(fields, "assistant_text_chars=15") || !strings.Contains(fields, "assistant_text_sample=\"上游返回的诊断文本 请稍后重试\"") {
+		t.Fatalf("terminal diagnostics=%s", fields)
+	}
+}
+
 func containsDiagnosticValue(values []string, want string) bool {
 	for _, value := range values {
 		if value == want {

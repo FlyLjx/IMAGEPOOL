@@ -6,13 +6,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 )
 
-// ImageResponseSummary is a shape-only view of an upstream SSE or
-// conversation snapshot. It deliberately keeps values out of logs: prompt
-// text, access tokens, image URLs, and reference IDs must never be persisted
-// as diagnostics.
+const maxAssistantTextDiagnosticChars = 512
+
+// ImageResponseSummary is a shape-oriented view of an upstream SSE or
+// conversation snapshot. The assistant text sample is retained only as a
+// bounded in-memory value for terminal diagnostics; prompt text, access
+// tokens, image URLs, and reference IDs are not persisted.
 type ImageResponseSummary struct {
 	Bytes                 int
 	Fingerprint           string
@@ -22,6 +25,8 @@ type ImageResponseSummary struct {
 	ReferenceMarkers      []string
 	CandidateKeys         []string
 	CandidateValueCount   int
+	AssistantTextSample   string
+	AssistantTextChars    int
 	RawFileReferenceCount int
 	RawSedimentCount      int
 	FileReferenceCount    int
@@ -32,19 +37,21 @@ type ImageResponseSummary struct {
 // stream or polling attempt. SnapshotCount is cumulative for that stream or
 // polling loop; the Last* fields describe the latest response only.
 type ImageResponseDiagnostics struct {
-	SnapshotCount         int
-	LastBytes             int
-	LastFingerprint       string
-	LastRoles             []string
-	LastToolMarkers       []string
-	LastStatusMarkers     []string
-	LastReferenceMarkers  []string
-	LastCandidateKeys     []string
-	LastCandidateValues   int
-	LastRawFileReferences int
-	LastRawSediments      int
-	LastFileReferences    int
-	LastSediments         int
+	SnapshotCount          int
+	LastBytes              int
+	LastFingerprint        string
+	LastRoles              []string
+	LastToolMarkers        []string
+	LastStatusMarkers      []string
+	LastReferenceMarkers   []string
+	LastCandidateKeys      []string
+	LastCandidateValues    int
+	LastAssistantText      string
+	LastAssistantTextChars int
+	LastRawFileReferences  int
+	LastRawSediments       int
+	LastFileReferences     int
+	LastSediments          int
 }
 
 func (d *ImageResponseDiagnostics) Observe(summary ImageResponseSummary) {
@@ -60,6 +67,8 @@ func (d *ImageResponseDiagnostics) Observe(summary ImageResponseSummary) {
 	d.LastReferenceMarkers = append([]string(nil), summary.ReferenceMarkers...)
 	d.LastCandidateKeys = append([]string(nil), summary.CandidateKeys...)
 	d.LastCandidateValues = summary.CandidateValueCount
+	d.LastAssistantText = summary.AssistantTextSample
+	d.LastAssistantTextChars = summary.AssistantTextChars
 	d.LastRawFileReferences = summary.RawFileReferenceCount
 	d.LastRawSediments = summary.RawSedimentCount
 	d.LastFileReferences = summary.FileReferenceCount
@@ -70,7 +79,18 @@ func (d *ImageResponseDiagnostics) Observe(summary ImageResponseSummary) {
 // log line. All list members come from fixed classifications or JSON key
 // names; arbitrary upstream strings are never returned.
 func (d ImageResponseDiagnostics) LogFields() string {
-	return fmt.Sprintf("response_snapshots=%d response_bytes=%d response_fingerprint=%s response_roles=%s response_tools=%s response_statuses=%s response_reference_markers=%s response_candidate_keys=%s response_candidate_values=%d response_raw_file_refs=%d response_raw_sediment_refs=%d response_file_refs=%d response_sediment_refs=%d",
+	return d.logFields(false)
+}
+
+// LogFieldsWithAssistantText adds a bounded, quoted assistant text prefix for
+// terminal/switch diagnostics. Heartbeat logs continue using LogFields so the
+// same text is not repeated every poll.
+func (d ImageResponseDiagnostics) LogFieldsWithAssistantText() string {
+	return d.logFields(true)
+}
+
+func (d ImageResponseDiagnostics) logFields(includeAssistantText bool) string {
+	fields := fmt.Sprintf("response_snapshots=%d response_bytes=%d response_fingerprint=%s response_roles=%s response_tools=%s response_statuses=%s response_reference_markers=%s response_candidate_keys=%s response_candidate_values=%d response_raw_file_refs=%d response_raw_sediment_refs=%d response_file_refs=%d response_sediment_refs=%d",
 		d.SnapshotCount,
 		d.LastBytes,
 		nonEmptyDiagnosticValue(d.LastFingerprint),
@@ -85,6 +105,19 @@ func (d ImageResponseDiagnostics) LogFields() string {
 		d.LastFileReferences,
 		d.LastSediments,
 	)
+	if includeAssistantText && d.LastAssistantText != "" && !hasDiagnosticValue(d.LastToolMarkers, "image_tool") {
+		fields += fmt.Sprintf(" assistant_text_chars=%d assistant_text_sample=%s", d.LastAssistantTextChars, strconv.Quote(d.LastAssistantText))
+	}
+	return fields
+}
+
+func hasDiagnosticValue(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 func nonEmptyDiagnosticValue(value string) string {
@@ -110,10 +143,16 @@ func summarizeImageResponse(value any, rawBytes int, excludedFileIDs map[string]
 	fileIDs, sedimentIDs := ExtractImageReferenceIDs(value)
 	filteredFileIDs := filterExcludedIDs(fileIDs, excludedFileIDs)
 	filteredSedimentIDs := filterExcludedIDs(sedimentIDs, excludedFileIDs)
+	assistantText, assistantTextChars := assistantTextDetails(value)
+	if assistantTextChars > maxAssistantTextDiagnosticChars {
+		assistantText = string([]rune(assistantText)[:maxAssistantTextDiagnosticChars]) + "…"
+	}
 
 	summary := ImageResponseSummary{
 		Bytes:                 rawBytes,
 		Fingerprint:           hex.EncodeToString(hash[:])[:16],
+		AssistantTextSample:   assistantText,
+		AssistantTextChars:    assistantTextChars,
 		RawFileReferenceCount: len(fileIDs),
 		RawSedimentCount:      len(sedimentIDs),
 		FileReferenceCount:    len(filteredFileIDs),

@@ -495,7 +495,7 @@ func logImageStreamDiagnostics(phase string, state *imageStreamState) {
 	if state == nil {
 		return
 	}
-	log.Printf("image_upstream event=stream_summary phase=%s conversation_id=%s %s", strings.TrimSpace(phase), strings.TrimSpace(state.conversationID), state.response.LogFields())
+	log.Printf("image_upstream event=stream_summary phase=%s conversation_id=%s %s", strings.TrimSpace(phase), strings.TrimSpace(state.conversationID), state.response.LogFieldsWithAssistantText())
 }
 
 func extractResumeConversationToken(value any) (token, conversationID string, ok bool) {
