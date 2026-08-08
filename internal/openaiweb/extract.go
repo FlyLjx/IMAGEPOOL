@@ -168,11 +168,78 @@ func assistantTextDetails(value any) (string, int) {
 	return text, len([]rune(text))
 }
 
+// DetectReferenceImageRequest inspects assistant-authored conversation text
+// for a high-confidence request to upload a reference image or thumbnail.
+// Prompt text and user messages are deliberately excluded: words such as
+// "reference-style" or "for reference only" in a prompt are not enough to
+// stop account dispatch.
+func DetectReferenceImageRequest(v any) bool {
+	for _, text := range assistantTextValues(v) {
+		if isReferenceImageRequestText(text) {
+			return true
+		}
+	}
+	return false
+}
+
+func assistantTextValues(v any) []string {
+	values := []string{}
+	var walk func(any, bool)
+	walk = func(value any, inheritedAssistant bool) {
+		switch item := value.(type) {
+		case map[string]any:
+			isAssistant := inheritedAssistant
+			if role, ok := nodeRole(item); ok {
+				isAssistant = strings.EqualFold(strings.TrimSpace(role), "assistant")
+			}
+			if isAssistant {
+				if text := assistantTextFromNode(item); strings.TrimSpace(text) != "" {
+					values = append(values, text)
+				}
+			}
+			for _, child := range item {
+				walk(child, isAssistant)
+			}
+		case []any:
+			for _, child := range item {
+				walk(child, inheritedAssistant)
+			}
+		}
+	}
+	walk(v, false)
+	return values
+}
+
+func isReferenceImageRequestText(text string) bool {
+	text = strings.Join(strings.Fields(text), " ")
+	if text == "" {
+		return false
+	}
+	lower := strings.ToLower(text)
+	if assistantChineseReferenceRequestRE.MatchString(text) || assistantChineseReferenceRequiredRE.MatchString(text) {
+		return true
+	}
+	if assistantUploadThenImageRE.MatchString(lower) || assistantImageThenUploadRE.MatchString(lower) {
+		return true
+	}
+	if assistantNeedSpecificReferenceRE.MatchString(lower) || assistantMustUploadReferenceRE.MatchString(lower) || assistantRequiredSpecificReferenceRE.MatchString(lower) {
+		return true
+	}
+	return false
+}
+
 var (
-	fileServiceRE    = regexp.MustCompile(`file-service://([A-Za-z0-9_-]+)`)
-	realFileIDRE     = regexp.MustCompile(`\bfile_00000000[a-f0-9]{24}\b`)
-	sedimentRE       = regexp.MustCompile(`sediment://([A-Za-z0-9_-]+)`)
-	conversationIDRE = regexp.MustCompile(`"conversation_id"\s*:\s*"([^"]+)"`)
+	fileServiceRE                        = regexp.MustCompile(`file-service://([A-Za-z0-9_-]+)`)
+	realFileIDRE                         = regexp.MustCompile(`\bfile_00000000[a-f0-9]{24}\b`)
+	sedimentRE                           = regexp.MustCompile(`sediment://([A-Za-z0-9_-]+)`)
+	conversationIDRE                     = regexp.MustCompile(`"conversation_id"\s*:\s*"([^"]+)"`)
+	assistantUploadThenImageRE           = regexp.MustCompile(`(?is)\b(?:please\s+|kindly\s+)?(?:upload|attach|provide|send|share|submit|add|include)\b.{0,140}(?:\bimage\b|\bphoto\b|\bpicture\b|\bfile\b|\bthumbnail\b)`)
+	assistantImageThenUploadRE           = regexp.MustCompile(`(?is)(?:\bimage\b|\bphoto\b|\bpicture\b|\bfile\b|\bthumbnail\b).{0,140}\b(?:upload|attach|provide|send|share|submit|add|include)\b`)
+	assistantNeedSpecificReferenceRE     = regexp.MustCompile(`(?is)\b(?:i|we)\s+(?:need|require)\b.{0,120}(?:\breference\s+(?:image|photo|picture|file)\b|\b(?:youtube\s+)?thumbnail(?:\s+(?:image|photo|picture|file))?\b|\b(?:source|original|input)\s+(?:image|photo|picture|file)\b)`)
+	assistantMustUploadReferenceRE       = regexp.MustCompile(`(?is)\b(?:must|have\s+to|need\s+to)\s+(?:upload|attach|provide|send|share|submit)\b.{0,120}(?:\bimage\b|\bphoto\b|\bpicture\b|\bfile\b|\bthumbnail\b)`)
+	assistantRequiredSpecificReferenceRE = regexp.MustCompile(`(?is)(?:\breference\s+(?:image|photo|picture|file)\b|\b(?:youtube\s+)?thumbnail(?:\s+(?:image|photo|picture|file))?\b|\b(?:source|original|input)\s+(?:image|photo|picture|file)\b).{0,40}\b(?:required|needed|necessary)\b|\b(?:required|needed|necessary)\b.{0,40}(?:\breference\s+(?:image|photo|picture|file)\b|\b(?:youtube\s+)?thumbnail(?:\s+(?:image|photo|picture|file))?\b|\b(?:source|original|input)\s+(?:image|photo|picture|file)\b)`)
+	assistantChineseReferenceRequestRE   = regexp.MustCompile(`(?:请(?:先)?|需要|必须|麻烦|请您).{0,100}(?:上传|提供|附上|发送|添加|补充).{0,100}(?:参考图|参考图片|参考照片|缩略图|缩略图片|原图|输入图|图片|照片)|(?:参考图|参考图片|参考照片|缩略图|缩略图片|原图|输入图|图片|照片).{0,100}(?:请)?(?:上传|提供|附上|发送|添加|补充)`)
+	assistantChineseReferenceRequiredRE  = regexp.MustCompile(`(?:需要|必须有|必须提供|缺少).{0,60}(?:参考图|参考图片|参考照片|缩略图|缩略图片|原图|输入图)`)
 )
 
 func ExtractConversationID(payload string) string {

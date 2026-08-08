@@ -129,6 +129,7 @@ var (
 	ErrImagePreparationTimeout   = errors.New("image preparation timeout")
 	ErrImageGenerationTerminated = errors.New("image generation terminated")
 	ErrImageGenerationStalled    = errors.New("image generation stalled")
+	ErrImageReferenceRequired    = errors.New("image reference required")
 	ErrMissingConduitToken       = errors.New("missing conduit_token")
 )
 
@@ -170,6 +171,37 @@ func NewImageGenerationStalledError(conversationID string, elapsedSecs int, diag
 func IsImageGenerationStalled(err error) bool {
 	var stalled *ImageGenerationStalledError
 	return errors.As(err, &stalled)
+}
+
+// ImageReferenceRequiredError marks an upstream assistant response that
+// explicitly asks the caller to upload a reference image or thumbnail. This
+// is a request/input problem, not an account failure: the current lease must
+// end and the public request should receive a 400 without switching accounts.
+type ImageReferenceRequiredError struct {
+	ConversationID string
+	Diagnostics    ImageAttemptDiagnostics
+}
+
+func (e *ImageReferenceRequiredError) Error() string {
+	if strings.TrimSpace(e.ConversationID) == "" {
+		return fmt.Sprintf("%s: 上游要求上传参考图或缩略图", ErrImageReferenceRequired)
+	}
+	return fmt.Sprintf("%s: 上游要求上传参考图或缩略图; conversation_id=%s", ErrImageReferenceRequired, strings.TrimSpace(e.ConversationID))
+}
+
+func (e *ImageReferenceRequiredError) Unwrap() error {
+	return ErrImageReferenceRequired
+}
+
+func NewImageReferenceRequiredError(conversationID string, diagnostics ImageAttemptDiagnostics) error {
+	return &ImageReferenceRequiredError{
+		ConversationID: strings.TrimSpace(conversationID),
+		Diagnostics:    diagnostics,
+	}
+}
+
+func IsImageReferenceRequired(err error) bool {
+	return errors.Is(err, ErrImageReferenceRequired)
 }
 
 // ImageConversationTimeoutError marks the case where ChatGPT has already
@@ -214,9 +246,10 @@ const (
 	// PublicCredentialInvalidMessage is intentionally independent of the
 	// upstream response. Upstream OAuth bodies can contain endpoint and token
 	// details which must never reach API consumers or persisted task history.
-	PublicCredentialInvalidMessage = "上游认证状态异常，系统正在自动恢复"
-	PublicImagePollTimeoutMessage  = "OAI侧出图超出600s（10分钟），请重新提交任务。"
-	PublicUpstreamFailureMessage   = "上游服务请求失败，请稍后重试"
+	PublicCredentialInvalidMessage      = "上游认证状态异常，系统正在自动恢复"
+	PublicImagePollTimeoutMessage       = "OAI侧出图超出600s（10分钟），请重新提交任务。"
+	PublicImageReferenceRequiredMessage = "上游要求上传缩略图或参考图，请上传后重新提交任务。"
+	PublicUpstreamFailureMessage        = "上游服务请求失败，请稍后重试"
 )
 
 type UpstreamError struct {
@@ -258,6 +291,9 @@ func PublicErrorMessage(err error) string {
 	if errors.Is(err, ErrImageGenerationStalled) {
 		return "OAI侧生图长时间没有返回图片，系统已重新选择账号继续处理。"
 	}
+	if IsImageReferenceRequired(err) {
+		return PublicImageReferenceRequiredMessage
+	}
 	return PublicErrorText(err.Error())
 }
 
@@ -282,6 +318,9 @@ func PublicErrorText(message string) string {
 	}
 	if strings.Contains(lower, "image generation stalled") || strings.Contains(message, "连续") && strings.Contains(message, "没有图片结果") {
 		return "OAI侧生图长时间没有返回图片，系统已重新选择账号继续处理。"
+	}
+	if strings.Contains(lower, "image reference required") || strings.Contains(message, "上游要求上传缩略图") || strings.Contains(message, "上游要求上传参考图") {
+		return PublicImageReferenceRequiredMessage
 	}
 	if strings.Contains(lower, "upstream ") ||
 		strings.Contains(lower, "/backend-api/") ||
@@ -446,6 +485,9 @@ func IsRetryableImageError(err error) bool {
 		return false
 	}
 	if errors.Is(err, ErrContentPolicy) {
+		return false
+	}
+	if IsImageReferenceRequired(err) {
 		return false
 	}
 	if IsImageConversationTimeout(err) {

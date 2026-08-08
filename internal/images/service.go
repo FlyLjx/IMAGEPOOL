@@ -765,7 +765,8 @@ func (s *Service) generateOne(ctx context.Context, req Request) (openaiweb.Image
 		attemptLog.Status = "failed"
 		attemptLog.Error = err.Error()
 		accountEvicted := accounts.IsImageAccountEvicted(lease.Context)
-		if !accountEvicted {
+		referenceImageRequired := openaiweb.IsImageReferenceRequired(err)
+		if !accountEvicted && !referenceImageRequired {
 			s.recordImageFailure(account.AccessToken, err)
 		}
 		authenticationError := openaiweb.IsAuthenticationError(err)
@@ -777,6 +778,11 @@ func (s *Service) generateOne(ctx context.Context, req Request) (openaiweb.Image
 		}
 		s.store.ReleaseImageLease(lease.ID)
 		releaseGlobal()
+		if referenceImageRequired {
+			log.Printf("image_attempt event=input_error task_id=%s attempt=%d lease_id=%s account=%s reason=reference_image_required", strings.TrimSpace(req.TaskID), attemptLog.Attempt, lease.ID, accountLogLabel(account))
+			attempts = append(attempts, finishAttempt())
+			return openaiweb.ImageResult{Attempts: attempts}, err
+		}
 		if accountEvicted {
 			logImageAttemptSwitch(req, lease, account, &attemptLog, "account_evicted")
 			attempts = append(attempts, finishAttempt())

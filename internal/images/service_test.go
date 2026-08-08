@@ -262,6 +262,23 @@ func TestGenerateRemovesInvalidTokenAndRetriesNextAccount(t *testing.T) {
 	}
 }
 
+func TestGenerateReturnsReferenceImageRequiredWithoutSwitchingAccount(t *testing.T) {
+	store := accounts.NewStore([]accounts.Account{{Email: "one@example.com", AccessToken: "one", CreatedAt: 1}}, "")
+	backend := &fakeBackend{errs: []error{openaiweb.NewImageReferenceRequiredError("conv-1", openaiweb.ImageAttemptDiagnostics{Phase: "polling_image"})}}
+
+	response, err := NewService(config.Default(), store, backend).Generate(context.Background(), Request{Prompt: "draw"})
+	if !errors.Is(err, openaiweb.ErrImageReferenceRequired) || backend.calls != 1 {
+		t.Fatalf("response=%#v err=%v calls=%d", response, err, backend.calls)
+	}
+	account, found := store.Get("one")
+	if !found || account.ImageFailures != 0 || account.LastError != "" {
+		t.Fatalf("reference image input error changed account state: found=%v account=%#v", found, account)
+	}
+	if len(response.Attempts) != 1 || response.Attempts[0].SwitchReason != "" {
+		t.Fatalf("attempts=%#v", response.Attempts)
+	}
+}
+
 func TestGenerateHidesUpstreamImageModelSlug(t *testing.T) {
 	store := accounts.NewStore([]accounts.Account{{Email: "user@example.test", AccessToken: "token"}}, "")
 	response, err := NewService(config.Default(), store, &fakeBackend{}).Generate(context.Background(), Request{Prompt: "draw", Model: "team-codex-gpt-image-2"})

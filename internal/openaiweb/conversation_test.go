@@ -61,6 +61,38 @@ func TestPollImageResultsRetriesFreshConversationInaccessible(t *testing.T) {
 	}
 }
 
+func TestPollImageResultsReturnsReferenceImageRequiredForAssistantRequest(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/backend-api/conversation/conv-reference" {
+			http.NotFound(w, r)
+			return
+		}
+		hits.Add(1)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"mapping": map[string]any{
+				"message": map[string]any{
+					"author":  map[string]any{"role": "assistant"},
+					"content": map[string]any{"parts": []any{"Please upload a reference image before continuing."}},
+				},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	cfg := config.Default()
+	cfg.ChatGPTBaseURL = srv.URL
+	cfg.ImageSettleEnabled = false
+	client := NewClient(cfg, WithHTTPClient(srv.Client()), WithSleep(func(context.Context, time.Duration) error { return nil }))
+	_, _, err := client.pollImageResults(context.Background(), accounts.Account{AccessToken: "token"}, "conv-reference", nil, nil)
+	if !errors.Is(err, ErrImageReferenceRequired) {
+		t.Fatalf("err=%v", err)
+	}
+	if hits.Load() != 1 {
+		t.Fatalf("conversation polls=%d", hits.Load())
+	}
+}
+
 func TestPollImageResultsEmitsHeartbeatAndRetriesSlowPoll(t *testing.T) {
 	var hits atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

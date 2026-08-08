@@ -35,6 +35,9 @@ func Classify(err error, statusHint int) Info {
 	if errors.Is(err, context.Canceled) {
 		return info("任务已取消", "请求已取消。", "request_canceled", "canceled", false, "none", "", StatusClientClosedRequest)
 	}
+	if errors.Is(err, openaiweb.ErrImageReferenceRequired) {
+		return info("缺少参考图", openaiweb.PublicImageReferenceRequiredMessage, "reference_image_required", "request", false, "check_request", "请上传缩略图或参考图后重新提交", http.StatusBadRequest)
+	}
 	if errors.Is(err, openaiweb.ErrContentPolicy) || isContentPolicyText(text) {
 		return info("内容安全限制", "提交内容触发了安全限制，请调整提示词或参考图后重试。", "content_policy_violation", "policy", false, "modify_content", "调整提示词或参考图后重新提交", http.StatusBadRequest)
 	}

@@ -21,6 +21,7 @@ func TestClassifyImageErrors(t *testing.T) {
 		{name: "generation terminated", err: errors.Join(openaiweb.ErrImageGenerationTerminated, errors.New("image_generation_failed")), code: "image_generation_failed", status: http.StatusBadGateway},
 		{name: "poll timeout", err: openaiweb.ErrPollTimeout, code: "oai_image_generation_timeout", status: http.StatusTooManyRequests},
 		{name: "stalled generation", err: openaiweb.NewImageGenerationStalledError("conv", 150, openaiweb.ImageAttemptDiagnostics{}), code: "image_generation_stalled", status: http.StatusTooManyRequests},
+		{name: "reference image required", err: openaiweb.NewImageReferenceRequiredError("conv", openaiweb.ImageAttemptDiagnostics{}), code: "reference_image_required", status: http.StatusBadRequest},
 		{name: "legacy poll timeout", err: errors.New("任务占用额度失败，请再次提交。"), code: "oai_image_generation_timeout", status: http.StatusTooManyRequests},
 		{name: "upload timeout", err: errors.Join(openaiweb.ErrImagePreparationTimeout, errors.New("参考图上传超时")), code: "image_upload_timeout", status: http.StatusGatewayTimeout},
 		{name: "no account", err: accounts.ErrNoAvailableAccount, code: "account_pool_unavailable", status: http.StatusTooManyRequests},
@@ -39,6 +40,16 @@ func TestClassifyImageErrors(t *testing.T) {
 				t.Fatalf("incomplete info=%#v", got)
 			}
 		})
+	}
+}
+
+func TestClassifyReferenceImageRequiredIsNotRetryable(t *testing.T) {
+	got := Classify(openaiweb.NewImageReferenceRequiredError("conv", openaiweb.ImageAttemptDiagnostics{}), 0)
+	if got.Retryable {
+		t.Fatalf("reference image input error must not be retryable: %#v", got)
+	}
+	if got.Category != "request" || got.Type != "invalid_request_error" {
+		t.Fatalf("unexpected classification: %#v", got)
 	}
 }
 

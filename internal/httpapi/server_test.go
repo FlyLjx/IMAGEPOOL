@@ -216,6 +216,9 @@ func TestErrorClassificationDoesNotTreatCanceledOrRejectedRequestsAsFailures(t *
 	if got := metricCallStatus(http.StatusBadRequest, "content policy violation", "content_policy_violation"); got != "rejected" {
 		t.Fatalf("rejected metric status=%q", got)
 	}
+	if got := metricCallStatus(http.StatusBadRequest, openaiweb.PublicImageReferenceRequiredMessage, "reference_image_required"); got != "rejected" {
+		t.Fatalf("reference image metric status=%q", got)
+	}
 	if got := metricCallStatus(http.StatusBadGateway, "content policy violation: 非常抱歉，生成的图片可能违反了关于裸露、色情或情色内容的防护限制。", "content_policy_violation"); got != "rejected" {
 		t.Fatalf("content policy metric status=%q", got)
 	}

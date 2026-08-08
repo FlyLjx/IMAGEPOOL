@@ -878,6 +878,10 @@ func (c *Client) pollImageResultsWithProgressAndDiagnostics(ctx context.Context,
 		diagnostics.LastHTTPStatus = http.StatusOK
 		diagnostics.Response.Observe(summarizeImageResponse(conversation, 0, excludedFileIDs))
 		MergeImageConversationSignals(&diagnostics, conversation)
+		if !diagnostics.ToolSeen && !diagnostics.ImageReferenceSeen && DetectReferenceImageRequest(conversation) {
+			diagnostics.ResultSignature = "reference_image_required"
+			return nil, nil, diagnostics, NewImageReferenceRequiredError(conversationID, diagnostics)
+		}
 		if terminalErr := findImageGenerationTerminalError(conversation); terminalErr != nil {
 			return nil, nil, diagnostics, terminalErr
 		}

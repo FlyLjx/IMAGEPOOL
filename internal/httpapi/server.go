@@ -2701,7 +2701,7 @@ func metricCallStatus(statusCode int, errorMessage, errorCode string) string {
 		return "rejected"
 	}
 	switch errorCode {
-	case "invalid_request", "invalid_output_format", "prompt_required", "reference_image_invalid", "api_key_invalid", "request_not_allowed", "endpoint_not_allowed", "model_not_allowed", "client_quota_exhausted":
+	case "invalid_request", "invalid_output_format", "prompt_required", "reference_image_invalid", "reference_image_required", "api_key_invalid", "request_not_allowed", "endpoint_not_allowed", "model_not_allowed", "client_quota_exhausted":
 		return "rejected"
 	}
 	if errorCode != "" && statusCode >= http.StatusBadRequest {
