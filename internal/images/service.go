@@ -1006,7 +1006,7 @@ func reportAuthenticationRetry(req Request, account accounts.Account, err error,
 	}
 	req.Progress(openaiweb.ProgressEvent{
 		Progress: "retrying_account",
-		Message:  "上游认证状态异常，系统正在自动恢复",
+		Message:  openaiweb.PublicCredentialInvalidMessage,
 	})
 }
 

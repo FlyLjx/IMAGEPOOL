@@ -2,8 +2,11 @@ package errorinfo
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
+	"regexp"
 	"strings"
 
 	"imagepool/internal/accounts"
@@ -25,6 +28,34 @@ type Info struct {
 	HTTPStatus int    `json:"-"`
 }
 
+const publicServiceCategory = "service"
+
+var (
+	publicURLPattern      = regexp.MustCompile(`(?i)https?://[^\s"'<>，。；：]+`)
+	publicEndpointPattern = regexp.MustCompile(`(?i)(?:/backend-api/|/backend-anon/|/v1/)[^\s"'<>，。；：,}]*`)
+	publicCodePattern     = regexp.MustCompile(`^[a-z][a-z0-9_.-]{0,79}$`)
+)
+
+type upstreamErrorEnvelope struct {
+	Error   *upstreamErrorFields `json:"error"`
+	Message string               `json:"message"`
+	Title   string               `json:"title"`
+	Type    string               `json:"type"`
+	Code    string               `json:"code"`
+	Hint    string               `json:"hint"`
+}
+
+type upstreamErrorFields struct {
+	Title     string `json:"title"`
+	Message   string `json:"message"`
+	Type      string `json:"type"`
+	Code      string `json:"code"`
+	Category  string `json:"category"`
+	Retryable *bool  `json:"retryable"`
+	Action    string `json:"action"`
+	Hint      string `json:"hint"`
+}
+
 func Classify(err error, statusHint int) Info {
 	if err == nil {
 		return fallback(statusHint)
@@ -35,35 +66,42 @@ func Classify(err error, statusHint int) Info {
 	if errors.Is(err, context.Canceled) {
 		return info("任务已取消", "请求已取消。", "request_canceled", "canceled", false, "none", "", StatusClientClosedRequest)
 	}
-	if errors.Is(err, openaiweb.ErrImageReferenceRequired) {
-		return info("缺少参考图", openaiweb.PublicImageReferenceRequiredMessage, "reference_image_required", "request", false, "check_request", "请上传缩略图或参考图后重新提交", http.StatusBadRequest)
+	if errors.Is(err, io.ErrUnexpectedEOF) || strings.Contains(lower, "unexpected eof") {
+		return info("请求体不完整", "请求体在传输过程中被截断，参考图可能过大。请压缩图片后重试。", "request_body_incomplete", "request", false, "check_request", "请检查图片大小后重试", http.StatusBadRequest)
+	}
+	var maxBytesErr *http.MaxBytesError
+	if errors.As(err, &maxBytesErr) {
+		return info("请求体过大", "参考图文件过大，请压缩图片或改用图片链接后重试。", "request_body_too_large", "request", false, "check_request", "请检查图片大小后重试", http.StatusRequestEntityTooLarge)
+	}
+	if openaiweb.IsImageReferenceRequired(err) || strings.Contains(lower, "image reference required") || strings.Contains(text, "上游要求上传缩略图") || strings.Contains(text, "上游要求上传参考图") {
+		return info("需要上传参考图", "检测到请求需要缩略图或参考图，请上传后重新提交任务。", "reference_image_required", "request", false, "check_request", "请上传缩略图或参考图文件", http.StatusBadRequest)
 	}
 	if errors.Is(err, openaiweb.ErrContentPolicy) || isContentPolicyText(text) {
 		return info("内容安全限制", "提交内容触发了安全限制，请调整提示词或参考图后重试。", "content_policy_violation", "policy", false, "modify_content", "调整提示词或参考图后重新提交", http.StatusBadRequest)
 	}
 	if errors.Is(err, openaiweb.ErrImageGenerationTerminated) || strings.Contains(lower, "image_generation_failed") || strings.Contains(lower, "image generation failed") {
-		return info("OAI 未完成生图", "OAI 未能完成本次图片生成，系统已自动重试，请重新提交。", "image_generation_failed", "upstream", true, "retry_request", "请直接重新提交任务", http.StatusBadGateway)
+		return info("图片生成未完成", "本次图片生成未完成，系统已自动重试，请重新提交。", "image_generation_failed", publicServiceCategory, true, "retry_request", "请重新提交任务", http.StatusBadGateway)
 	}
 	if errors.Is(err, openaiweb.ErrImageGenerationStalled) {
-		return info("生图会话长时间无结果", "当前生图会话长时间没有返回图片，系统已重新选择账号继续处理。", "image_generation_stalled", "upstream", true, "retry_request", "请重新提交任务", http.StatusTooManyRequests)
+		return info("图片生成长时间无结果", "图片生成长时间没有返回结果，系统已重新选择账号继续处理。", "image_generation_stalled", publicServiceCategory, true, "retry_request", "请重新提交任务", http.StatusTooManyRequests)
 	}
 	if errors.Is(err, openaiweb.ErrPollTimeout) || strings.Contains(lower, "image poll timeout") || strings.Contains(text, "生图任务已等待") || strings.Contains(text, "OAI侧出图超出") || strings.Contains(text, "任务占用额度失败") {
-		return info("OAI 生图超时", "OAI 在 600 秒（10 分钟）内未完成出图，本次任务已结束，请重新提交。", "oai_image_generation_timeout", "upstream", true, "retry_request", "请重新提交任务", http.StatusTooManyRequests)
+		return info("图片生成超时", "图片生成在 10 分钟内未完成，本次任务已结束，请重新提交。", "image_generation_timeout", publicServiceCategory, true, "retry_request", "请重新提交任务", http.StatusTooManyRequests)
 	}
 	if errors.Is(err, openaiweb.ErrImagePreparationTimeout) {
 		if strings.Contains(text, "参考图") || strings.Contains(lower, "upload") {
-			return info("参考图上传超时", "参考图上传暂时超时，请重新提交。", "image_upload_timeout", "upstream", true, "retry_request", "请重新提交任务", http.StatusGatewayTimeout)
+			return info("参考图上传超时", "参考图上传暂时超时，请重新提交。", "image_upload_timeout", publicServiceCategory, true, "retry_request", "请重新提交任务", http.StatusGatewayTimeout)
 		}
-		return info("生图会话准备超时", "OAI 生图会话准备超时，请重新提交。", "image_preparation_timeout", "upstream", true, "retry_request", "请重新提交任务", http.StatusGatewayTimeout)
+		return info("生图会话准备超时", "图片生成服务准备会话超时，请重新提交。", "image_preparation_timeout", publicServiceCategory, true, "retry_request", "请重新提交任务", http.StatusGatewayTimeout)
 	}
 	if errors.Is(err, context.DeadlineExceeded) || strings.Contains(lower, "context deadline exceeded") {
-		return info("上游响应超时", "上游服务未在规定时间内响应，请稍后重试。", "upstream_timeout", "upstream", true, "retry_later", "稍后重新提交任务", http.StatusGatewayTimeout)
+		return info("服务响应超时", "图片生成服务在规定时间内未响应，请稍后重试。", "service_timeout", publicServiceCategory, true, "retry_later", "稍后重新提交任务", http.StatusGatewayTimeout)
 	}
 	if errors.Is(err, openaiweb.ErrMissingConduitToken) || strings.Contains(lower, "missing conduit_token") || strings.Contains(lower, "conversation_id not found") {
-		return info("生图会话建立失败", "OAI 生图会话暂时无法建立，系统已自动重试，请重新提交。", "image_session_failed", "upstream", true, "retry_request", "请重新提交任务", http.StatusBadGateway)
+		return info("生图会话建立失败", "图片生成服务暂时无法建立会话，系统已自动重试，请重新提交。", "image_session_failed", publicServiceCategory, true, "retry_request", "请重新提交任务", http.StatusBadGateway)
 	}
 	if openaiweb.IsInteractiveChallengeError(err) {
-		return info("OAI 要求人机验证", "OAI 当前要求完成人机验证，服务暂时不可用。", "interactive_challenge_required", "upstream", true, "retry_later", "请稍后重试", http.StatusPreconditionRequired)
+		return info("需要完成人机验证", "当前图片服务要求完成人机验证，暂时无法继续处理。", "interactive_challenge_required", publicServiceCategory, true, "retry_later", "请稍后重试", http.StatusPreconditionRequired)
 	}
 	if openaiweb.IsNoFreeImageQuotaError(err) {
 		return info("号池额度不足", "当前号池生图额度不足，请稍后重试。", "image_quota_exhausted", "capacity", true, "retry_later", "等待号池补充额度后重试", http.StatusTooManyRequests)
@@ -95,28 +133,213 @@ func Classify(err error, statusHint int) Info {
 		return info("参考图无效", "参考图缺失或无法识别，请更换图片后重试。", "reference_image_invalid", "request", false, "check_request", "请检查参考图文件", http.StatusBadRequest)
 	}
 	if strings.Contains(lower, "upstream completed without generating images") || strings.Contains(lower, "no image generated") || strings.Contains(lower, "result could not be retrieved") {
-		return info("生图结果暂不可用", "OAI 已结束本次任务，但没有返回可用图片，请重新提交。", "image_result_unavailable", "upstream", true, "retry_request", "请重新提交任务", http.StatusBadGateway)
+		return info("图片生成结果暂不可用", "任务已结束，但没有返回可用图片，请重新提交。", "image_result_unavailable", publicServiceCategory, true, "retry_request", "请重新提交任务", http.StatusBadGateway)
+	}
+	if strings.Contains(lower, "provider error") {
+		if fields, ok := parseUpstreamError(text); ok {
+			status := statusHint
+			if status <= 0 {
+				status = http.StatusBadGateway
+				if strings.EqualFold(strings.TrimSpace(fields.Category), "request") {
+					status = http.StatusBadRequest
+				}
+			}
+			return classifyStructuredError(fields, status, text)
+		}
+		return info("服务请求失败", "服务暂时没有返回详细原因，请稍后重试。", "service_error", publicServiceCategory, true, "retry_later", "请稍后重新提交", http.StatusBadGateway)
 	}
 
 	var upstream *openaiweb.UpstreamError
 	if errors.As(err, &upstream) {
+		if classified, ok := classifyUpstreamError(upstream); ok {
+			return classified
+		}
 		if strings.Contains(strings.ToLower(upstream.Path), "/files") {
-			return info("参考图上传失败", "OAI 参考图上传服务暂时不可用，请重新提交。", "image_upload_failed", "upstream", true, "retry_request", "请重新提交任务", http.StatusBadGateway)
+			return info("参考图上传失败", "参考图上传暂时不可用，请重新提交。", "image_upload_failed", publicServiceCategory, true, "retry_request", "请重新提交任务", http.StatusBadGateway)
 		}
 		switch upstream.StatusCode {
 		case http.StatusTooManyRequests:
-			return info("OAI 请求受限", "OAI 当前请求频率受限，请稍后重试。", "upstream_rate_limited", "upstream", true, "retry_later", "请稍后重新提交", http.StatusTooManyRequests)
+			return info("请求频率受限", "当前请求较多，请稍后重试。", "service_rate_limited", publicServiceCategory, true, "retry_later", "请稍后重新提交", http.StatusTooManyRequests)
 		case http.StatusRequestTimeout, http.StatusGatewayTimeout:
-			return info("上游响应超时", "OAI 服务响应超时，请稍后重试。", "upstream_timeout", "upstream", true, "retry_later", "请稍后重新提交", http.StatusGatewayTimeout)
+			return info("服务响应超时", "图片生成服务响应超时，请稍后重试。", "service_timeout", publicServiceCategory, true, "retry_later", "请稍后重新提交", http.StatusGatewayTimeout)
 		case http.StatusServiceUnavailable:
-			return info("OAI 服务繁忙", "OAI 服务当前繁忙，请稍后重试。", "upstream_service_busy", "upstream", true, "retry_later", "请稍后重新提交", http.StatusServiceUnavailable)
+			return info("服务繁忙", "图片生成服务当前繁忙，请稍后重试。", "service_busy", publicServiceCategory, true, "retry_later", "请稍后重新提交", http.StatusServiceUnavailable)
 		default:
 			if upstream.StatusCode >= http.StatusInternalServerError {
-				return info("OAI 服务异常", "OAI 服务暂时异常，请稍后重试。", "upstream_service_error", "upstream", true, "retry_later", "请稍后重新提交", http.StatusBadGateway)
+				return info("服务暂时异常", "图片生成服务暂时异常，请稍后重试。", "service_error", publicServiceCategory, true, "retry_later", "请稍后重新提交", http.StatusBadGateway)
 			}
 		}
 	}
 	return fallback(statusHint)
+}
+
+func classifyUpstreamError(upstream *openaiweb.UpstreamError) (Info, bool) {
+	if upstream == nil || upstream.StatusCode <= 0 {
+		return Info{}, false
+	}
+
+	fields, parsed := parseUpstreamError(upstream.Body)
+	if !parsed {
+		return Info{}, false
+	}
+	return classifyStructuredError(fields, upstream.StatusCode, upstream.Body), true
+}
+
+func classifyStructuredError(fields upstreamErrorFields, status int, fallbackBody string) Info {
+	retryable := status == http.StatusRequestTimeout || status == http.StatusTooManyRequests || status >= http.StatusInternalServerError
+	if fields.Retryable != nil {
+		retryable = *fields.Retryable
+	}
+
+	category := normalizeUpstreamCategory(fields.Category)
+	code := normalizePublicCode(fields.Code, status, category, retryable)
+	title := sanitizePublicText(fields.Title)
+	message := sanitizePublicText(fields.Message)
+	hint := sanitizePublicText(fields.Hint)
+	action := normalizePublicAction(fields.Action, retryable)
+	if title == "" {
+		if category == "request" {
+			title = "请求处理失败"
+		} else {
+			title = "服务请求失败"
+		}
+	}
+	if message == "" {
+		message = sanitizePublicText(compactUpstreamBody(fallbackBody))
+	}
+	if message == "" {
+		message = "服务暂时没有返回详细原因，请稍后重试。"
+	}
+	message = formatPublicMessage(message, hint)
+
+	return info(title, message, code, category, retryable, action, hint, status)
+}
+
+func parseUpstreamError(body string) (upstreamErrorFields, bool) {
+	trimmed := strings.TrimSpace(body)
+	candidates := []string{trimmed}
+	if start := strings.Index(trimmed, "{"); start > 0 {
+		candidates = append(candidates, trimmed[start:])
+	}
+	for _, candidate := range candidates {
+		var envelope upstreamErrorEnvelope
+		if err := json.Unmarshal([]byte(candidate), &envelope); err != nil {
+			continue
+		}
+		if envelope.Error != nil {
+			return *envelope.Error, true
+		}
+		if strings.TrimSpace(envelope.Message) != "" || strings.TrimSpace(envelope.Code) != "" || strings.TrimSpace(envelope.Title) != "" {
+			return upstreamErrorFields{Title: envelope.Title, Message: envelope.Message, Type: envelope.Type, Code: envelope.Code, Hint: envelope.Hint}, true
+		}
+	}
+	return upstreamErrorFields{}, false
+}
+
+func normalizeUpstreamCategory(value string) string {
+	switch strings.TrimSpace(value) {
+	case "request", "policy", "capacity", "client", "account", "system", "canceled":
+		return strings.TrimSpace(value)
+	case "service", "upstream":
+		return publicServiceCategory
+	default:
+		return publicServiceCategory
+	}
+}
+
+func formatPublicMessage(message, hint string) string {
+	parts := make([]string, 0, 2)
+	if message != "" {
+		parts = append(parts, message)
+	}
+	if hint != "" && !strings.EqualFold(hint, message) {
+		parts = append(parts, "建议："+hint)
+	}
+	return strings.Join(parts, "；")
+}
+
+func compactUpstreamBody(body string) string {
+	body = strings.Join(strings.Fields(strings.TrimSpace(body)), " ")
+	if body == "" {
+		return ""
+	}
+	lower := strings.ToLower(body)
+	if containsPrivateErrorDetail(lower) || strings.Contains(lower, "provider error") || strings.Contains(lower, "upstream ") {
+		return ""
+	}
+	const maxLength = 2048
+	if len(body) > maxLength {
+		return body[:maxLength] + "…"
+	}
+	return body
+}
+
+func normalizePublicCode(value string, status int, category string, retryable bool) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if publicCodePattern.MatchString(value) && !strings.Contains(value, "upstream") && !strings.Contains(value, "provider") && !strings.Contains(value, "http") {
+		return value
+	}
+	if category == "request" {
+		return "request_failed"
+	}
+	if status == http.StatusTooManyRequests {
+		return "service_rate_limited"
+	}
+	if retryable || status >= http.StatusInternalServerError {
+		return "service_error"
+	}
+	return "request_failed"
+}
+
+func normalizePublicAction(value string, retryable bool) string {
+	switch strings.TrimSpace(value) {
+	case "none", "check_request", "modify_content", "retry_request", "retry_later", "check_api_key", "wait_quota_reset":
+		return strings.TrimSpace(value)
+	default:
+		if retryable {
+			return "retry_later"
+		}
+		return "check_request"
+	}
+}
+
+func sanitizePublicText(value string) string {
+	value = strings.Join(strings.Fields(strings.TrimSpace(value)), " ")
+	if value == "" || containsPrivateErrorDetail(strings.ToLower(value)) {
+		return ""
+	}
+	value = publicURLPattern.ReplaceAllString(value, "")
+	value = publicEndpointPattern.ReplaceAllString(value, "")
+	value = strings.ReplaceAll(value, "上游", "服务")
+	value = strings.ReplaceAll(value, "Upstream", "服务")
+	value = strings.ReplaceAll(value, "upstream", "服务")
+	value = strings.ReplaceAll(value, "Provider", "服务")
+	value = strings.ReplaceAll(value, "provider", "服务")
+	value = strings.ReplaceAll(value, "OAI", "图片服务")
+	value = strings.ReplaceAll(value, "oai", "图片服务")
+	value = strings.TrimSpace(strings.Trim(value, "：:，,；;。.!！?？\"'()[]{}<>"))
+	if value == "" {
+		return ""
+	}
+	const maxLength = 1024
+	if len(value) > maxLength {
+		return value[:maxLength] + "…"
+	}
+	return value
+}
+
+func containsPrivateErrorDetail(lower string) bool {
+	return strings.Contains(lower, "access_token") ||
+		strings.Contains(lower, "refresh_token") ||
+		strings.Contains(lower, "id_token") ||
+		strings.Contains(lower, "authorization") ||
+		strings.Contains(lower, "bearer ") ||
+		strings.Contains(lower, "oauth token") ||
+		strings.Contains(lower, "/backend-api/") ||
+		strings.Contains(lower, "/backend-anon/") ||
+		strings.Contains(lower, "/v1/") ||
+		strings.Contains(lower, "https://") ||
+		strings.Contains(lower, "http://")
 }
 
 func ClassifyText(message string, statusHint int) Info {
@@ -135,8 +358,8 @@ func CategoryLabel(category string) string {
 		return "客户额度"
 	case "account":
 		return "账号状态"
-	case "upstream":
-		return "OAI 上游"
+	case "service", "upstream":
+		return "图片服务"
 	case "system":
 		return "本地系统"
 	case "canceled":
@@ -153,8 +376,8 @@ func info(title, message, code, category string, retryable bool, action, hint st
 		errType = "invalid_request_error"
 	case "capacity", "client":
 		errType = "rate_limit_error"
-	case "upstream":
-		errType = "upstream_error"
+	case "service", "upstream":
+		errType = "service_error"
 	case "canceled":
 		errType = "request_canceled"
 	}
@@ -181,9 +404,9 @@ func fallback(statusHint int) Info {
 	case http.StatusServiceUnavailable:
 		return info("服务暂不可用", "服务暂时不可用，请稍后重试。", "service_unavailable", "system", true, "retry_later", "请稍后重新提交", statusHint)
 	case http.StatusGatewayTimeout:
-		return info("上游响应超时", "上游服务响应超时，请稍后重试。", "upstream_timeout", "upstream", true, "retry_later", "请稍后重新提交", statusHint)
+		return info("服务响应超时", "图片生成服务响应超时，请稍后重试。", "service_timeout", publicServiceCategory, true, "retry_later", "请稍后重新提交", statusHint)
 	default:
-		return info("上游服务异常", "上游服务暂时异常，请稍后重试。", "upstream_service_error", "upstream", true, "retry_later", "请稍后重新提交", http.StatusBadGateway)
+		return info("服务暂时异常", "图片生成服务暂时异常，请稍后重试。", "service_error", publicServiceCategory, true, "retry_later", "请稍后重新提交", http.StatusBadGateway)
 	}
 }
 

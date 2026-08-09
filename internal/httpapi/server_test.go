@@ -251,7 +251,7 @@ func TestImagePollTimeoutReturnsPublicOAITimeoutError(t *testing.T) {
 	if decodeErr := json.NewDecoder(recorder.Body).Decode(&body); decodeErr != nil {
 		t.Fatal(decodeErr)
 	}
-	if recorder.Code != http.StatusTooManyRequests || body.Error.Message != classified.Message || body.Error.Type != "timeout_error" || body.Error.Code != "oai_image_generation_timeout" || body.Error.Title == "" || body.Error.Category != "upstream" || !body.Error.Retryable || body.Error.Action == "" || body.Error.Hint == "" || body.Error.RequestID == "" {
+	if recorder.Code != http.StatusTooManyRequests || body.Error.Message != classified.Message || body.Error.Type != "timeout_error" || body.Error.Code != "image_generation_timeout" || body.Error.Title == "" || body.Error.Category != "service" || !body.Error.Retryable || body.Error.Action == "" || body.Error.Hint == "" || body.Error.RequestID == "" {
 		t.Fatalf("status=%d body=%#v", recorder.Code, body)
 	}
 }
@@ -302,7 +302,7 @@ func TestImageGenerationEndpointReturnsPublicPollTimeoutError(t *testing.T) {
 	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
 		t.Fatal(err)
 	}
-	if response.StatusCode != http.StatusTooManyRequests || body.Error.Message != classified.Message || body.Error.Type != "timeout_error" || body.Error.Code != "oai_image_generation_timeout" {
+	if response.StatusCode != http.StatusTooManyRequests || body.Error.Message != classified.Message || body.Error.Type != "timeout_error" || body.Error.Code != "image_generation_timeout" {
 		t.Fatalf("status=%d body=%#v", response.StatusCode, body)
 	}
 }

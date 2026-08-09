@@ -2,6 +2,7 @@ package openaiweb
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -246,10 +247,10 @@ const (
 	// PublicCredentialInvalidMessage is intentionally independent of the
 	// upstream response. Upstream OAuth bodies can contain endpoint and token
 	// details which must never reach API consumers or persisted task history.
-	PublicCredentialInvalidMessage      = "上游认证状态异常，系统正在自动恢复"
-	PublicImagePollTimeoutMessage       = "OAI侧出图超出600s（10分钟），请重新提交任务。"
-	PublicImageReferenceRequiredMessage = "上游要求上传缩略图或参考图，请上传后重新提交任务。"
-	PublicUpstreamFailureMessage        = "上游服务请求失败，请稍后重试"
+	PublicCredentialInvalidMessage      = "账号认证状态异常，系统正在自动恢复。"
+	PublicImagePollTimeoutMessage       = "图片生成超过10分钟仍未完成，请重新提交任务。"
+	PublicImageReferenceRequiredMessage = "检测到请求需要缩略图或参考图，请上传后重新提交任务。"
+	PublicUpstreamFailureMessage        = "图片服务暂时不可用，请稍后重试。"
 )
 
 type UpstreamError struct {
@@ -289,12 +290,61 @@ func PublicErrorMessage(err error) string {
 		return PublicImagePollTimeoutMessage
 	}
 	if errors.Is(err, ErrImageGenerationStalled) {
-		return "OAI侧生图长时间没有返回图片，系统已重新选择账号继续处理。"
+		return "图片生成长时间没有返回结果，系统已重新选择账号继续处理。"
 	}
 	if IsImageReferenceRequired(err) {
 		return PublicImageReferenceRequiredMessage
 	}
+	var providerErr *UpstreamError
+	if errors.As(err, &providerErr) {
+		if message := publicStructuredErrorMessage(providerErr); message != "" {
+			return message
+		}
+	}
 	return PublicErrorText(err.Error())
+}
+
+func publicStructuredErrorMessage(err *UpstreamError) string {
+	if err == nil {
+		return ""
+	}
+	body := strings.TrimSpace(err.Body)
+	candidates := []string{body}
+	if start := strings.Index(body, "{"); start > 0 {
+		candidates = append(candidates, body[start:])
+	}
+	for _, candidate := range candidates {
+		var payload struct {
+			Error *struct {
+				Message string `json:"message"`
+				Title   string `json:"title"`
+				Hint    string `json:"hint"`
+			} `json:"error"`
+			Message string `json:"message"`
+			Title   string `json:"title"`
+			Hint    string `json:"hint"`
+		}
+		if json.Unmarshal([]byte(candidate), &payload) != nil {
+			continue
+		}
+		message, hint := payload.Message, payload.Hint
+		if payload.Error != nil {
+			message, hint = payload.Error.Message, payload.Error.Hint
+			if strings.TrimSpace(payload.Error.Title) != "" && strings.TrimSpace(message) == "" {
+				message = payload.Error.Title
+			}
+		}
+		message = PublicErrorText(message)
+		hint = PublicErrorText(hint)
+		if message == "" {
+			continue
+		}
+		if hint != "" && !strings.EqualFold(hint, message) {
+			message += "；建议：" + hint
+		}
+		return message
+	}
+	return ""
 }
 
 // PublicErrorText redacts raw upstream diagnostics that may already have been
@@ -317,13 +367,21 @@ func PublicErrorText(message string) string {
 		return PublicImagePollTimeoutMessage
 	}
 	if strings.Contains(lower, "image generation stalled") || strings.Contains(message, "连续") && strings.Contains(message, "没有图片结果") {
-		return "OAI侧生图长时间没有返回图片，系统已重新选择账号继续处理。"
+		return "图片生成长时间没有返回结果，系统已重新选择账号继续处理。"
 	}
 	if strings.Contains(lower, "image reference required") || strings.Contains(message, "上游要求上传缩略图") || strings.Contains(message, "上游要求上传参考图") {
 		return PublicImageReferenceRequiredMessage
 	}
-	if strings.Contains(lower, "upstream ") ||
+	if strings.Contains(message, "上游") ||
+		strings.Contains(lower, "upstream") ||
+		strings.Contains(lower, "provider") ||
+		strings.Contains(lower, "oai") ||
+		strings.Contains(lower, "chatgpt") ||
 		strings.Contains(lower, "/backend-api/") ||
+		strings.Contains(lower, "/backend-anon/") ||
+		strings.Contains(lower, "/v1/") ||
+		strings.Contains(lower, "https://") ||
+		strings.Contains(lower, "http://") ||
 		strings.Contains(lower, "access_token") ||
 		strings.Contains(lower, "refresh_token") ||
 		strings.Contains(lower, "id_token") ||

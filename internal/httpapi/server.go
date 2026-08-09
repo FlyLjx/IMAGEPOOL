@@ -77,7 +77,10 @@ type stabilityResponse struct {
 	Runtime map[string]any `json:"runtime"`
 }
 
-const statusClientClosedRequest = 499
+const (
+	statusClientClosedRequest          = 499
+	maxImageEditRequestBodyBytes int64 = 64 << 20
+)
 
 func NewServer(cfg config.Config, accountStore *accounts.Store, imageService *images.Service, textService *texts.Service, searchService *searches.Service, storageService *storage.Service, taskManager *tasks.Manager, configUpdated ...func(config.Config)) *Server {
 	return newServer(cfg, accountStore, imageService, textService, searchService, storageService, taskManager, nil, registration.NewWorker(registration.WorkerOptions{}), configUpdated...)
@@ -690,9 +693,13 @@ func (s *Server) handleImageGeneration(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleImageEdit(w http.ResponseWriter, r *http.Request, asTask bool) {
+	// Keep the complete multipart or Base64 JSON request bounded. The limit is
+	// applied to the request body because Base64 and multipart framing add
+	// overhead around the source image itself.
+	r.Body = http.MaxBytesReader(w, r.Body, maxImageEditRequestBodyBytes)
 	req, clientTaskID, err := s.parseEditRequest(r)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err)
+		writeError(w, imageEditRequestErrorStatus(err), err)
 		return
 	}
 	if err := validateImageOutputOptions(req); err != nil {
@@ -731,6 +738,14 @@ func (s *Server) handleImageEdit(w http.ResponseWriter, r *http.Request, asTask 
 		return
 	}
 	writeJSON(w, http.StatusOK, resp.MarshalForOpenAI())
+}
+
+func imageEditRequestErrorStatus(err error) int {
+	var maxBytesErr *http.MaxBytesError
+	if errors.As(err, &maxBytesErr) {
+		return http.StatusRequestEntityTooLarge
+	}
+	return http.StatusBadRequest
 }
 
 func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {

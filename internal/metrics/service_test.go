@@ -142,7 +142,7 @@ func TestTodaySummaryUsesLocalDayAndExcludesRejectedFromFailureRate(t *testing.T
 	if byEndpoint["/v1/images/generations"] != 2 || byEndpoint["/v1/images/edits"] != 2 {
 		t.Fatalf("byEndpoint=%#v", byEndpoint)
 	}
-	if failed := today["recent_failed"].([]map[string]any); len(failed) != 1 || failed[0]["error_code"] != "upstream_service_error" || failed[0]["error"] != "上游服务暂时异常，请稍后重试。" {
+	if failed := today["recent_failed"].([]map[string]any); len(failed) != 1 || failed[0]["error_code"] != "service_error" || failed[0]["error"] != "图片生成服务暂时异常，请稍后重试。" {
 		t.Fatalf("recent_failed=%#v", failed)
 	}
 }
@@ -156,7 +156,7 @@ func TestSummaryAggregatesDynamicErrorsByStableCode(t *testing.T) {
 
 	runtime := svc.Summary(time.Hour)["runtime"].(map[string]any)
 	reasons := runtime["error_reasons"].([]map[string]any)
-	if len(reasons) != 1 || reasons[0]["code"] != "oai_image_generation_timeout" || reasons[0]["value"] != 2 {
+	if len(reasons) != 1 || reasons[0]["code"] != "image_generation_timeout" || reasons[0]["value"] != 2 {
 		t.Fatalf("error_reasons=%#v", reasons)
 	}
 }
