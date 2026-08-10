@@ -26,3 +26,21 @@ func TestSolveFlareSolverrParsesCookieBundle(t *testing.T) {
 		t.Fatalf("result=%#v", result)
 	}
 }
+
+func TestSolveFlareSolverrForChallengeIgnoresPersistentClearanceToggle(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1" || r.Method != http.MethodPost {
+			t.Fatalf("request %s %s", r.Method, r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"status":"ok","solution":{"cookies":[{"name":"cf_clearance","value":"clear"}]}}`))
+	}))
+	defer srv.Close()
+	runtime := config.ProxyRuntime{Enabled: true, EgressMode: "direct", Clearance: config.ClearanceRuntime{Enabled: false, Mode: "none", FlareSolverrURL: srv.URL, TimeoutSec: 5}}
+	result, err := SolveFlareSolverrForChallenge(context.Background(), runtime, "https://chatgpt.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Clearance != "clear" || result.Cookies != "cf_clearance=clear" {
+		t.Fatalf("result=%#v", result)
+	}
+}

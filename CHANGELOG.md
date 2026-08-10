@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.1.70 - 2026-08-10
+
++ [修复] 检测到 403 时自动合并触发 FlareSolverr，成功后仅重试一次并复用新的 Clearance，避免并发请求重复触发。
++ [调整] 默认 FlareSolverr 地址改为 Docker Compose 服务地址 `http://flaresolverr:8191`，新部署无需手动填写。
++ [测试] 增加 FlareSolverr 自动挑战处理和默认地址回归测试。
+
 ## 0.1.69 - 2026-08-10
 
 + [修复] 统一图片接口的参数、参考图、轮询、账号和服务异常返回，提供稳定的 HTTP 状态码与 `error.code`。

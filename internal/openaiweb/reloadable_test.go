@@ -69,8 +69,10 @@ func TestReloadableClientRefreshesFlareSolverrOnceForBootstrap403Burst(t *testin
 	cfg.ChatGPTBaseURL = app.URL
 	cfg.ProxyRuntime.Enabled = true
 	cfg.ProxyRuntime.EgressMode = "direct"
-	cfg.ProxyRuntime.Clearance.Enabled = true
-	cfg.ProxyRuntime.Clearance.Mode = "flaresolverr"
+	// Automatic refresh must work even when the persistent clearance switch is
+	// off. A detected 403 temporarily enables the refreshed client in memory.
+	cfg.ProxyRuntime.Clearance.Enabled = false
+	cfg.ProxyRuntime.Clearance.Mode = "none"
 	cfg.ProxyRuntime.Clearance.FlareSolverrURL = solver.URL
 	client := NewReloadableClient(cfg, WithHTTPClient(app.Client()))
 

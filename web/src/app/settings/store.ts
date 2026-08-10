@@ -33,7 +33,7 @@ function defaultProxyRuntime(): ProxyRuntimeSettings {
       user_agent:
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
       browser: "chrome",
-      flaresolverr_url: "",
+      flaresolverr_url: "http://flaresolverr:8191",
       timeout_sec: 60,
       refresh_interval: 3600,
       warm_up_on_start: false,

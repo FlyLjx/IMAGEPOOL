@@ -71,7 +71,7 @@
       "cf_clearance": "",
       "user_agent": "",
       "browser": "chrome",
-      "flaresolverr_url": "http://127.0.0.1:8191",
+      "flaresolverr_url": "http://flaresolverr:8191",
       "timeout_sec": 60,
       "refresh_interval": 3600,
       "warm_up_on_start": false

@@ -155,7 +155,7 @@ func Default() Config {
 		SearchPollIntervalSecs:              3,
 		RefreshAccountIntervalMinutes:       60,
 		RefreshAccountConcurrency:           8,
-		ProxyRuntime:                        ProxyRuntime{Enabled: true, EgressMode: "direct", ResetSessionStatusCodes: []int{403}, Clearance: ClearanceRuntime{Enabled: false, Mode: "none", Browser: "chrome", TimeoutSec: 60, RefreshInterval: 3600}},
+		ProxyRuntime:                        ProxyRuntime{Enabled: true, EgressMode: "direct", ResetSessionStatusCodes: []int{403}, Clearance: ClearanceRuntime{Enabled: false, Mode: "none", Browser: "chrome", FlareSolverrURL: "http://flaresolverr:8191", TimeoutSec: 60, RefreshInterval: 3600}},
 		Models:                              []string{"gpt-image-2"},
 	}
 }

@@ -3,6 +3,7 @@ package openaiweb
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -58,15 +59,15 @@ func (r *ReloadableClient) snapshot() *Client {
 
 func (r *ReloadableClient) newClient(cfg config.Config) *Client {
 	opts := append([]ClientOption(nil), r.opts...)
-	if flaresolverrEnabled(cfg.ProxyRuntime) {
+	if flaresolverrConfigured(cfg.ProxyRuntime) {
 		opts = append(opts, withBootstrapClearanceRefresh(r.refreshBootstrapClearance))
 	}
 	return NewClient(cfg, opts...)
 }
 
-func flaresolverrEnabled(runtime config.ProxyRuntime) bool {
+func flaresolverrConfigured(runtime config.ProxyRuntime) bool {
 	clearance := runtime.Clearance
-	return runtime.Enabled && clearance.Enabled && clearance.Mode == "flaresolverr" && clearance.FlareSolverrURL != ""
+	return runtime.Enabled && strings.TrimSpace(clearance.FlareSolverrURL) != ""
 }
 
 // refreshBootstrapClearance coalesces a burst of HTTP 403 bootstrap failures
@@ -93,23 +94,25 @@ func (r *ReloadableClient) refreshBootstrapClearance(ctx context.Context) (*Clie
 	r.mu.RLock()
 	cfg := r.cfg
 	r.mu.RUnlock()
-	if !flaresolverrEnabled(cfg.ProxyRuntime) {
+	if !flaresolverrConfigured(cfg.ProxyRuntime) {
 		r.clearanceMu.Unlock()
-		return nil, fmt.Errorf("flaresolverr clearance is not enabled")
+		return nil, fmt.Errorf("flaresolverr is not configured")
 	}
 	flight := &clearanceRefreshFlight{done: make(chan struct{})}
 	r.clearanceFlight = flight
 	r.lastClearanceAttempt = time.Now()
 	r.clearanceMu.Unlock()
 
-	solution, err := proxyservice.SolveFlareSolverr(ctx, cfg.ProxyRuntime, cfg.ChatGPTBaseURL)
+	solution, err := proxyservice.SolveFlareSolverrForChallenge(ctx, cfg.ProxyRuntime, cfg.ChatGPTBaseURL)
 	var refreshed *Client
 	if err == nil {
 		r.mu.Lock()
 		current := r.cfg
-		if !flaresolverrEnabled(current.ProxyRuntime) || current.ProxyRuntime.Clearance.FlareSolverrURL != cfg.ProxyRuntime.Clearance.FlareSolverrURL || current.ChatGPTBaseURL != cfg.ChatGPTBaseURL {
+		if !flaresolverrConfigured(current.ProxyRuntime) || current.ProxyRuntime.Clearance.FlareSolverrURL != cfg.ProxyRuntime.Clearance.FlareSolverrURL || current.ChatGPTBaseURL != cfg.ChatGPTBaseURL {
 			err = fmt.Errorf("proxy clearance settings changed while refreshing")
 		} else {
+			current.ProxyRuntime.Clearance.Enabled = true
+			current.ProxyRuntime.Clearance.Mode = "flaresolverr"
 			current.ProxyRuntime.Clearance.CFCookies = solution.Cookies
 			current.ProxyRuntime.Clearance.CFClearance = solution.Clearance
 			if solution.UserAgent != "" {

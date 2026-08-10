@@ -35,6 +35,9 @@ func TestDefaultNormalize(t *testing.T) {
 	if !Default().Normalize().ImageAccountDynamicSlots {
 		t.Fatal("image account dynamic slots should default to enabled")
 	}
+	if cfg.ProxyRuntime.Clearance.FlareSolverrURL != "http://flaresolverr:8191" {
+		t.Fatalf("flaresolverr url=%q", cfg.ProxyRuntime.Clearance.FlareSolverrURL)
+	}
 	if cfg.ImageGlobalMaxInflight != 120 || cfg.ImagePrepareParallel != 20 || cfg.ImageSubmitParallel != 20 || cfg.ImagePollParallel != 80 || cfg.ImageDownloadParallel != 20 || cfg.ImageUploadParallel != 12 {
 		t.Fatalf("image concurrency=%d/%d/%d/%d/%d/%d", cfg.ImageGlobalMaxInflight, cfg.ImagePrepareParallel, cfg.ImageSubmitParallel, cfg.ImagePollParallel, cfg.ImageDownloadParallel, cfg.ImageUploadParallel)
 	}

@@ -21,9 +21,21 @@ type ClearanceSolution struct {
 
 // SolveFlareSolverr requests a fresh ChatGPT clearance bundle from the configured solver.
 func SolveFlareSolverr(ctx context.Context, runtime config.ProxyRuntime, targetURL string) (ClearanceSolution, error) {
+	return solveFlareSolverr(ctx, runtime, targetURL, false)
+}
+
+// SolveFlareSolverrForChallenge requests a clearance bundle after a detected
+// Cloudflare challenge. It intentionally works even when the persistent
+// clearance toggle is off; the caller decides when an automatic refresh is
+// appropriate.
+func SolveFlareSolverrForChallenge(ctx context.Context, runtime config.ProxyRuntime, targetURL string) (ClearanceSolution, error) {
+	return solveFlareSolverr(ctx, runtime, targetURL, true)
+}
+
+func solveFlareSolverr(ctx context.Context, runtime config.ProxyRuntime, targetURL string, automatic bool) (ClearanceSolution, error) {
 	clearance := runtime.Clearance
 	endpoint := strings.TrimRight(strings.TrimSpace(clearance.FlareSolverrURL), "/")
-	if !runtime.Enabled || !clearance.Enabled || clearance.Mode != "flaresolverr" || endpoint == "" {
+	if !runtime.Enabled || endpoint == "" || (!automatic && (!clearance.Enabled || clearance.Mode != "flaresolverr")) {
 		return ClearanceSolution{}, fmt.Errorf("flaresolverr clearance is not enabled")
 	}
 	targetURL = strings.TrimSpace(targetURL)
