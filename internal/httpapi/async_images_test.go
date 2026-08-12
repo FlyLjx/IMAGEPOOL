@@ -105,7 +105,6 @@ func TestParseMultipartAsyncImageOptions(t *testing.T) {
 	writer := multipart.NewWriter(&body)
 	_ = writer.WriteField("async", "true")
 	_ = writer.WriteField("callback_url", "https://example.com/hook")
-	_ = writer.WriteField("hd_repair", "true")
 	_ = writer.Close()
 	request := httptest.NewRequest(http.MethodPost, "/v1/images/edits", &body)
 	request.Header.Set("Content-Type", writer.FormDataContentType())
@@ -113,7 +112,7 @@ func TestParseMultipartAsyncImageOptions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !req.Async || !req.HDRepair || req.CallbackURL != "https://example.com/hook" {
+	if !req.Async || req.CallbackURL != "https://example.com/hook" {
 		t.Fatalf("request=%#v", req)
 	}
 }

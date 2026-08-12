@@ -164,9 +164,6 @@ func TestModelsExposeBaseImageModel(t *testing.T) {
 		Data []struct {
 			ID string `json:"id"`
 		} `json:"data"`
-		Features struct {
-			Restoration bool `json:"image_restoration"`
-		} `json:"features"`
 	}
 	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
 		t.Fatal(err)
@@ -1453,7 +1450,7 @@ func TestSettingsRejectsEmptyAdminKeys(t *testing.T) {
 	}
 }
 
-func TestDashboardIncludesCallRuntime(t *testing.T) {
+func TestDashboardIncludesTodayCallSummary(t *testing.T) {
 	srv := httptest.NewServer(testServer(t))
 	defer srv.Close()
 	request, _ := http.NewRequest(http.MethodPost, srv.URL+"/v1/images/generations", strings.NewReader(`{"prompt":"draw","model":"gpt-image-2"}`))
@@ -1476,14 +1473,12 @@ func TestDashboardIncludesCallRuntime(t *testing.T) {
 	var payload map[string]any
 	_ = json.NewDecoder(response.Body).Decode(&payload)
 	calls, _ := payload["calls"].(map[string]any)
-	runtime, _ := calls["runtime"].(map[string]any)
-	series, _ := runtime["series"].([]any)
 	storagePayload, _ := payload["storage"].(map[string]any)
 	health, _ := storagePayload["health"].(map[string]any)
 	backend, _ := storagePayload["backend"].(map[string]any)
 	system, _ := payload["system"].(map[string]any)
 	cpu, _ := system["cpu"].(map[string]any)
-	if response.StatusCode != http.StatusOK || len(series) != 60 || health["status"] != "healthy" || backend["type"] != "local" || backend["description"] != "本地文件存储" || cpu["cores"] == nil {
+	if response.StatusCode != http.StatusOK || calls["date"] == nil || health["status"] != "healthy" || backend["type"] != "local" || backend["description"] != "本地文件存储" || cpu["cores"] == nil {
 		t.Fatalf("status=%d payload=%#v", response.StatusCode, payload)
 	}
 }
@@ -1835,50 +1830,6 @@ func TestAutoRegistrationTargetFollowsTaskPressure(t *testing.T) {
 	cfg.ImagePoolMaxRegisterPerCycle = 2
 	if got := autoRegistrationBatchSize(cfg, 20, 1); got != 2 {
 		t.Fatalf("batch cap=%d, want 2", got)
-	}
-}
-
-func TestDashboardSupportsRuntimeWindow(t *testing.T) {
-	srv := httptest.NewServer(testServer(t))
-	defer srv.Close()
-	request, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/dashboard?runtime_window_minutes=10080", nil)
-	request.Header.Set("Authorization", "Bearer k")
-	response, err := http.DefaultClient.Do(request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer response.Body.Close()
-	var payload map[string]any
-	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
-		t.Fatal(err)
-	}
-	calls, _ := payload["calls"].(map[string]any)
-	runtime, _ := calls["runtime"].(map[string]any)
-	series, _ := runtime["series"].([]any)
-	if response.StatusCode != http.StatusOK || runtime["window_minutes"] != float64(10080) || runtime["bucket_minutes"] != float64(1440) || len(series) != 7 {
-		t.Fatalf("status=%d runtime=%#v", response.StatusCode, runtime)
-	}
-}
-
-func TestDashboardSupportsCustomRuntimeRange(t *testing.T) {
-	srv := httptest.NewServer(testServer(t))
-	defer srv.Close()
-	request, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/dashboard?runtime_start=2026-07-01T00%3A00%3A00Z&runtime_end=2026-07-16T00%3A00%3A00Z", nil)
-	request.Header.Set("Authorization", "Bearer k")
-	response, err := http.DefaultClient.Do(request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer response.Body.Close()
-	var payload map[string]any
-	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
-		t.Fatal(err)
-	}
-	calls, _ := payload["calls"].(map[string]any)
-	runtime, _ := calls["runtime"].(map[string]any)
-	series, _ := runtime["series"].([]any)
-	if response.StatusCode != http.StatusOK || runtime["window_minutes"] != float64(21600) || runtime["bucket_minutes"] != float64(1440) || len(series) != 15 {
-		t.Fatalf("status=%d runtime=%#v", response.StatusCode, runtime)
 	}
 }
 

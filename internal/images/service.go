@@ -27,7 +27,6 @@ import (
 	"imagepool/internal/config"
 	"imagepool/internal/limiters"
 	"imagepool/internal/openaiweb"
-	"imagepool/internal/postprocess"
 	"imagepool/internal/storage"
 )
 
@@ -43,7 +42,6 @@ type Service struct {
 	store   *accounts.Store
 	backend openaiweb.Backend
 	storage *storage.Service
-	post    *postprocess.Service
 	global  *limiters.Gate
 	stalled atomic.Uint64
 }
@@ -127,13 +125,6 @@ func (s *Service) UpdateConfig(cfg config.Config) {
 	s.cfgMu.Lock()
 	s.cfg = next
 	s.cfgMu.Unlock()
-}
-
-func (s *Service) SetPostprocessor(service *postprocess.Service) {
-	if s == nil {
-		return
-	}
-	s.post = service
 }
 
 func (s *Service) currentConfig() config.Config {
@@ -415,9 +406,6 @@ func (s *Service) taskContext(parent context.Context, req Request) (context.Cont
 	}
 	cfg := s.currentConfig()
 	timeout := time.Duration(cfg.ImageTaskTimeoutSecs * float64(time.Second))
-	if cfg.ImageRestorationEnabled && req.HDRepair {
-		timeout += time.Duration(cfg.ImagePostprocessTimeoutSecs * float64(time.Second))
-	}
 	if timeout <= 0 {
 		return context.WithCancel(parent)
 	}
@@ -903,7 +891,7 @@ func (s *Service) recordImageFailure(token string, err error) {
 	// Request/content results do not describe account health. In particular,
 	// an upstream request for a missing reference image must not increase the
 	// account's abnormal counter when the caller uses a pinned account path.
-	if errors.Is(err, openaiweb.ErrContentPolicy) || openaiweb.IsImageReferenceRequired(err) || errors.Is(err, openaiweb.ErrImageAssistantText) {
+	if errors.Is(err, openaiweb.ErrContentPolicy) || openaiweb.IsImageReferenceRequired(err) || (errors.Is(err, openaiweb.ErrImageAssistantText) && !openaiweb.IsSkippedMainlineImageError(err)) {
 		return
 	}
 	// A full Turnstile VM pool is process-wide congestion rather than a
@@ -1067,7 +1055,6 @@ func (s *Service) resultAsBase64(ctx context.Context, account accounts.Account, 
 	out.URLs = nil
 	out.B64JSON = make([]string, 0, len(dataItems))
 	for _, data := range dataItems {
-		data = s.postprocessImage(ctx, data, req)
 		if outputFormat != "" {
 			var err error
 			data, err = convertImageDataFormat(data, outputFormat)
@@ -1124,7 +1111,6 @@ func (s *Service) cacheResult(ctx context.Context, account accounts.Account, res
 			log.Printf("image cache decode b64_json failed: %v", err)
 			continue
 		}
-		data = s.postprocessImage(ctx, data, req)
 		if outputFormat != "" {
 			data, err = convertImageDataFormat(data, outputFormat)
 			if err != nil {
@@ -1158,7 +1144,6 @@ func (s *Service) cacheResult(ctx context.Context, account accounts.Account, res
 			urls = append(urls, remoteURL)
 			continue
 		}
-		data = s.postprocessImage(ctx, data, req)
 		if outputFormat != "" {
 			data, err = convertImageDataFormat(data, outputFormat)
 			if err != nil {
@@ -1178,28 +1163,6 @@ func (s *Service) cacheResult(ctx context.Context, account accounts.Account, res
 	result.URLs = urls
 	result.B64JSON = nil
 	return result, nil
-}
-
-func (s *Service) postprocessImage(ctx context.Context, data []byte, req Request) []byte {
-	if s == nil || s.post == nil || len(data) == 0 {
-		return data
-	}
-	result := s.post.Process(ctx, data, postprocess.Options{
-		ParentTaskID:  req.TaskID,
-		OwnerID:       req.OwnerID,
-		Model:         req.PublicModel,
-		RequestedSize: req.Size,
-		HDRepair:      req.HDRepair,
-		Progress: func(stage, message string, details map[string]any) {
-			if req.Progress != nil {
-				req.Progress(openaiweb.ProgressEvent{Progress: stage, Message: message, Details: details})
-			}
-		},
-	})
-	if result.Error != "" {
-		log.Printf("image postprocess fallback: %s", result.Error)
-	}
-	return result.Data
 }
 
 func imageURL(baseURL, rel string) string {

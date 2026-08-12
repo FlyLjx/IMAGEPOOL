@@ -157,9 +157,6 @@ export type AccountListResponse = {
 type ModelListResponse = {
   object: string;
   data: Model[];
-  features?: {
-    image_restoration?: boolean;
-  };
 };
 
 export type AccountMutationResponse = {
@@ -252,8 +249,6 @@ export type SettingsConfig = {
   image_parallel_generation?: boolean;
   image_settle_enabled?: boolean;
   image_check_before_hit_enabled?: boolean;
-	image_restoration_enabled?: boolean;
-	image_postprocess_timeout_secs?: number | string;
   image_settle_secs?: number | string;
   image_timeout_retry_secs?: number | string;
   auto_remove_invalid_accounts?: boolean;
@@ -610,51 +605,7 @@ export type DashboardSummary = {
     users: number;
     enabled_users: number;
   };
-  calls: {
-    date: string;
-    total: number;
-    by_status: Record<string, number>;
-    by_endpoint: Record<string, number>;
-    by_model: Record<string, number>;
-    runtime?: {
-      window_minutes: number;
-      bucket_minutes: number;
-      start_time: string;
-      end_time: string;
-      total: number;
-      success_rate: number;
-      error_rate: number;
-      totals: {
-        success: number;
-        failed: number;
-        canceled?: number;
-        rejected?: number;
-        running: number;
-        other: number;
-      };
-      series: Array<{
-        time: string;
-        label: string;
-        total?: number;
-        success: number;
-        failed: number;
-      }>;
-      status_pie: Array<{
-        label: string;
-        value: number;
-        status: "success" | "failed" | "running" | "other" | string;
-      }>;
-      error_reasons: Array<{
-        code?: string;
-        label: string;
-        category?: string;
-        category_label?: string;
-        value: number;
-      }>;
-    };
-    today?: DashboardTodayCalls;
-    recent_failed: DashboardRecentFailedCall[];
-  };
+  calls: DashboardTodayCalls;
   tasks: {
     total: number;
     memory_total?: number;
@@ -703,20 +654,6 @@ export type SchedulerDiagnostics = {
     accepting: boolean;
   };
   gpt: SchedulerPoolStats;
-  postprocess: {
-    enabled: boolean;
-    restoration_enabled: boolean;
-    queue_depth: number;
-    queue_capacity: number;
-    active_workers: number;
-    worker_limit: number;
-    worker_running: boolean;
-    processed: number;
-    failed: number;
-    restored: number;
-    skipped: number;
-    last_error?: string;
-  };
   callbacks: {
     delivered: number;
     failed: number;
@@ -899,15 +836,8 @@ export async function fetchModels() {
   return httpRequest<ModelListResponse>("/v1/models");
 }
 
-export async function fetchDashboard(runtimeWindowMinutes = 7 * 24 * 60, range?: { start: string; end: string } | null) {
-  const params = new URLSearchParams();
-  if (range) {
-    params.set("runtime_start", range.start);
-    params.set("runtime_end", range.end);
-  } else {
-    params.set("runtime_window_minutes", String(runtimeWindowMinutes));
-  }
-  return httpRequest<DashboardSummary>(`/api/dashboard?${params.toString()}`);
+export async function fetchDashboard() {
+  return httpRequest<DashboardSummary>("/api/dashboard");
 }
 
 export async function fetchSystemLoad() {
@@ -1071,7 +1001,7 @@ export async function editImage(files: File | File[], prompt: string, model?: Im
   );
 }
 
-export async function createImageGenerationTask(clientTaskId: string, prompt: string, model?: ImageModel, size?: string, quality = "auto", outputFormat?: string, responseFormat = "b64_json", hdRepair = false) {
+export async function createImageGenerationTask(clientTaskId: string, prompt: string, model?: ImageModel, size?: string, quality = "auto", outputFormat?: string, responseFormat = "b64_json") {
   return httpRequest<ImageTask>("/api/image-tasks/generations", {
     method: "POST",
     body: {
@@ -1082,7 +1012,6 @@ export async function createImageGenerationTask(clientTaskId: string, prompt: st
       quality,
       ...(responseFormat ? { response_format: responseFormat } : {}),
       ...(outputFormat ? { output_format: outputFormat } : {}),
-		hd_repair: hdRepair,
     },
   });
 }
@@ -1095,8 +1024,7 @@ export async function createImageEditTask(
   size?: string,
   quality = "auto",
   outputFormat?: string,
-  responseFormat = "b64_json",
-	hdRepair = false,
+	responseFormat = "b64_json",
 ) {
   const formData = new FormData();
   const uploadFiles = Array.isArray(files) ? files : [files];
@@ -1119,7 +1047,6 @@ export async function createImageEditTask(
   if (outputFormat) {
     formData.append("output_format", outputFormat);
   }
-	formData.append("hd_repair", String(hdRepair));
 
   return httpRequest<ImageTask>("/api/image-tasks/edits", {
     method: "POST",

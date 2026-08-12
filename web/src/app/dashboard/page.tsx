@@ -1,12 +1,11 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Alert, Button, Card, DatePicker, Empty, Progress, Segmented, Skeleton, Tag, Typography } from "antd";
+import { Alert, Button, Card, Empty, Progress, Skeleton, Tag, Typography } from "antd";
 import {
   Activity,
   AlertCircle,
   Boxes,
-  CalendarDays,
   Cpu,
   HardDrive,
   LoaderCircle,
@@ -15,7 +14,6 @@ import {
   RefreshCw,
   UsersRound,
   Webhook,
-  WandSparkles,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -111,26 +109,6 @@ function newerSystemLoad(current: SystemLoad | null, next: SystemLoad) {
   return next;
 }
 
-const RUNTIME_WINDOW_OPTIONS = [
-  { value: 7 * 24 * 60, label: "7天" },
-  { value: 15 * 24 * 60, label: "15天" },
-  { value: 30 * 24 * 60, label: "30天" },
-  { value: "custom" as const, label: <span className="inline-flex items-center gap-1"><CalendarDays className="size-3" />自定义</span> },
-];
-
-function runtimeWindowText(minutes: number) {
-  if (minutes === 60) {
-    return "60 分钟";
-  }
-  if (minutes > 0 && minutes % (24 * 60) === 0) {
-    return `${minutes / (24 * 60)} 天`;
-  }
-  if (minutes > 0 && minutes % 60 === 0) {
-    return `${minutes / 60} 小时`;
-  }
-  return `${minutes} 分钟`;
-}
-
 type OperationsSummary = {
   accounts: {
     active: number;
@@ -152,7 +130,6 @@ function OperationsOverview({ scheduler, system, summary }: { scheduler: Schedul
   const activeTasks = scheduler.tasks.active_tasks ?? queuedTasks + runningTasks;
   const queuePercent = percent(queuedTasks, scheduler.tasks.queue_capacity);
   const workerPercent = percent(runningTasks, scheduler.tasks.worker_limit);
-  const postprocessPercent = percent(scheduler.postprocess.queue_depth, scheduler.postprocess.queue_capacity);
   const cpuPercent = loadPercent(system.cpu.usage_percent);
   const memoryPercent = loadPercent(system.memory.usage_percent);
   const diskPercent = loadPercent(system.disk.usage_percent);
@@ -186,16 +163,6 @@ function OperationsOverview({ scheduler, system, summary }: { scheduler: Schedul
       detail: `排队 ${queuedTasks} · 处理 ${runningTasks} · 通道 ${scheduler.tasks.queue_depth}/${scheduler.tasks.queue_capacity}`,
       progress: Math.max(queuePercent, workerPercent),
       color: "#0ea5e9",
-    },
-    {
-      key: "postprocess",
-      title: "高清队列",
-      icon: WandSparkles,
-      iconClass: "bg-violet-50 text-violet-600",
-      value: scheduler.postprocess.enabled ? `${scheduler.postprocess.queue_depth}/${scheduler.postprocess.queue_capacity}` : "关闭",
-      detail: `已处理 ${scheduler.postprocess.processed}，失败 ${scheduler.postprocess.failed}`,
-      progress: postprocessPercent,
-      color: "#8b5cf6",
     },
     {
       key: "callbacks",
@@ -476,296 +443,6 @@ function EntryBars({ items, emptyText = "暂无数据" }: { items: Array<[string
   );
 }
 
-type RuntimeHealthData = NonNullable<DashboardSummary["calls"]["runtime"]>;
-type RuntimeRange = { start: string; end: string };
-
-function clamp(value: number, min: number, max: number) {
-  return Math.min(max, Math.max(min, value));
-}
-
-function smoothRuntimeValues(values: number[]) {
-  if (values.length < 3) {
-    return values;
-  }
-  const radius = values.length <= 15 ? 1 : 2;
-  return values.map((_, index) => {
-    let weightedTotal = 0;
-    let weightTotal = 0;
-    for (let offset = -radius; offset <= radius; offset += 1) {
-      const sourceIndex = index + offset;
-      if (sourceIndex < 0 || sourceIndex >= values.length) {
-        continue;
-      }
-      const weight = radius + 1 - Math.abs(offset);
-      weightedTotal += values[sourceIndex] * weight;
-      weightTotal += weight;
-    }
-    return weightTotal > 0 ? weightedTotal / weightTotal : values[index];
-  });
-}
-
-function smoothLinePath(points: Array<{ x: number; y: number }>, minY: number, maxY: number) {
-  if (points.length === 0) return "";
-  if (points.length === 1) return `M ${points[0].x} ${points[0].y}`;
-  let path = `M ${points[0].x} ${points[0].y}`;
-  for (let index = 0; index < points.length - 1; index += 1) {
-    const previous = points[Math.max(0, index - 1)];
-    const current = points[index];
-    const next = points[index + 1];
-    const afterNext = points[Math.min(points.length - 1, index + 2)];
-    const cp1x = current.x + (next.x - previous.x) / 6;
-    const cp1y = clamp(current.y + (next.y - previous.y) / 6, minY, maxY);
-    const cp2x = next.x - (afterNext.x - current.x) / 6;
-    const cp2y = clamp(next.y - (afterNext.y - current.y) / 6, minY, maxY);
-    path += ` C ${cp1x} ${cp1y}, ${cp2x} ${cp2y}, ${next.x} ${next.y}`;
-  }
-  return path;
-}
-
-function RuntimeTrendChart({ runtime }: { runtime: RuntimeHealthData }) {
-  const points = runtime.series || [];
-  const windowMinutes = runtime.window_minutes;
-  const total = points.reduce((sum, item) => sum + Number(item.total ?? (Number(item.success || 0) + Number(item.failed || 0))), 0);
-  const totalSuccess = points.reduce((sum, item) => sum + Number(item.success || 0), 0);
-  const totalFailed = points.reduce((sum, item) => sum + Number(item.failed || 0), 0);
-  const chartContainerRef = useRef<HTMLDivElement>(null);
-  const [chartContainerWidth, setChartContainerWidth] = useState(720);
-  const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
-  const height = 240;
-  const width = Math.max(360, chartContainerWidth);
-  const paddingX = 48;
-  const paddingTop = 18;
-  const paddingBottom = 52;
-  const plotWidth = width - paddingX * 2;
-  const plotHeight = height - paddingTop - paddingBottom;
-  const smoothedTotal = smoothRuntimeValues(points.map((item) => Number(item.total ?? (Number(item.success || 0) + Number(item.failed || 0)))));
-  const smoothedSuccess = smoothRuntimeValues(points.map((item) => Number(item.success || 0)));
-  const smoothedFailed = smoothRuntimeValues(points.map((item) => Number(item.failed || 0)));
-  const peakValue = Math.max(1, Math.ceil(Math.max(...smoothedTotal, ...smoothedSuccess, ...smoothedFailed)));
-  const tickStep = Math.max(1, Math.ceil(peakValue / 4));
-  const maxValue = tickStep * 4;
-  const yTicks = Array.from({ length: 5 }, (_, index) => maxValue - index * tickStep);
-  const bottomY = paddingTop + plotHeight;
-  const xFor = (index: number) => paddingX + (points.length <= 1 ? plotWidth / 2 : (index / (points.length - 1)) * plotWidth);
-  const yFor = (value: number) => paddingTop + (1 - value / maxValue) * plotHeight;
-  const maxLabelCount = Math.max(3, Math.min(7, Math.floor(plotWidth / 64)));
-  const labelStep = Math.max(1, Math.ceil(Math.max(0, points.length - 1) / Math.max(1, maxLabelCount - 1)));
-  const labelIndexes = points.map((_, index) => index).filter((index) => index % labelStep === 0 || index === points.length - 1);
-  const chartPoints = points.map((item, index) => {
-    const pointTotal = Number(item.total ?? (Number(item.success || 0) + Number(item.failed || 0)));
-    const success = Number(item.success || 0);
-    const failed = Number(item.failed || 0);
-    return {
-      item,
-      index,
-      x: xFor(index),
-      total: pointTotal,
-      success,
-      failed,
-      totalY: yFor(smoothedTotal[index]),
-      successY: yFor(smoothedSuccess[index]),
-      failedY: yFor(smoothedFailed[index]),
-    };
-  });
-  const totalLinePoints = chartPoints.map((item) => ({ x: item.x, y: item.totalY }));
-  const successLinePoints = chartPoints.map((item) => ({ x: item.x, y: item.successY }));
-  const failedLinePoints = chartPoints.map((item) => ({ x: item.x, y: item.failedY }));
-  const totalPath = smoothLinePath(totalLinePoints, paddingTop, bottomY);
-  const successPath = smoothLinePath(successLinePoints, paddingTop, bottomY);
-  const failedPath = smoothLinePath(failedLinePoints, paddingTop, bottomY);
-  const hoveredPoint = hoveredIndex === null ? null : chartPoints[hoveredIndex];
-  const tooltipWidth = 166;
-  const tooltipHeight = 78;
-  const tooltipX = hoveredPoint ? clamp(hoveredPoint.x - tooltipWidth / 2, paddingX + 6, width - paddingX - tooltipWidth - 6) : 0;
-  const tooltipY = hoveredPoint
-    ? clamp(Math.min(hoveredPoint.totalY, hoveredPoint.successY, hoveredPoint.failedY) - tooltipHeight - 12, paddingTop + 6, bottomY - tooltipHeight - 8)
-    : 0;
-
-  useEffect(() => {
-    const element = chartContainerRef.current;
-    if (!element) return;
-
-    const updateWidth = () => {
-      const nextWidth = Math.round(element.getBoundingClientRect().width);
-      if (nextWidth > 0) {
-        setChartContainerWidth((currentWidth) => currentWidth === nextWidth ? currentWidth : nextWidth);
-      }
-    };
-
-    updateWidth();
-    const observer = new ResizeObserver(updateWidth);
-    observer.observe(element);
-    return () => observer.disconnect();
-  }, [total]);
-
-  if (!points.length || total <= 0) {
-    return (
-      <div className="flex min-h-[278px] items-center justify-center bg-slate-50/60">
-        <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={`最近 ${runtimeWindowText(windowMinutes)} 暂无调用`} />
-      </div>
-    );
-  }
-
-  return (
-    <div className="min-h-[278px] bg-white">
-      <div className="flex min-h-12 flex-wrap items-center gap-x-6 gap-y-2 border-b border-slate-100 bg-slate-50/40 px-5 py-2.5 text-xs">
-        <span className="inline-flex items-center gap-2 text-slate-500">
-          <i className="h-4 w-1 rounded-full bg-blue-500" />
-          调用量
-          <strong className="font-mono text-sm font-semibold text-slate-900 tabular-nums">{numberText(total)}</strong>
-        </span>
-        <span className="inline-flex items-center gap-2 text-slate-500">
-          <i className="h-4 w-1 rounded-full bg-green-500" />
-          成功
-          <strong className="font-mono text-sm font-semibold text-green-600 tabular-nums">{numberText(totalSuccess)}</strong>
-        </span>
-        <span className="inline-flex items-center gap-2 text-slate-500">
-          <i className="h-4 w-1 rounded-full bg-rose-500" />
-          失败
-          <strong className="font-mono text-sm font-semibold text-rose-600 tabular-nums">{numberText(totalFailed)}</strong>
-        </span>
-        <span
-          className="inline-flex items-center gap-2 rounded-md bg-rose-50 px-2.5 py-1 text-rose-600"
-          title={runtime.error_reasons[0]?.label || "暂无错误原因"}
-        >
-          <AlertCircle className="size-3.5" />
-          错误率
-          <strong className="font-mono text-sm font-semibold tabular-nums">{rateText(runtime.error_rate)}%</strong>
-        </span>
-      </div>
-      <div
-        ref={chartContainerRef}
-        className="w-full px-2 pb-2 pt-1 sm:px-4"
-        onMouseLeave={() => setHoveredIndex(null)}
-        onMouseMove={(event) => {
-          const bounds = event.currentTarget.getBoundingClientRect();
-          const svgX = ((event.clientX - bounds.left) / bounds.width) * width;
-          const ratio = clamp((svgX - paddingX) / plotWidth, 0, 1);
-          setHoveredIndex(Math.round(ratio * Math.max(0, points.length - 1)));
-        }}
-      >
-        <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label="调用量、成功和失败趋势图" className="h-[238px] w-full overflow-visible">
-        <defs>
-          <filter id="runtime-line-soft-shadow" x="-20%" y="-20%" width="140%" height="150%">
-            <feDropShadow dx="0" dy="5" stdDeviation="4" floodColor="#0f172a" floodOpacity="0.08" />
-          </filter>
-        </defs>
-        <rect x={paddingX} y={paddingTop} width={plotWidth} height={plotHeight} rx="12" fill="#f8fafc" />
-        {yTicks.map((value, index) => {
-          const ratio = index / (yTicks.length - 1);
-          const y = paddingTop + ratio * plotHeight;
-          return (
-            <g key={value}>
-              <line x1={paddingX} x2={width - paddingX} y1={y} y2={y} stroke="#e2e8f0" strokeDasharray={ratio === 1 ? "0" : "4 8"} />
-              <text x={paddingX - 10} y={y + 4} textAnchor="end" fill="#64748b" fontSize="11" fontWeight="600">{numberText(value)}</text>
-            </g>
-          );
-        })}
-        <path d={totalPath} fill="none" stroke="#3b82f6" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" filter="url(#runtime-line-soft-shadow)" />
-        <path d={successPath} fill="none" stroke="#22c55e" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
-        <path d={failedPath} fill="none" stroke="#f43f5e" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" strokeDasharray="6 5" />
-        {hoveredPoint ? (
-          <g pointerEvents="none">
-            <line x1={hoveredPoint.x} x2={hoveredPoint.x} y1={paddingTop} y2={bottomY} stroke="#94a3b8" strokeDasharray="3 5" />
-            <circle cx={hoveredPoint.x} cy={hoveredPoint.totalY} r="4" fill="#ffffff" stroke="#3b82f6" strokeWidth="2.5" />
-            <circle cx={hoveredPoint.x} cy={hoveredPoint.successY} r="4" fill="#ffffff" stroke="#22c55e" strokeWidth="2.5" />
-            <circle cx={hoveredPoint.x} cy={hoveredPoint.failedY} r="4" fill="#ffffff" stroke="#f43f5e" strokeWidth="2.5" />
-            <rect x={tooltipX} y={tooltipY} width={tooltipWidth} height={tooltipHeight} rx="6" fill="#ffffff" stroke="#cbd5e1" />
-            <text x={tooltipX + 10} y={tooltipY + 16} fill="#475569" fontSize="11" fontWeight="600">{hoveredPoint.item.label || "当前时段"}</text>
-            <text x={tooltipX + 10} y={tooltipY + 35} fill="#3b82f6" fontSize="11">调用量 {numberText(hoveredPoint.total)}</text>
-            <text x={tooltipX + 10} y={tooltipY + 53} fill="#22c55e" fontSize="11">成功 {numberText(hoveredPoint.success)}</text>
-            <text x={tooltipX + 88} y={tooltipY + 53} fill="#f43f5e" fontSize="11">失败 {numberText(hoveredPoint.failed)}</text>
-          </g>
-        ) : null}
-        {labelIndexes.map((index) => (
-          <text key={index} x={xFor(index)} y={height - 16} textAnchor={index === 0 ? "start" : index === points.length - 1 ? "end" : "middle"} className="fill-slate-400 text-[11px]">
-            {points[index]?.label || ""}
-          </text>
-        ))}
-        </svg>
-      </div>
-    </div>
-  );
-}
-
-function RuntimeHealth({
-  runtime,
-  selectedWindow,
-  isUpdating,
-  onWindowChange,
-  onCustomRangeChange,
-}: {
-  runtime: RuntimeHealthData;
-  selectedWindow: number | "custom";
-  isUpdating: boolean;
-  onWindowChange: (value: number | "custom") => void;
-  onCustomRangeChange: (range: RuntimeRange) => void;
-}) {
-  const [pendingCustomRange, setPendingCustomRange] = useState<RuntimeRange | null>(null);
-  const firstPointTime = runtime.series[0]?.time || runtime.start_time;
-  const lastPointTime = runtime.series[runtime.series.length - 1]?.time || runtime.end_time;
-
-  return (
-    <section className="space-y-4">
-      <Card
-        className="h-full [&_.ant-card-head-wrapper]:gap-3 max-sm:[&_.ant-card-extra]:ml-0 max-sm:[&_.ant-card-extra]:w-full max-sm:[&_.ant-card-head-title]:w-full max-sm:[&_.ant-card-head-title]:flex-none max-sm:[&_.ant-card-head-title]:text-left max-sm:[&_.ant-card-head-wrapper]:flex-col max-sm:[&_.ant-card-head-wrapper]:items-stretch"
-        styles={{ header: { paddingTop: 12, paddingBottom: 12 }, body: { padding: 0 } }}
-        title={
-          <div>
-            <div className="flex items-center gap-2">
-              <span className="flex size-8 items-center justify-center rounded-md bg-blue-50 text-blue-600"><Activity className="size-4" /></span>
-              <span>调用趋势</span>
-            </div>
-            <div className="mt-1 font-mono text-xs font-normal text-slate-400">
-              {formatShanghaiDateTime(firstPointTime).slice(0, 10)} 至 {formatShanghaiDateTime(lastPointTime).slice(0, 10)}
-            </div>
-          </div>
-        }
-        extra={
-          <div className="flex flex-wrap items-center justify-start gap-2 sm:justify-end">
-            <Segmented
-              aria-label="调用趋势统计范围"
-              disabled={isUpdating}
-              options={RUNTIME_WINDOW_OPTIONS}
-              size="small"
-              value={selectedWindow}
-              onChange={(value) => onWindowChange(value === "custom" ? "custom" : Number(value))}
-            />
-            {selectedWindow === "custom" ? (
-              <DatePicker.RangePicker
-                aria-label="自定义调用趋势日期"
-                allowClear={false}
-                className="w-full sm:w-auto"
-                disabled={isUpdating}
-                format="YYYY-MM-DD"
-                size="small"
-                onCalendarChange={(dates) => {
-                  if (!dates?.[0] || !dates[1]) return;
-                  setPendingCustomRange({ start: dates[0].startOf("day").toISOString(), end: dates[1].endOf("day").toISOString() });
-                }}
-                onChange={(dates) => {
-                  if (!dates?.[0] || !dates[1]) {
-                    setPendingCustomRange(null);
-                    return;
-                  }
-                  setPendingCustomRange({ start: dates[0].startOf("day").toISOString(), end: dates[1].endOf("day").toISOString() });
-                }}
-              />
-            ) : null}
-            {selectedWindow === "custom" ? (
-              <Button size="small" type="primary" disabled={!pendingCustomRange || isUpdating} onClick={() => pendingCustomRange && onCustomRangeChange(pendingCustomRange)}>
-                查询
-              </Button>
-            ) : null}
-          </div>
-        }
-      >
-        <RuntimeTrendChart runtime={runtime} />
-      </Card>
-    </section>
-  );
-}
-
 function RecentFailures({ items }: { items: DashboardSummary["calls"]["recent_failed"] }) {
   if (!items.length) {
     return (
@@ -834,17 +511,15 @@ function DashboardContent() {
   const [capacity, setCapacity] = useState<ImagePoolCapacity | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
-  const [runtimeWindow, setRuntimeWindow] = useState<number | "custom">(7 * 24 * 60);
-  const [customRuntimeRange, setCustomRuntimeRange] = useState<RuntimeRange | null>(null);
 
-  const loadDashboard = useCallback(async (silent = false, window = runtimeWindow, range = customRuntimeRange) => {
+  const loadDashboard = useCallback(async (silent = false) => {
     if (silent) {
       setIsRefreshing(true);
     } else {
       setIsLoading(true);
     }
     try {
-      const dashboard = await fetchDashboard(typeof window === "number" ? window : 7 * 24 * 60, window === "custom" ? range : null);
+      const dashboard = await fetchDashboard();
       setData(dashboard);
       if (dashboard.system) {
         setSystemLoad((current) => newerSystemLoad(current, dashboard.system));
@@ -855,7 +530,7 @@ function DashboardContent() {
       setIsLoading(false);
       setIsRefreshing(false);
     }
-  }, [customRuntimeRange, runtimeWindow]);
+  }, []);
 
   useEffect(() => {
     void loadDashboard();
@@ -900,20 +575,6 @@ function DashboardContent() {
     };
   }, [data, loadDashboard]);
 
-  const handleRuntimeWindowChange = (value: number | "custom") => {
-    setRuntimeWindow(value);
-    if (value === "custom") {
-      return;
-    }
-    setCustomRuntimeRange(null);
-    void loadDashboard(true, value, null);
-  };
-
-  const handleCustomRuntimeRangeChange = (range: RuntimeRange) => {
-    setCustomRuntimeRange(range);
-    void loadDashboard(true, "custom", range);
-  };
-
   if (isLoading && !data) {
     return (
       <div className="dashboard-console">
@@ -931,7 +592,7 @@ function DashboardContent() {
   }
 
   const totalAccounts = data.accounts.total;
-  const todayCalls = data.calls.today;
+  const todayCalls = data.calls;
   const totalCalls = todayCalls?.total ?? 0;
   const todayTotals = todayCalls?.totals;
   const failedCalls = todayTotals?.failed ?? todayCalls?.by_status.failed ?? 0;
@@ -997,16 +658,6 @@ function DashboardContent() {
 
       <ImagePoolConcurrency capacity={capacity} />
 
-      {data.calls.runtime ? (
-        <RuntimeHealth
-          runtime={data.calls.runtime}
-          selectedWindow={runtimeWindow}
-          isUpdating={isRefreshing}
-          onWindowChange={handleRuntimeWindowChange}
-          onCustomRangeChange={handleCustomRuntimeRangeChange}
-        />
-      ) : null}
-
       <section className="grid gap-4 xl:grid-cols-3">
         <Card title="今日接口分布">
           <EntryBars items={sortedEntries(todayEndpointEntries)} />
@@ -1024,12 +675,12 @@ function DashboardContent() {
           title={
             <div className="flex items-center gap-2">
               <span>最近失败</span>
-              <Tag color="red" className="m-0">{data.calls.recent_failed.length}</Tag>
+              <Tag color="red" className="m-0">{data.calls.recent_failed?.length || 0}</Tag>
             </div>
           }
           styles={{ body: { padding: 0 } }}
         >
-          <RecentFailures items={data.calls.recent_failed} />
+          <RecentFailures items={data.calls.recent_failed || []} />
         </Card>
       </section>
     </div>

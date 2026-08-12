@@ -483,7 +483,7 @@ func TestConsumeImageStreamReturnsEarlyTimeoutWithoutConversationID(t *testing.T
 	}
 }
 
-func TestPollImageResultsReportsStalledConversation(t *testing.T) {
+func TestPollImageResultsReportsStalledConversationWithoutText(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet || r.URL.Path != "/backend-api/conversation/conv-stalled" {
 			http.NotFound(w, r)

@@ -106,13 +106,6 @@ func TestListOpenDelete(t *testing.T) {
 	if err := os.WriteFile(img, []byte("png"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	comparison := filepath.Join(dir, ".postprocess-comparisons", "pp_test", "before.png")
-	if err := os.MkdirAll(filepath.Dir(comparison), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(comparison, []byte("comparison"), 0o600); err != nil {
-		t.Fatal(err)
-	}
 	items, err := svc.List("http://localhost", "", "")
 	if err != nil || len(items) != 1 {
 		t.Fatalf("items=%#v err=%v", items, err)

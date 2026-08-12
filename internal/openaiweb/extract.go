@@ -139,20 +139,19 @@ func assistantTextFromNode(value map[string]any) string {
 	return ""
 }
 
-// assistantTextDetails returns the first assistant text found in an upstream
-// response. The full text stays in memory only; callers decide whether a
-// bounded sample should be written to diagnostics.
+// assistantTextDetails selects an assistant response for API output and
+// diagnostics. Prefer Chinese when the conversation carries both Chinese and
+// English variants; otherwise retain the first assistant response.
 func assistantTextDetails(value any) (string, int) {
-	var text string
+	var values []string
 	var walk func(any)
 	walk = func(item any) {
-		if text != "" {
-			return
-		}
 		switch typed := item.(type) {
 		case map[string]any:
 			if role, ok := nodeRole(typed); ok && strings.EqualFold(strings.TrimSpace(role), "assistant") {
-				text = assistantTextFromNode(typed)
+				if text := strings.TrimSpace(assistantTextFromNode(typed)); text != "" {
+					values = append(values, text)
+				}
 			}
 			for _, child := range typed {
 				walk(child)
@@ -164,8 +163,27 @@ func assistantTextDetails(value any) (string, int) {
 		}
 	}
 	walk(value)
+	text := ""
+	for _, candidate := range values {
+		if containsChineseText(candidate) {
+			text = candidate
+			break
+		}
+	}
+	if text == "" && len(values) > 0 {
+		text = values[0]
+	}
 	text = strings.Join(strings.Fields(text), " ")
 	return text, len([]rune(text))
+}
+
+func containsChineseText(value string) bool {
+	for _, r := range value {
+		if r >= '\u4e00' && r <= '\u9fff' {
+			return true
+		}
+	}
+	return false
 }
 
 // DetectReferenceImageRequest inspects assistant-authored conversation text

@@ -35,16 +35,23 @@ func TestExtractConversationAndImageReferences(t *testing.T) {
 	}
 }
 
-func TestImagePromptForWebKeepsOriginalEditPrompt(t *testing.T) {
+func TestImagePromptForWebAppendsImageToolInstructionForEdit(t *testing.T) {
 	got := imagePromptForWeb("把背景改成海边", true, "1536x864", "high")
-	if got != "把背景改成海边" {
+	if got != "把背景改成海边\n\n调用图片生成工具。" {
 		t.Fatalf("prompt=%q", got)
 	}
 }
 
-func TestImagePromptForWebKeepsPlainPromptForAutoTextImage(t *testing.T) {
+func TestImagePromptForWebAppendsImageToolInstructionForTextImage(t *testing.T) {
 	got := imagePromptForWeb("画一只猫", false, "auto", "auto")
-	if got != "画一只猫" {
+	if got != "画一只猫\n\n调用图片生成工具。" {
+		t.Fatalf("prompt=%q", got)
+	}
+}
+
+func TestImagePromptForWebDoesNotAppendDuplicateToolInstruction(t *testing.T) {
+	got := imagePromptForWeb("画一只猫。调用图片生成工具。", false, "auto", "auto")
+	if got != "画一只猫。调用图片生成工具。" {
 		t.Fatalf("prompt=%q", got)
 	}
 }

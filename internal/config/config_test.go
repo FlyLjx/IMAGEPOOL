@@ -197,34 +197,3 @@ func TestSaveWritesUpdatedConfig(t *testing.T) {
 		t.Fatalf("config=%#v", reloaded)
 	}
 }
-
-func TestLoadMigratesSavedPostprocessPathsFromApplicationRoot(t *testing.T) {
-	root := t.TempDir()
-	configDir := filepath.Join(root, "configs")
-	postprocessDir := filepath.Join(root, "postprocess", "models")
-	if err := os.MkdirAll(configDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(postprocessDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	worker := filepath.Join(root, "postprocess", "worker.mjs")
-	restorationModel := filepath.Join(postprocessDir, "restore.onnx")
-	for _, path := range []string{worker, restorationModel} {
-		if err := os.WriteFile(path, []byte("fixture"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	configPath := filepath.Join(configDir, "config.json")
-	data := `{"image_postprocess_worker":"postprocess/worker.mjs","image_restoration_model":"postprocess/models/restore.onnx"}`
-	if err := os.WriteFile(configPath, []byte(data), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	cfg, err := Load(configPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cfg.ImagePostprocessWorker != worker || cfg.ImageRestorationModel != restorationModel {
-		t.Fatalf("postprocess paths=%q %q", cfg.ImagePostprocessWorker, cfg.ImageRestorationModel)
-	}
-}

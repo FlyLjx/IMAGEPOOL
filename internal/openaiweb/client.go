@@ -431,7 +431,11 @@ func imageAttemptError(parent, generationCtx context.Context, err error) error {
 }
 
 func imagePromptForWeb(prompt string, edit bool, size, quality string) string {
-	return strings.TrimSpace(prompt)
+	prompt = strings.TrimSpace(prompt)
+	if prompt == "" || strings.Contains(prompt, "调用图片生成工具") {
+		return prompt
+	}
+	return prompt + "\n\n调用图片生成工具。"
 }
 
 func (c *Client) uploadReferences(ctx context.Context, account accounts.Account, images []ImageInput) ([]uploadMeta, error) {

@@ -138,7 +138,6 @@ type Task struct {
 	ResponseFormat         string                 `json:"response_format,omitempty"`
 	OutputFormat           string                 `json:"output_format,omitempty"`
 	CallbackURL            string                 `json:"callback_url,omitempty"`
-	HDRepair               bool                   `json:"hd_repair,omitempty"`
 	CreatedAt              time.Time              `json:"created_at"`
 	StartedAt              *time.Time             `json:"started_at,omitempty"`
 	FinishedAt             *time.Time             `json:"finished_at,omitempty"`
@@ -440,7 +439,7 @@ func (m *Manager) create(mode, ownerID, clientTaskID string, req images.Request,
 	m.seq++
 	id := fmt.Sprintf("img_%d_%d", time.Now().UnixNano(), m.seq)
 	now := time.Now()
-	task := &Task{ID: id, OwnerID: strings.TrimSpace(ownerID), ClientTaskID: clientTaskID, Mode: mode, Status: StatusQueued, Progress: "queued", ProgressPercent: 0, RealtimeStatus: "任务已提交", Prompt: req.Prompt, Model: publicTaskModel(req.Model), Size: strings.TrimSpace(req.Size), Quality: req.Quality, ResponseFormat: req.ResponseFormat, OutputFormat: req.OutputFormat, CallbackURL: strings.TrimSpace(req.CallbackURL), HDRepair: req.HDRepair, CreatedAt: now, UpdatedAt: now}
+	task := &Task{ID: id, OwnerID: strings.TrimSpace(ownerID), ClientTaskID: clientTaskID, Mode: mode, Status: StatusQueued, Progress: "queued", ProgressPercent: 0, RealtimeStatus: "任务已提交", Prompt: req.Prompt, Model: publicTaskModel(req.Model), Size: strings.TrimSpace(req.Size), Quality: req.Quality, ResponseFormat: req.ResponseFormat, OutputFormat: req.OutputFormat, CallbackURL: strings.TrimSpace(req.CallbackURL), CreatedAt: now, UpdatedAt: now}
 	appendLog(task, LogEntry{Time: now, Level: "info", Event: "submitted", Progress: "queued", Message: "任务已提交"})
 	m.tasks[id] = task
 	m.markDirtyLocked(id)
@@ -1297,12 +1296,6 @@ func progressPercent(progress string) int {
 		return 88
 	case "polling_image":
 		return 90
-	case "postprocess_queued":
-		return 91
-	case "restoring_image":
-		return 94
-	case "postprocess_complete":
-		return 99
 	case "succeeded", "success":
 		return 100
 	default:

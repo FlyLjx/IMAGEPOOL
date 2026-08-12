@@ -82,6 +82,25 @@ func TestSummarizeImageResponseCapturesBoundedAssistantTextForTerminalDiagnostic
 	}
 }
 
+func TestAssistantTextDetailsPrefersChineseOverEnglish(t *testing.T) {
+	value := map[string]any{
+		"mapping": map[string]any{
+			"english": map[string]any{"message": map[string]any{
+				"author":  map[string]any{"role": "assistant"},
+				"content": map[string]any{"parts": []any{"Please update your prompt and try again."}},
+			}},
+			"chinese": map[string]any{"message": map[string]any{
+				"author":  map[string]any{"role": "assistant"},
+				"content": map[string]any{"parts": []any{"请修改提示词后重新提交。"}},
+			}},
+		},
+	}
+	text, chars := assistantTextDetails(value)
+	if text != "请修改提示词后重新提交。" || chars != 12 {
+		t.Fatalf("text=%q chars=%d", text, chars)
+	}
+}
+
 func containsDiagnosticValue(values []string, want string) bool {
 	for _, value := range values {
 		if value == want {

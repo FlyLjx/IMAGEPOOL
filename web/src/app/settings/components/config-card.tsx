@@ -14,7 +14,7 @@ import {
   Switch,
   Typography,
 } from "antd";
-import { LoaderCircle, PlugZap, Save, ShieldCheck, WandSparkles } from "lucide-react";
+import { LoaderCircle, PlugZap, Save, ShieldCheck } from "lucide-react";
 import { toast } from "sonner";
 
 import { testProxy, type ProxyTestResult } from "@/lib/api";
@@ -91,8 +91,6 @@ export function ConfigCard() {
   const config = useSettingsStore((state) => state.config);
   const isLoadingConfig = useSettingsStore((state) => state.isLoadingConfig);
   const isSavingConfig = useSettingsStore((state) => state.isSavingConfig);
-  const postprocessSaving = useSettingsStore((state) => state.postprocessSaving);
-  const setPostprocessEnabled = useSettingsStore((state) => state.setPostprocessEnabled);
   const setRefreshAccountIntervalMinute = useSettingsStore((state) => state.setRefreshAccountIntervalMinute);
   const setRefreshAccountConcurrency = useSettingsStore((state) => state.setRefreshAccountConcurrency);
   const setImageRetentionDays = useSettingsStore((state) => state.setImageRetentionDays);
@@ -159,7 +157,6 @@ export function ConfigCard() {
     return null;
   }
 
-  const isPostprocessSaving = Object.values(postprocessSaving).some(Boolean);
 
   return (
     <Card
@@ -174,7 +171,7 @@ export function ConfigCard() {
           type="primary"
           icon={isSavingConfig ? <LoaderCircle className="size-4 animate-spin" /> : <Save className="size-4" />}
           onClick={() => void saveConfig()}
-          disabled={isSavingConfig || isPostprocessSaving}
+          disabled={isSavingConfig}
         >
           保存配置
         </Button>
@@ -222,26 +219,6 @@ export function ConfigCard() {
             </div>
           </Col>
         </Row>
-
-        <Divider />
-        <SectionTitle title="图片后处理" description="独立队列运行，开关只影响新提交的图片任务。" />
-        <div className="grid gap-3 md:grid-cols-1">
-          <div className="flex min-h-20 items-center justify-between gap-4 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
-            <Space>
-              <WandSparkles className="size-4 text-sky-600" />
-              <div>
-                <Typography.Text strong>高清修复</Typography.Text>
-                <div className="text-xs text-slate-400">SCUNet</div>
-              </div>
-            </Space>
-            <Switch
-              checked={Boolean(config.image_restoration_enabled)}
-              loading={postprocessSaving.image_restoration_enabled}
-              disabled={isSavingConfig}
-              onChange={(checked) => void setPostprocessEnabled("image_restoration_enabled", checked)}
-            />
-          </div>
-        </div>
 
         <details className="mt-5 rounded-lg border border-slate-200 bg-slate-50/50">
           <summary className="cursor-pointer px-4 py-3 text-sm font-medium text-slate-700">更多运行设置（按需修改）</summary>

@@ -79,8 +79,6 @@ function normalizeConfig(config: SettingsConfig): SettingsConfig {
     image_account_precheck_timeout_secs: Number(config.image_account_precheck_timeout_secs || 75),
     image_settle_enabled: Boolean(config.image_settle_enabled !== false),
     image_check_before_hit_enabled: Boolean(config.image_check_before_hit_enabled !== false),
-		image_restoration_enabled: Boolean(config.image_restoration_enabled),
-		image_postprocess_timeout_secs: Math.min(1800, Math.max(30, Number(config.image_postprocess_timeout_secs) || 180)),
     image_settle_secs: Number(config.image_settle_secs || 2.0),
     image_timeout_retry_secs: Number(config.image_timeout_retry_secs || 30),
     auto_remove_invalid_accounts: Boolean(config.auto_remove_invalid_accounts),
@@ -131,13 +129,10 @@ function normalizeConfig(config: SettingsConfig): SettingsConfig {
   };
 }
 
-type PostprocessToggle = "image_restoration_enabled";
-
 type SettingsStore = {
   config: SettingsConfig | null;
   isLoadingConfig: boolean;
   isSavingConfig: boolean;
-  postprocessSaving: Record<PostprocessToggle, boolean>;
   registerConfig: RegisterConfig | null;
   isLoadingRegister: boolean;
   isSavingRegister: boolean;
@@ -146,7 +141,6 @@ type SettingsStore = {
   loadConfig: () => Promise<void>;
   setConfig: (config: SettingsConfig) => void;
   saveConfig: () => Promise<boolean>;
-  setPostprocessEnabled: (field: PostprocessToggle, enabled: boolean) => Promise<void>;
   setRefreshAccountIntervalMinute: (value: string) => void;
   setRefreshAccountConcurrency: (value: string) => void;
   setImageRetentionDays: (value: string) => void;
@@ -208,9 +202,6 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
   config: null,
   isLoadingConfig: true,
   isSavingConfig: false,
-  postprocessSaving: {
-    image_restoration_enabled: false,
-  },
   registerConfig: null,
   isLoadingRegister: true,
   isSavingRegister: false,
@@ -276,8 +267,6 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         image_account_precheck_timeout_secs: Math.min(180, Math.max(10, Number(config.image_account_precheck_timeout_secs) || 75)),
         image_settle_enabled: Boolean(config.image_settle_enabled !== false),
         image_check_before_hit_enabled: Boolean(config.image_check_before_hit_enabled !== false),
-						image_restoration_enabled: Boolean(config.image_restoration_enabled),
-				image_postprocess_timeout_secs: Math.min(1800, Math.max(30, Number(config.image_postprocess_timeout_secs) || 180)),
         image_settle_secs: Math.max(0.5, Number(config.image_settle_secs) || 2.0),
         image_timeout_retry_secs: Math.max(1, Number(config.image_timeout_retry_secs) || 30),
         auto_remove_invalid_accounts: Boolean(config.auto_remove_invalid_accounts),
@@ -334,36 +323,6 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
       return false;
     } finally {
       set({ isSavingConfig: false });
-    }
-  },
-
-  setPostprocessEnabled: async (field, enabled) => {
-    const current = get().config;
-    if (!current || get().postprocessSaving[field]) {
-      return;
-    }
-    const previous = Boolean(current[field]);
-    const label = "高清修复";
-    set((state) => ({
-      config: state.config ? { ...state.config, [field]: enabled } : null,
-      postprocessSaving: { ...state.postprocessSaving, [field]: true },
-    }));
-    try {
-      const data = await updateSettingsConfig({ [field]: enabled });
-      const persisted = Boolean(data.config[field]);
-      set((state) => ({
-        config: state.config ? normalizeConfig({ ...state.config, [field]: persisted }) : null,
-      }));
-      toast.success(`${label}已${persisted ? "开启" : "关闭"}`);
-    } catch (error) {
-      set((state) => ({
-        config: state.config ? { ...state.config, [field]: previous } : null,
-      }));
-      toast.error(error instanceof Error ? error.message : `${label}设置失败`);
-    } finally {
-      set((state) => ({
-        postprocessSaving: { ...state.postprocessSaving, [field]: false },
-      }));
     }
   },
 

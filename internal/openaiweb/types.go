@@ -29,7 +29,6 @@ type ImageRequest struct {
 	Stream         bool         `json:"stream"`
 	Async          bool         `json:"async"`
 	CallbackURL    string       `json:"callback_url,omitempty"`
-	HDRepair       bool         `json:"hd_repair,omitempty"`
 	References     []ImageInput `json:"-"`
 	OutputBaseURL  string       `json:"-"`
 	TaskID         string       `json:"-"`
@@ -206,9 +205,9 @@ func IsImageReferenceRequired(err error) bool {
 	return errors.Is(err, ErrImageReferenceRequired)
 }
 
-// ImageAssistantTextError marks a completed assistant response that did not
-// start image generation. The text is preserved so the API can return the
-// actual message instead of waiting for the polling stall timeout.
+// ImageAssistantTextError marks an accepted image conversation that did not
+// return a generated image ID. The assistant text is preserved when present
+// so callers can return the actual OpenAI message without retrying an account.
 type ImageAssistantTextError struct {
 	ConversationID string
 	Message        string
@@ -219,7 +218,7 @@ type ImageAssistantTextError struct {
 func (e *ImageAssistantTextError) Error() string {
 	message := strings.TrimSpace(e.Message)
 	if message == "" {
-		message = "图片服务返回了文本，但没有生成图片。"
+		message = "未识别到 OpenAI 返回的图片 ID。"
 	}
 	if strings.TrimSpace(e.ConversationID) == "" {
 		return fmt.Sprintf("%s: %s", ErrImageAssistantText, message)
@@ -249,6 +248,20 @@ func ImageAssistantText(err error) (string, bool) {
 		return "", false
 	}
 	return strings.TrimSpace(textErr.Message), true
+}
+
+// IsSkippedMainlineImageError reports an internal response where the image
+// generation mainline was skipped before any image ID was produced. Retrying
+// on a different account is appropriate for this transient execution state.
+func IsSkippedMainlineImageError(err error) bool {
+	text, ok := ImageAssistantText(err)
+	if !ok {
+		return false
+	}
+	var value struct {
+		SkippedMainline bool `json:"skipped_mainline"`
+	}
+	return json.Unmarshal([]byte(strings.TrimSpace(text)), &value) == nil && value.SkippedMainline
 }
 
 // ImageConversationTimeoutError marks the case where ChatGPT has already
@@ -400,6 +413,20 @@ func PublicErrorText(message string) string {
 	if message == "" {
 		return ""
 	}
+	if isSkippedMainlineErrorText(message) {
+		return "本次请求未触发生图流程，请修改提示词后重新提交。"
+	}
+	const imageAssistantTextPrefix = "image generation returned text without an image:"
+	if strings.HasPrefix(strings.ToLower(message), imageAssistantTextPrefix) {
+		text := strings.TrimSpace(message[len(imageAssistantTextPrefix):])
+		if marker := strings.Index(strings.ToLower(text), "; conversation_id="); marker >= 0 {
+			text = strings.TrimSpace(text[:marker])
+		}
+		if text == "" {
+			return "图片服务返回了文本，但没有生成图片。"
+		}
+		return text
+	}
 	if IsAuthenticationError(errors.New(message)) {
 		return PublicCredentialInvalidMessage
 	}
@@ -437,6 +464,21 @@ func PublicErrorText(message string) string {
 		return PublicUpstreamFailureMessage
 	}
 	return message
+}
+
+func isSkippedMainlineErrorText(message string) bool {
+	start := strings.Index(message, `{"skipped_mainline"`)
+	if start < 0 {
+		return false
+	}
+	var value struct {
+		SkippedMainline bool `json:"skipped_mainline"`
+	}
+	end := strings.Index(message[start:], "}")
+	if end < 0 {
+		return false
+	}
+	return json.Unmarshal([]byte(message[start:start+end+1]), &value) == nil && value.SkippedMainline
 }
 
 // PublicAttemptLogs copies logs for API output and removes raw upstream
@@ -595,7 +637,7 @@ func IsRetryableImageError(err error) bool {
 		return false
 	}
 	if errors.Is(err, ErrImageAssistantText) {
-		return false
+		return IsSkippedMainlineImageError(err)
 	}
 	if IsImageConversationTimeout(err) {
 		return false

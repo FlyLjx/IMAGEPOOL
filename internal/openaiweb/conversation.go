@@ -902,10 +902,8 @@ func (c *Client) pollImageResultsWithProgressAndDiagnostics(ctx context.Context,
 			}
 			continue
 		}
-		if !signals.ToolSeen && !signals.ImageReferenceSeen {
-			if text, _ := assistantTextDetails(conversation); text != "" {
-				return nil, nil, diagnostics, NewImageAssistantTextError(conversationID, text, diagnostics, findContentPolicyText(conversation) != "")
-			}
+		if text, _ := assistantTextDetails(conversation); text != "" {
+			return nil, nil, diagnostics, NewImageAssistantTextError(conversationID, text, diagnostics, findContentPolicyText(conversation) != "")
 		}
 		if stalledErr := maybeStalled(); stalledErr != nil {
 			return nil, nil, diagnostics, stalledErr

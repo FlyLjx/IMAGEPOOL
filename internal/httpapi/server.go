@@ -30,7 +30,6 @@ import (
 	"imagepool/internal/oauthlogin"
 	"imagepool/internal/openaiweb"
 	"imagepool/internal/persistence"
-	"imagepool/internal/postprocess"
 	proxyservice "imagepool/internal/proxy"
 	"imagepool/internal/registration"
 	"imagepool/internal/searches"
@@ -60,7 +59,6 @@ type Server struct {
 	static             *staticFiles
 	tasks              *tasks.Manager
 	callbacks          *callbackDispatcher
-	postprocess        *postprocess.Service
 	metrics            *metrics.Service
 	refresh            *accounts.RefreshManager
 	autoRefresh        *accounts.AutoRefreshScheduler
@@ -117,13 +115,6 @@ func newServer(cfg config.Config, accountStore *accounts.Store, imageService *im
 		})
 	}
 	return server
-}
-
-func (s *Server) SetPostprocess(service *postprocess.Service) {
-	if s == nil {
-		return
-	}
-	s.postprocess = service
 }
 
 func (s *Server) StartBackground(ctx context.Context) {
@@ -622,7 +613,6 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, err)
 		return
 	}
-	cfg := s.currentConfig()
 	type modelItem struct {
 		id     string
 		owner  string
@@ -644,9 +634,6 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"object": "list",
 		"data":   data,
-		"features": map[string]any{
-			"image_restoration": cfg.ImageRestorationEnabled,
-		},
 	})
 }
 
@@ -1001,14 +988,13 @@ func (s *Server) handleTaskGeneration(w http.ResponseWriter, r *http.Request) {
 		ResponseFormat string `json:"response_format"`
 		OutputFormat   string `json:"output_format"`
 		CallbackURL    string `json:"callback_url"`
-		HDRepair       bool   `json:"hd_repair"`
 		N              int    `json:"n"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	req := images.Request{Prompt: body.Prompt, Model: body.Model, Size: body.Size, Quality: body.Quality, ResponseFormat: body.ResponseFormat, OutputFormat: body.OutputFormat, CallbackURL: body.CallbackURL, HDRepair: body.HDRepair, N: normalizedImageCount(body.N), OutputBaseURL: baseURL(r)}
+	req := images.Request{Prompt: body.Prompt, Model: body.Model, Size: body.Size, Quality: body.Quality, ResponseFormat: body.ResponseFormat, OutputFormat: body.OutputFormat, CallbackURL: body.CallbackURL, N: normalizedImageCount(body.N), OutputBaseURL: baseURL(r)}
 	if err := validateImageOutputOptions(req); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
@@ -1557,12 +1543,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 			enabledUsers++
 		}
 	}
-	runtimeWindow := dashboardRuntimeWindow(r)
-	callSummary := s.metrics.Summary(runtimeWindow)
-	if start, end, ok := dashboardRuntimeRange(r); ok {
-		callSummary = s.metrics.SummaryRange(start, end)
-	}
-	callSummary["today"] = s.metrics.TodaySummary()
+	callSummary := s.metrics.TodaySummary()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"app":          cfg.AppName,
 		"version":      "go-image-pool",
@@ -1580,28 +1561,6 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		},
 		"models": cfg.Models,
 	})
-}
-
-func dashboardRuntimeWindow(r *http.Request) time.Duration {
-	minutes, err := strconv.Atoi(strings.TrimSpace(r.URL.Query().Get("runtime_window_minutes")))
-	if err != nil {
-		return time.Hour
-	}
-	switch minutes {
-	case 60, 24 * 60, 7 * 24 * 60, 15 * 24 * 60, 30 * 24 * 60:
-		return time.Duration(minutes) * time.Minute
-	default:
-		return time.Hour
-	}
-}
-
-func dashboardRuntimeRange(r *http.Request) (time.Time, time.Time, bool) {
-	start, startErr := time.Parse(time.RFC3339, strings.TrimSpace(r.URL.Query().Get("runtime_start")))
-	end, endErr := time.Parse(time.RFC3339, strings.TrimSpace(r.URL.Query().Get("runtime_end")))
-	if startErr != nil || endErr != nil || !start.Before(end) || end.Sub(start) > 90*24*time.Hour {
-		return time.Time{}, time.Time{}, false
-	}
-	return start, end, true
 }
 
 func mergeDashboardStorageHealth(health map[string]any, accountsTotal any, authKeyCount int) map[string]any {
@@ -2214,7 +2173,6 @@ func (s *Server) parseEditRequest(r *http.Request) (images.Request, string, erro
 		form := r.MultipartForm
 		req := images.Request{Prompt: formValue(form, "prompt"), Model: formValue(form, "model"), Size: formValue(form, "size"), Quality: formValue(form, "quality"), ResponseFormat: formValue(form, "response_format"), OutputFormat: formValue(form, "output_format"), CallbackURL: formValue(form, "callback_url")}
 		req.Async, _ = strconv.ParseBool(formValue(form, "async"))
-		req.HDRepair, _ = strconv.ParseBool(formValue(form, "hd_repair"))
 		if n, _ := strconv.Atoi(formValue(form, "n")); n > 0 {
 			req.N = n
 		}
@@ -2249,7 +2207,6 @@ func (s *Server) parseEditRequest(r *http.Request) (images.Request, string, erro
 		OutputFormat    string `json:"output_format"`
 		Async           bool   `json:"async"`
 		CallbackURL     string `json:"callback_url"`
-		HDRepair        bool   `json:"hd_repair"`
 		Image           any    `json:"image"`
 		Images          any    `json:"images"`
 		ImageURL        any    `json:"image_url"`
@@ -2278,7 +2235,7 @@ func (s *Server) parseEditRequest(r *http.Request) (images.Request, string, erro
 	if err != nil {
 		return images.Request{}, "", err
 	}
-	return images.Request{Prompt: body.Prompt, Model: body.Model, N: body.N, Size: body.Size, Quality: body.Quality, ResponseFormat: body.ResponseFormat, OutputFormat: body.OutputFormat, Async: body.Async, CallbackURL: body.CallbackURL, HDRepair: body.HDRepair, References: refs}, body.ClientTaskID, nil
+	return images.Request{Prompt: body.Prompt, Model: body.Model, N: body.N, Size: body.Size, Quality: body.Quality, ResponseFormat: body.ResponseFormat, OutputFormat: body.OutputFormat, Async: body.Async, CallbackURL: body.CallbackURL, References: refs}, body.ClientTaskID, nil
 }
 
 func editMultipartImageFields(files map[string][]*multipart.FileHeader) []string {

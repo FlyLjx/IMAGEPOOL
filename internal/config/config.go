@@ -56,10 +56,6 @@ type Config struct {
 	ImageAccountPrecheckTimeoutSecs     float64      `json:"image_account_precheck_timeout_secs"`
 	ImageCheckBeforeHitEnabled          bool         `json:"image_check_before_hit_enabled"`
 	ImageSettleEnabled                  bool         `json:"image_settle_enabled"`
-	ImageRestorationEnabled             bool         `json:"image_restoration_enabled"`
-	ImagePostprocessWorker              string       `json:"image_postprocess_worker"`
-	ImageRestorationModel               string       `json:"image_restoration_model"`
-	ImagePostprocessTimeoutSecs         float64      `json:"image_postprocess_timeout_secs"`
 	MaxImageAttempts                    int          `json:"max_image_attempts"`
 	RequestTimeoutSecs                  float64      `json:"request_timeout_secs"`
 	SearchModel                         string       `json:"search_model"`
@@ -144,10 +140,6 @@ func Default() Config {
 		ImageAccountPrecheckTimeoutSecs:     75,
 		ImageCheckBeforeHitEnabled:          true,
 		ImageSettleEnabled:                  true,
-		ImageRestorationEnabled:             false,
-		ImagePostprocessWorker:              "../postprocess/worker.mjs",
-		ImageRestorationModel:               "../postprocess/models/scunet-color-real-gan.onnx",
-		ImagePostprocessTimeoutSecs:         180,
 		MaxImageAttempts:                    3,
 		RequestTimeoutSecs:                  120,
 		SearchModel:                         "gpt-5-5",
@@ -196,12 +188,6 @@ func Load(path string) (Config, error) {
 	}
 	if !filepath.IsAbs(cfg.WebDistDir) {
 		cfg.WebDistDir = filepath.Clean(filepath.Join(base, cfg.WebDistDir))
-	}
-	if !filepath.IsAbs(cfg.ImagePostprocessWorker) {
-		cfg.ImagePostprocessWorker = resolveBundledPath(base, cfg.ImagePostprocessWorker)
-	}
-	if !filepath.IsAbs(cfg.ImageRestorationModel) {
-		cfg.ImageRestorationModel = resolveBundledPath(base, cfg.ImageRestorationModel)
 	}
 	cfg = cfg.Normalize()
 	cfg.sourcePath = filepath.Clean(path)
@@ -446,18 +432,6 @@ func (c Config) Normalize() Config {
 	}
 	if c.ImageAccountPrecheckTimeoutSecs > 180 {
 		c.ImageAccountPrecheckTimeoutSecs = 180
-	}
-	if strings.TrimSpace(c.ImagePostprocessWorker) == "" {
-		c.ImagePostprocessWorker = d.ImagePostprocessWorker
-	}
-	if strings.TrimSpace(c.ImageRestorationModel) == "" {
-		c.ImageRestorationModel = d.ImageRestorationModel
-	}
-	if c.ImagePostprocessTimeoutSecs <= 0 {
-		c.ImagePostprocessTimeoutSecs = d.ImagePostprocessTimeoutSecs
-	}
-	if c.ImagePostprocessTimeoutSecs > 1800 {
-		c.ImagePostprocessTimeoutSecs = 1800
 	}
 	if c.MaxImageAttempts <= 0 {
 		c.MaxImageAttempts = d.MaxImageAttempts

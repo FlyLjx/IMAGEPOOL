@@ -60,6 +60,12 @@ func TestImageTimeoutRetryClassification(t *testing.T) {
 	if !IsRetryableImageError(fmt.Errorf("prepare conversation(none): %w", ErrMissingConduitToken)) {
 		t.Fatal("missing conduit token must switch accounts")
 	}
+	if !IsRetryableImageError(NewImageAssistantTextError("conv-1", `{"skipped_mainline":true}`, ImageAttemptDiagnostics{}, false)) {
+		t.Fatal("skipped_mainline must switch accounts")
+	}
+	if IsRetryableImageError(NewImageAssistantTextError("conv-1", "请上传图片后继续。", ImageAttemptDiagnostics{}, false)) {
+		t.Fatal("ordinary assistant text must not switch accounts")
+	}
 }
 
 func TestRetryableImageErrorIncludesTransientUpstreamStatuses(t *testing.T) {
@@ -121,5 +127,21 @@ func TestPublicErrorProjectionRedactsCredentialDiagnostics(t *testing.T) {
 	nested, _ := event.Details["nested"].(map[string]any)
 	if nested["cause"] != PublicCredentialInvalidMessage {
 		t.Fatalf("nested details=%#v", event.Details)
+	}
+}
+
+func TestPublicErrorTextPreservesAssistantTextForBackend(t *testing.T) {
+	message := `image generation returned text without an image: 非常抱歉，该提示可能违反了内容政策。; conversation_id=conv-1`
+	got := PublicErrorText(message)
+	want := `非常抱歉，该提示可能违反了内容政策。`
+	if got != want {
+		t.Fatalf("got=%q want=%q", got, want)
+	}
+}
+
+func TestPublicErrorTextHidesSkippedMainlineMarker(t *testing.T) {
+	got := PublicErrorText(`image generation returned text without an image: {"skipped_mainline":true}; conversation_id=conv-1`)
+	if got != "本次请求未触发生图流程，请修改提示词后重新提交。" {
+		t.Fatalf("message=%q", got)
 	}
 }
