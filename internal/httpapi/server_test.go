@@ -38,6 +38,12 @@ import (
 
 type apiBackend struct{}
 
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (fn roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return fn(request)
+}
+
 type validatingAPIBackend struct {
 	apiBackend
 	mu              sync.Mutex
@@ -1575,6 +1581,23 @@ func TestLatestVersionEndpointFallsBackToCurrentVersion(t *testing.T) {
 	}
 	if response.StatusCode != http.StatusOK || payload.Version != "0.1.28" || payload.Source != "fallback" || payload.UpdateAvailable || payload.Error == "" {
 		t.Fatalf("status=%d payload=%#v", response.StatusCode, payload)
+	}
+}
+
+func TestFetchTextAddsTokenOnlyForGitHubURLs(t *testing.T) {
+	t.Setenv("IMAGE_POOL_GITHUB_TOKEN", "private-token")
+	requests := make([]*http.Request, 0, 2)
+	client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		requests = append(requests, request.Clone(request.Context()))
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("ok")), Request: request}, nil
+	})}
+	for _, target := range []string{"https://api.github.com/repos/FlyLjx/IMAGEPOOL/releases/latest", "https://cdn.jsdelivr.net/gh/FlyLjx/IMAGEPOOL@main/CHANGELOG.md"} {
+		if _, err := fetchText(context.Background(), client, target); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(requests) != 2 || requests[0].Header.Get("Authorization") != "Bearer private-token" || requests[1].Header.Get("Authorization") != "" {
+		t.Fatalf("requests=%#v", requests)
 	}
 }
 

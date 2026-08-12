@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.1.73 - 2026-08-12
+
++ [修复] 恢复 Dashboard 并发组件共用的数值边界函数，修复首页加载时 `clamp is not defined` 的客户端异常。
++ [新增] 私有仓库部署支持 `IMAGE_POOL_GITHUB_TOKEN`：后端查询 GitHub Release、Tag 和 Changelog 时自动鉴权，Token 不会发送到 CDN 或返回给前端。
++ [调整] 更新器读取宿主机 GHCR 登录凭据，可拉取私有 `ghcr.io` 镜像；固定镜像标签时仍需改为 `latest` 才能使用在线更新。
+
 ## 0.1.72 - 2026-08-12
 
 + [调整] 移除后台调用趋势图及其历史统计聚合，Dashboard 保留今日调用、并发、资源和异常状态。

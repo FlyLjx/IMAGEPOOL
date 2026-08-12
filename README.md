@@ -58,6 +58,8 @@ docker compose up -d --build
 
 镜像发布完成后，GitHub Actions 会创建对应版本的 Release。管理员可在控制台版本弹窗中点击“立即升级”；Compose 内部的 `image-pool-updater` 会拉取最新镜像并重建 `image-pool` 容器。首次启用该功能时，拉取本仓库更新后执行一次 `docker compose up -d` 以创建更新器。部署前请在 `.env` 设置随机的 `IMAGE_POOL_UPDATE_TOKEN`，该更新器不对宿主机公开端口。
 
+私有仓库自动更新需要在服务器 `.env` 设置 `IMAGE_POOL_GITHUB_TOKEN`。该 Token 需具备该仓库的 Contents: Read 和 Packages: Read 权限：应用容器使用它读取私有 Release、Tag 和 Changelog；部署前在宿主机执行一次 `docker login ghcr.io -u GITHUB_USERNAME`，使用同一 Token 作为密码，更新器会只读挂载该登录凭据以拉取私有镜像。Token 只从环境变量读取，不会返回前端或写入日志。
+
 连接串默认是 `postgresql://imagepool:imagepool@postgres:5432/imagepool?sslmode=disable`；如需接外部 PostgreSQL，可在 `configs/config.json` 修改 `database_url`，或设置 `DATABASE_URL` 环境变量覆盖。仪表盘会显示脱敏后的连接地址和 `postgresql` 健康状态。
 
 ## 测试

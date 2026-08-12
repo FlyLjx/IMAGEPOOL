@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -195,6 +197,11 @@ func fetchText(ctx context.Context, client *http.Client, url string) (string, er
 	}
 	request.Header.Set("User-Agent", "IMAGE-POOL-Version-Checker")
 	request.Header.Set("Accept", "application/json,text/plain,*/*")
+	if isGitHubURL(url) {
+		if token := githubAPIToken(); token != "" {
+			request.Header.Set("Authorization", "Bearer "+token)
+		}
+	}
 	response, err := client.Do(request)
 	if err != nil {
 		return "", err
@@ -208,6 +215,22 @@ func fetchText(ctx context.Context, client *http.Client, url string) (string, er
 		return "", err
 	}
 	return string(body), nil
+}
+
+func githubAPIToken() string {
+	if token := strings.TrimSpace(os.Getenv("IMAGE_POOL_GITHUB_TOKEN")); token != "" {
+		return token
+	}
+	return strings.TrimSpace(os.Getenv("GITHUB_TOKEN"))
+}
+
+func isGitHubURL(rawURL string) bool {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	host := strings.ToLower(parsed.Hostname())
+	return host == "api.github.com" || host == "github.com" || host == "raw.githubusercontent.com"
 }
 
 func normalizeVersion(value string) string {

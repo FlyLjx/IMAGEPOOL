@@ -46,10 +46,14 @@ function numberText(value: unknown) {
 }
 
 function percent(value: number, total: number) {
-  if (total <= 0) {
-    return 0;
-  }
-  return Math.round((value / total) * 100);
+	if (total <= 0) {
+		return 0;
+	}
+	return Math.round((value / total) * 100);
+}
+
+function clamp(value: number, min: number, max: number) {
+	return Math.min(max, Math.max(min, value));
 }
 
 function limiterPercent(stats?: { active?: number; limit?: number }) {

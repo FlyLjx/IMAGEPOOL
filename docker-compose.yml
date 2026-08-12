@@ -47,6 +47,7 @@ services:
       IMAGE_POOL_IMAGE_TAG: ${IMAGE_POOL_IMAGE_TAG:-latest}
       IMAGE_POOL_UPDATE_URL: http://image-pool-updater:8080/v1/update
       IMAGE_POOL_UPDATE_TOKEN: ${IMAGE_POOL_UPDATE_TOKEN:-image-pool-update-local-token}
+      IMAGE_POOL_GITHUB_TOKEN: ${IMAGE_POOL_GITHUB_TOKEN:-}
     labels:
       com.centurylinklabs.watchtower.enable: "true"
     volumes:
@@ -63,3 +64,4 @@ services:
       DOCKER_API_VERSION: "1.40"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+      - ${DOCKER_CONFIG:-/root/.docker}:/root/.docker:ro
