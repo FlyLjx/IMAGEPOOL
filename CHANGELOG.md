@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.75 - 2026-08-13
+
++ [修复] 将上游 `You've hit the Free plan limit for image generations requests` 识别为图片额度耗尽，立即移除当前账号并切换下一账号重试；全部耗尽时返回“号池额度不足”。
++ [调整] 账号导入携带 `refresh:true` 时改为异步校验可用性与图片额度，接口立即返回 `refresh_id`，待验证账号在检查成功前不会参与调度。
++ [修复] 管理端任务的 `image_response_text` 直接展示上游返回的 `error.message`，保留内部错误码，不再误报为请求参数错误。
+
 ## Unreleased
 
 ## 0.1.74 - 2026-08-12
