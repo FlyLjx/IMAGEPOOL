@@ -73,14 +73,14 @@ func TestImageTimeoutRetryClassification(t *testing.T) {
 	if !IsRetryableImageError(NewImageAssistantTextError("conv-1", `{"size":"1024x1024","n":1,"referenced_image_ids":["file_a","file_b"],"prompt":null}`, ImageAttemptDiagnostics{}, false)) {
 		t.Fatal("referenced_image_ids with null prompt must switch accounts")
 	}
-	if IsRetryableImageError(NewImageAssistantTextError("conv-1", `{"referenced_image_ids":["file_a"],"prompt":"draw this"}`, ImageAttemptDiagnostics{}, false)) {
-		t.Fatal("referenced_image_ids with a prompt must not switch accounts")
+	if !IsRetryableImageError(NewImageAssistantTextError("conv-1", `{"referenced_image_ids":["file_a"],"prompt":"draw this"}`, ImageAttemptDiagnostics{}, false)) {
+		t.Fatal("referenced_image_ids with an echoed prompt must switch accounts")
 	}
 	if IsRetryableImageError(NewImageAssistantTextError("conv-1", `{"prompt":null}`, ImageAttemptDiagnostics{}, false)) {
 		t.Fatal("a null prompt without reference IDs must not switch accounts")
 	}
-	if IsRetryableImageError(NewImageAssistantTextError("conv-1", `{"referenced_image_ids":["file_a"]}`, ImageAttemptDiagnostics{}, false)) {
-		t.Fatal("a missing prompt field must not switch accounts")
+	if !IsRetryableImageError(NewImageAssistantTextError("conv-1", `{"referenced_image_ids":["file_a"]}`, ImageAttemptDiagnostics{}, false)) {
+		t.Fatal("referenced_image_ids without a generated image must switch accounts")
 	}
 	if IsRetryableImageError(NewImageAssistantTextError("conv-1", "请上传图片后继续。", ImageAttemptDiagnostics{}, false)) {
 		t.Fatal("ordinary assistant text must not switch accounts")

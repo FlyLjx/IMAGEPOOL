@@ -265,20 +265,12 @@ func IsSkippedMainlineImageError(err error) bool {
 }
 
 // IsReferencedImageIDsRetryError identifies an upstream response that echoes
-// uploaded reference file IDs but omits the generation prompt. The files were
-// accepted by the current account, yet the image-generation turn was not
+// uploaded reference file IDs without returning generated image IDs. The files
+// were accepted by the current account, yet the image-generation turn was not
 // started, so retrying the original request on another account is appropriate.
 func IsReferencedImageIDsRetryError(err error) bool {
 	text, ok := ImageAssistantText(err)
 	if !ok {
-		return false
-	}
-	var raw map[string]json.RawMessage
-	if json.Unmarshal([]byte(strings.TrimSpace(text)), &raw) != nil {
-		return false
-	}
-	prompt, exists := raw["prompt"]
-	if !exists || strings.TrimSpace(string(prompt)) != "null" {
 		return false
 	}
 	var value struct {
