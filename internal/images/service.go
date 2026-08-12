@@ -891,7 +891,7 @@ func (s *Service) recordImageFailure(token string, err error) {
 	// Request/content results do not describe account health. In particular,
 	// an upstream request for a missing reference image must not increase the
 	// account's abnormal counter when the caller uses a pinned account path.
-	if errors.Is(err, openaiweb.ErrContentPolicy) || openaiweb.IsImageReferenceRequired(err) || (errors.Is(err, openaiweb.ErrImageAssistantText) && !openaiweb.IsSkippedMainlineImageError(err)) {
+	if errors.Is(err, openaiweb.ErrContentPolicy) || openaiweb.IsImageReferenceRequired(err) || (errors.Is(err, openaiweb.ErrImageAssistantText) && !openaiweb.IsSkippedMainlineImageError(err) && !openaiweb.IsReferencedImageIDsRetryError(err)) {
 		return
 	}
 	// A full Turnstile VM pool is process-wide congestion rather than a

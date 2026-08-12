@@ -3,7 +3,9 @@ package openaiweb
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -342,6 +344,9 @@ func (c *Client) GenerateImage(ctx context.Context, account accounts.Account, re
 	if err != nil {
 		return ImageResult{}, c.imageUploadError(ctx, err)
 	}
+	if len(refs) > 0 {
+		log.Printf("image_reference_upload event=completed task_id=%s account=%q reference_count=%d total_bytes=%d references=%s", strings.TrimSpace(req.TaskID), account.Email, len(refs), referenceUploadBytes(refs), referenceUploadLogFields(refs))
+	}
 	preparationCtx, cancelPreparation := c.imagePreparationContext(attemptCtx)
 	defer cancelPreparation()
 	effectivePrompt := imagePromptForWeb(req.Prompt, len(refs) > 0, req.Size, req.Quality)
@@ -371,6 +376,9 @@ func (c *Client) GenerateImage(ctx context.Context, account accounts.Account, re
 	// after it has been accepted by the upstream.
 	cancelPreparation()
 	progress(ProgressEvent{Progress: "starting_generation", Message: "提交生图请求"})
+	if len(refs) > 0 {
+		log.Printf("image_reference_binding event=submit task_id=%s account=%q reference_count=%d attachment_count=%d image_pointer_count=%d references=%s", strings.TrimSpace(req.TaskID), account.Email, len(refs), len(refs), len(refs), referenceUploadLogFields(refs))
+	}
 	generationCtx, cancelGeneration := c.imageGenerationContext(attemptCtx)
 	defer cancelGeneration()
 	releaseSubmit, err := c.acquirePhase(c.submitSlots, generationCtx)
@@ -458,6 +466,23 @@ func (c *Client) uploadReferences(ctx context.Context, account accounts.Account,
 		refs = append(refs, meta)
 	}
 	return refs, nil
+}
+
+func referenceUploadBytes(refs []uploadMeta) int {
+	total := 0
+	for _, ref := range refs {
+		total += ref.FileSize
+	}
+	return total
+}
+
+func referenceUploadLogFields(refs []uploadMeta) string {
+	entries := make([]string, 0, len(refs))
+	for index, ref := range refs {
+		fileID := sha256.Sum256([]byte(ref.FileID))
+		entries = append(entries, fmt.Sprintf("%d:%s:%d:%s:%dx%d", index+1, hex.EncodeToString(fileID[:])[:12], ref.FileSize, strings.TrimSpace(ref.MIMEType), ref.Width, ref.Height))
+	}
+	return strings.Join(entries, ",")
 }
 
 func (c *Client) acquireImageUploadSlot(ctx context.Context) (func(), error) {

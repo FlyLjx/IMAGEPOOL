@@ -903,7 +903,13 @@ func (c *Client) pollImageResultsWithProgressAndDiagnostics(ctx context.Context,
 			continue
 		}
 		if text, _ := assistantTextDetails(conversation); text != "" {
-			return nil, nil, diagnostics, NewImageAssistantTextError(conversationID, text, diagnostics, findContentPolicyText(conversation) != "")
+			assistantErr := NewImageAssistantTextError(conversationID, text, diagnostics, findContentPolicyText(conversation) != "")
+			if IsReferencedImageIDsRetryError(assistantErr) {
+				diagnostics.ResultSignature = "referenced_image_ids_prompt_null"
+				assistantErr = NewImageAssistantTextError(conversationID, text, diagnostics, false)
+				log.Printf("image_reference_binding event=upstream_generation_not_started conversation_id=%s uploaded_file_count=%d response_raw_file_refs=%d response_reference_markers=%s", conversationID, len(excludedFileIDs), diagnostics.Response.LastRawFileReferences, joinDiagnosticValues(diagnostics.Response.LastReferenceMarkers))
+			}
+			return nil, nil, diagnostics, assistantErr
 		}
 		if stalledErr := maybeStalled(); stalledErr != nil {
 			return nil, nil, diagnostics, stalledErr
