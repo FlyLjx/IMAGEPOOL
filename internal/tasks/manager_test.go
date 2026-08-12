@@ -541,6 +541,19 @@ func TestFailedTaskHidesImagePollTimeoutDetails(t *testing.T) {
 	}
 }
 
+func TestFailedTaskPassesThroughImageResponseText(t *testing.T) {
+	upstreamMessage := "You've hit the Free plan limit for image generations requests"
+	raw := openaiweb.NewImageAssistantTextError("conv-1", upstreamMessage, openaiweb.ImageAttemptDiagnostics{}, false)
+	m := NewManager(sensitiveFailureTaskSvc{err: raw})
+	task, _, err := m.RunGenerationForOwner(context.Background(), "user-a", images.Request{Prompt: "draw"})
+	if err == nil || task.Error != upstreamMessage || task.RealtimeStatus != upstreamMessage {
+		t.Fatalf("task=%#v err=%v", task, err)
+	}
+	if task.ErrorCode != "image_response_text" || task.ErrorHint != "" {
+		t.Fatalf("task=%#v", task)
+	}
+}
+
 func TestTaskDeadlineIsReportedAsImageTimeout(t *testing.T) {
 	m := NewManager(taskSvc{})
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)

@@ -1137,17 +1137,18 @@ func (s *Server) handleAccountImport(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, fmt.Errorf("tokens or accounts is required"))
 		return
 	}
-	added, skipped, refreshed, issues, err := s.importAccounts(items, body.Refresh)
+	added, skipped, refreshed, issues, refreshID, err := s.importAccounts(items, body.Refresh)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"added": added, "skipped": skipped, "refreshed": refreshed, "errors": issues, "items": s.publicAccounts()})
+	writeJSON(w, http.StatusOK, map[string]any{"added": added, "skipped": skipped, "refreshed": refreshed, "refresh_id": refreshID, "errors": issues, "items": s.publicAccounts()})
 }
 
-func (s *Server) importAccounts(items []accounts.Account, refresh bool) (added, skipped, refreshed int, issues []map[string]string, err error) {
+func (s *Server) importAccounts(items []accounts.Account, refresh bool) (added, skipped, refreshed int, issues []map[string]string, refreshID string, err error) {
 	if !refresh {
-		return s.importAccountsWithoutValidation(items)
+		added, skipped, refreshed, issues, err = s.importAccountsWithoutValidation(items)
+		return added, skipped, refreshed, issues, "", err
 	}
 	return s.importAccountsAndValidate(items)
 }
@@ -1163,7 +1164,7 @@ func (s *Server) importAccountsWithoutValidation(items []accounts.Account) (adde
 	return added, skipped, 0, nil, err
 }
 
-func (s *Server) importAccountsAndValidate(items []accounts.Account) (added, skipped, refreshed int, issues []map[string]string, err error) {
+func (s *Server) importAccountsAndValidate(items []accounts.Account) (added, skipped, refreshed int, issues []map[string]string, refreshID string, err error) {
 	validationTokens := make([]string, 0, len(items))
 	seen := map[string]bool{}
 	for i := range items {
@@ -1182,28 +1183,13 @@ func (s *Server) importAccountsAndValidate(items []accounts.Account) (added, ski
 	}
 	added, skipped, err = s.accounts.AddWithResult(items)
 	if err != nil || len(validationTokens) == 0 {
-		return added, skipped, 0, nil, err
+		return added, skipped, 0, nil, "", err
 	}
-	progress, err := s.refresh.RefreshNow(validationTokens)
+	refreshID, err = s.refresh.Start(validationTokens)
 	if err != nil {
-		return added, skipped, 0, nil, err
+		return added, skipped, 0, nil, "", err
 	}
-	issues = make([]map[string]string, 0)
-	for _, result := range progress.Results {
-		switch result.Status {
-		case "success":
-			refreshed++
-		case "removed":
-			issues = append(issues, map[string]string{"access_token": result.Token, "error": openaiweb.PublicCredentialInvalidMessage})
-		default:
-			message := strings.TrimSpace(result.Error)
-			if message == "" {
-				message = "account validation failed"
-			}
-			issues = append(issues, map[string]string{"access_token": result.Token, "error": openaiweb.PublicErrorText(message)})
-		}
-	}
-	return added, skipped, refreshed, issues, nil
+	return added, skipped, 0, nil, refreshID, nil
 }
 
 func (s *Server) handleAccountsDelete(w http.ResponseWriter, r *http.Request) {
@@ -1388,12 +1374,12 @@ func (s *Server) handleOAuthFinish(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	added, skipped, refreshed, issues, err := s.importAccountsAndValidate([]accounts.Account{{AccessToken: tokens.AccessToken, RefreshToken: tokens.RefreshToken, IDToken: tokens.IDToken, SourceType: "oauth_login", Status: "正常"}})
+	added, skipped, refreshed, issues, refreshID, err := s.importAccountsAndValidate([]accounts.Account{{AccessToken: tokens.AccessToken, RefreshToken: tokens.RefreshToken, IDToken: tokens.IDToken, SourceType: "oauth_login", Status: "正常"}})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"added": added, "skipped": skipped, "refreshed": refreshed, "errors": issues, "items": s.publicAccounts()})
+	writeJSON(w, http.StatusOK, map[string]any{"added": added, "skipped": skipped, "refreshed": refreshed, "refresh_id": refreshID, "errors": issues, "items": s.publicAccounts()})
 }
 
 func (s *Server) handleDebugChatGPTWeb(w http.ResponseWriter, r *http.Request) {
@@ -1497,14 +1483,14 @@ func (s *Server) handleExternalAccountsImport(w http.ResponseWriter, r *http.Req
 		writeError(w, http.StatusBadRequest, fmt.Errorf("tokens or accounts is required"))
 		return
 	}
-	added, skipped, refreshed, issues, err := s.importAccounts(items, body.Refresh)
+	added, skipped, refreshed, issues, refreshID, err := s.importAccounts(items, body.Refresh)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
 	summary := s.accounts.Summary()
 	active, _ := summary["active"].(int)
-	response := map[string]any{"ok": true, "added": added, "skipped": skipped, "refreshed": refreshed, "errors": issues, "valid_account_count": active, "healthy": active > 0, "status": "ok", "items": s.publicAccounts()}
+	response := map[string]any{"ok": true, "added": added, "skipped": skipped, "refreshed": refreshed, "refresh_id": refreshID, "errors": issues, "valid_account_count": active, "healthy": active > 0, "status": "ok", "items": s.publicAccounts()}
 	writeJSON(w, http.StatusOK, response)
 }
 

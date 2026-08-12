@@ -25,6 +25,7 @@ func TestClassifyImageErrors(t *testing.T) {
 		{name: "legacy poll timeout", err: errors.New("任务占用额度失败，请再次提交。"), code: "image_generation_timeout", status: http.StatusTooManyRequests},
 		{name: "upload timeout", err: errors.Join(openaiweb.ErrImagePreparationTimeout, errors.New("参考图上传超时")), code: "image_upload_timeout", status: http.StatusGatewayTimeout},
 		{name: "no account", err: accounts.ErrNoAvailableAccount, code: "account_pool_unavailable", status: http.StatusTooManyRequests},
+		{name: "free plan image quota exhausted", err: errors.New("You've hit the Free plan limit for image generations requests"), code: "image_quota_exhausted", status: http.StatusTooManyRequests},
 		{name: "revoked credential", err: &openaiweb.UpstreamError{Path: "/backend-api/files", StatusCode: http.StatusUnauthorized, Body: `{"code":"token_revoked"}`}, code: "account_pool_unavailable", status: http.StatusTooManyRequests},
 		{name: "legacy credential message", err: errors.New(openaiweb.PublicCredentialInvalidMessage), code: "account_pool_unavailable", status: http.StatusTooManyRequests},
 		{name: "content policy", err: openaiweb.ErrContentPolicy, code: "content_policy_violation", status: http.StatusBadRequest},
@@ -55,6 +56,17 @@ func TestClassifyAssistantTextPassesThroughParameterConfirmation(t *testing.T) {
 	plainText := Classify(openaiweb.NewImageAssistantTextError("conv", "请上传或指定需要编辑的原始图片后，我才能继续进行图片处理。", openaiweb.ImageAttemptDiagnostics{}, false), 0)
 	if plainText.Message != "请上传或指定需要编辑的原始图片后，我才能继续进行图片处理。" {
 		t.Fatalf("plain message=%q", plainText.Message)
+	}
+}
+
+func TestClassifyTextRestoresPersistedImageResponseText(t *testing.T) {
+	upstreamMessage := "You've hit the Free plan limit for image generations requests"
+	got := ClassifyText("image generation returned text without an image: "+upstreamMessage+"; conversation_id=conv-123", 0)
+	if got.Code != "image_response_text" || got.Message != upstreamMessage {
+		t.Fatalf("info=%#v", got)
+	}
+	if got.Hint != "" {
+		t.Fatalf("image response text must not add a generic hint: %#v", got)
 	}
 }
 

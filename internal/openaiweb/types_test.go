@@ -41,6 +41,13 @@ func TestAuthenticationErrorIncludesGenericUpstream401(t *testing.T) {
 	}
 }
 
+func TestNoFreeImageQuotaErrorIncludesFreePlanImageGenerationLimit(t *testing.T) {
+	err := fmt.Errorf("You've hit the Free plan limit for image generations requests")
+	if !IsNoFreeImageQuotaError(err) {
+		t.Fatalf("free-plan image generation limit must be classified as quota exhaustion: %v", err)
+	}
+}
+
 func TestImageTimeoutRetryClassification(t *testing.T) {
 	if !IsRetryableImageError(fmt.Errorf("poll failed: %w", ErrPollTimeout)) {
 		t.Fatal("pre-conversation poll timeout must switch to another account")

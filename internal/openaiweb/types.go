@@ -621,7 +621,8 @@ func IsNoFreeImageQuotaError(err error) bool {
 	text := strings.ToLower(err.Error())
 	return strings.Contains(text, "no available free image quota") ||
 		strings.Contains(text, "no free image quota") ||
-		strings.Contains(text, "image quota exhausted")
+		strings.Contains(text, "image quota exhausted") ||
+		strings.Contains(text, "free plan limit for image generations requests")
 }
 
 // IsInteractiveChallengeError reports an upstream anti-automation challenge

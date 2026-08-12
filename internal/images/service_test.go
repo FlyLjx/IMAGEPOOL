@@ -712,6 +712,30 @@ func TestGenerateRemovesNoQuotaAccountAndRetries(t *testing.T) {
 	}
 }
 
+func TestGenerateRemovesFreePlanExhaustedAccountAndRetries(t *testing.T) {
+	store := accounts.NewStore([]accounts.Account{{Email: "available", AccessToken: "available", CreatedAt: 1}, {Email: "exhausted", AccessToken: "exhausted", CreatedAt: 2}}, "")
+	fb := &fakeBackend{errs: []error{errors.New("You've hit the Free plan limit for image generations requests")}}
+	response, err := NewService(config.Default(), store, fb).Generate(context.Background(), Request{Prompt: "draw"})
+	if err != nil || response.AccountEmail != "available" || fb.calls != 2 {
+		t.Fatalf("response=%#v err=%v calls=%d", response, err, fb.calls)
+	}
+	if _, found := store.Get("exhausted"); found {
+		t.Fatalf("free-plan exhausted account was not removed: %#v", store.List())
+	}
+}
+
+func TestGenerateReturnsQuotaExhaustionAfterAllFreePlanAccountsAreRemoved(t *testing.T) {
+	store := accounts.NewStore([]accounts.Account{{Email: "only", AccessToken: "only"}}, "")
+	fb := &fakeBackend{errs: []error{errors.New("You've hit the Free plan limit for image generations requests")}}
+	_, err := NewService(config.Default(), store, fb).Generate(context.Background(), Request{Prompt: "draw"})
+	if !openaiweb.IsNoFreeImageQuotaError(err) {
+		t.Fatalf("err=%v", err)
+	}
+	if len(store.List()) != 0 {
+		t.Fatalf("exhausted account was retained: %#v", store.List())
+	}
+}
+
 func TestGenerateUpdatesKnownImageQuotaAfterSuccess(t *testing.T) {
 	refreshedAt := time.Now().UTC().Format(time.RFC3339)
 	store := accounts.NewStore([]accounts.Account{{

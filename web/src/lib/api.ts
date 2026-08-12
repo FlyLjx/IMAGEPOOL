@@ -166,6 +166,7 @@ export type AccountMutationResponse = {
   skipped?: number;
   removed?: number;
   refreshed?: number;
+	refresh_id?: string;
   relogined?: number;
   errors?: Array<{ access_token: string; error: string }>;
 };

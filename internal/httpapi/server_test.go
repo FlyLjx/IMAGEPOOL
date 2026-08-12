@@ -75,6 +75,32 @@ func (b *validatingAPIBackend) readinessCheckCount() int {
 	return len(b.readinessTokens)
 }
 
+func waitForRefresh(t *testing.T, srvURL, refreshID string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		request, _ := http.NewRequest(http.MethodGet, srvURL+"/api/accounts/refresh/progress/"+refreshID, nil)
+		request.Header.Set("Authorization", "Bearer k")
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var progress struct {
+			Done bool `json:"done"`
+		}
+		err = json.NewDecoder(response.Body).Decode(&progress)
+		response.Body.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if progress.Done {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("account validation did not finish")
+}
+
 func (apiBackend) GenerateImage(ctx context.Context, account accounts.Account, req openaiweb.ImageRequest) (openaiweb.ImageResult, error) {
 	return openaiweb.ImageResult{URLs: []string{"https://example.com/a.png"}, AccountEmail: account.Email, BackendModel: "gpt-5-5", ConversationID: "conv"}, nil
 }
@@ -832,14 +858,31 @@ func TestAccountImportRemovesInvalidTokens(t *testing.T) {
 	var payload struct {
 		Added     int                 `json:"added"`
 		Refreshed int                 `json:"refreshed"`
+		RefreshID string              `json:"refresh_id"`
 		Errors    []map[string]string `json:"errors"`
 		Items     []map[string]any    `json:"items"`
 	}
 	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
 		t.Fatal(err)
 	}
-	if response.StatusCode != http.StatusOK || payload.Added != 2 || payload.Refreshed != 1 || len(payload.Errors) != 1 || len(payload.Items) != 2 {
+	if response.StatusCode != http.StatusOK || payload.Added != 2 || payload.Refreshed != 0 || payload.RefreshID == "" || len(payload.Errors) != 0 || len(payload.Items) != 3 {
 		t.Fatalf("status=%d payload=%#v", response.StatusCode, payload)
+	}
+	waitForRefresh(t, srv.URL, payload.RefreshID)
+	itemsResponse, err := http.NewRequest(http.MethodGet, srv.URL+"/api/accounts", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	itemsResponse.Header.Set("Authorization", "Bearer k")
+	refreshedItemsResponse, err := http.DefaultClient.Do(itemsResponse)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer refreshedItemsResponse.Body.Close()
+	if err := json.NewDecoder(refreshedItemsResponse.Body).Decode(&struct {
+		Items *[]map[string]any `json:"items"`
+	}{Items: &payload.Items}); err != nil {
+		t.Fatal(err)
 	}
 	valid := 0
 	for _, item := range payload.Items {
@@ -934,9 +977,12 @@ func TestExternalAccountImportHonorsRefreshFlag(t *testing.T) {
 	}
 
 	status, payload = post(`{"tokens":["bad"],"refresh":true}`)
-	if status != http.StatusOK || int(payload["added"].(float64)) != 1 || len(payload["errors"].([]any)) != 1 {
+	refreshID, _ := payload["refresh_id"].(string)
+	issues, _ := payload["errors"].([]any)
+	if status != http.StatusOK || int(payload["added"].(float64)) != 1 || int(payload["refreshed"].(float64)) != 0 || refreshID == "" || len(issues) != 0 {
 		t.Fatalf("refresh external import status=%d payload=%#v", status, payload)
 	}
+	waitForRefresh(t, srv.URL, refreshID)
 	if backend.readinessCheckCount() != 1 {
 		t.Fatalf("refresh=true did not perform exactly one readiness check: %d", backend.readinessCheckCount())
 	}

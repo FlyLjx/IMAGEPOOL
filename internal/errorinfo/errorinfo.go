@@ -80,14 +80,17 @@ func Classify(err error, statusHint int) Info {
 		if isSkippedMainlineText(assistantText) {
 			return info("图片未生成", "本次请求未触发生图流程，请修改提示词后重新提交。", "image_generation_not_started", "request", false, "check_request", "请修改提示词后重新提交", http.StatusBadRequest)
 		}
-		assistantText = sanitizeAssistantText(assistantText)
+		// image_response_text is the upstream message shown by the assistant
+		// after an accepted image turn. Keep it verbatim for management-side
+		// diagnosis instead of turning it into a generic request error.
+		assistantText = strings.TrimSpace(assistantText)
 		if assistantText == "" {
 			assistantText = "未识别到 OpenAI 返回的图片 ID。"
 		}
 		if errors.Is(err, openaiweb.ErrContentPolicy) {
 			return info("内容安全限制", assistantText, "content_policy_violation", "policy", false, "modify_content", "请根据返回内容修改后重新提交", http.StatusBadRequest)
 		}
-		return info("图片未生成", assistantText, "image_response_text", "request", false, "check_request", "请根据提示修改请求后重新提交", http.StatusBadRequest)
+		return info("图片未生成", assistantText, "image_response_text", "request", false, "check_request", "", http.StatusBadRequest)
 	}
 	if errors.Is(err, openaiweb.ErrContentPolicy) || isContentPolicyText(text) {
 		return info("内容安全限制", "提交内容触发了安全限制，请调整提示词或参考图后重试。", "content_policy_violation", "policy", false, "modify_content", "调整提示词或参考图后重新提交", http.StatusBadRequest)
@@ -380,7 +383,26 @@ func containsPrivateErrorDetail(lower string) bool {
 }
 
 func ClassifyText(message string, statusHint int) Info {
-	return Classify(errors.New(strings.TrimSpace(message)), statusHint)
+	message = strings.TrimSpace(message)
+	if assistantText, ok := persistedImageResponseText(message); ok {
+		return info("图片未生成", assistantText, "image_response_text", "request", false, "check_request", "", http.StatusBadRequest)
+	}
+	return Classify(errors.New(message), statusHint)
+}
+
+// persistedImageResponseText restores the upstream assistant message from a
+// legacy task error. New tasks retain the typed error through Classify, while
+// persisted tasks only have Error()'s textual representation available.
+func persistedImageResponseText(message string) (string, bool) {
+	const prefix = "image generation returned text without an image:"
+	if !strings.HasPrefix(message, prefix) {
+		return "", false
+	}
+	message = strings.TrimSpace(strings.TrimPrefix(message, prefix))
+	if index := strings.LastIndex(message, "; conversation_id="); index >= 0 {
+		message = strings.TrimSpace(message[:index])
+	}
+	return message, message != ""
 }
 
 func CategoryLabel(category string) string {
