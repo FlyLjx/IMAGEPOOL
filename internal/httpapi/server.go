@@ -77,7 +77,7 @@ type stabilityResponse struct {
 
 const (
 	statusClientClosedRequest          = 499
-	maxImageEditRequestBodyBytes int64 = 64 << 20
+	maxImageEditRequestBodyBytes int64 = 128 << 20
 )
 
 func NewServer(cfg config.Config, accountStore *accounts.Store, imageService *images.Service, textService *texts.Service, searchService *searches.Service, storageService *storage.Service, taskManager *tasks.Manager, configUpdated ...func(config.Config)) *Server {
