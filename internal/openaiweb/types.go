@@ -131,6 +131,7 @@ var (
 	ErrImageGenerationTerminated = errors.New("image generation terminated")
 	ErrImageGenerationStalled    = errors.New("image generation stalled")
 	ErrImageReferenceRequired    = errors.New("image reference required")
+	ErrImageAssistantText        = errors.New("image generation returned text without an image")
 	ErrMissingConduitToken       = errors.New("missing conduit_token")
 )
 
@@ -203,6 +204,51 @@ func NewImageReferenceRequiredError(conversationID string, diagnostics ImageAtte
 
 func IsImageReferenceRequired(err error) bool {
 	return errors.Is(err, ErrImageReferenceRequired)
+}
+
+// ImageAssistantTextError marks a completed assistant response that did not
+// start image generation. The text is preserved so the API can return the
+// actual message instead of waiting for the polling stall timeout.
+type ImageAssistantTextError struct {
+	ConversationID string
+	Message        string
+	Diagnostics    ImageAttemptDiagnostics
+	ContentPolicy  bool
+}
+
+func (e *ImageAssistantTextError) Error() string {
+	message := strings.TrimSpace(e.Message)
+	if message == "" {
+		message = "图片服务返回了文本，但没有生成图片。"
+	}
+	if strings.TrimSpace(e.ConversationID) == "" {
+		return fmt.Sprintf("%s: %s", ErrImageAssistantText, message)
+	}
+	return fmt.Sprintf("%s: %s; conversation_id=%s", ErrImageAssistantText, message, strings.TrimSpace(e.ConversationID))
+}
+
+func (e *ImageAssistantTextError) Unwrap() error {
+	if e.ContentPolicy {
+		return errors.Join(ErrImageAssistantText, ErrContentPolicy)
+	}
+	return ErrImageAssistantText
+}
+
+func NewImageAssistantTextError(conversationID, message string, diagnostics ImageAttemptDiagnostics, contentPolicy bool) error {
+	return &ImageAssistantTextError{
+		ConversationID: strings.TrimSpace(conversationID),
+		Message:        strings.TrimSpace(message),
+		Diagnostics:    diagnostics,
+		ContentPolicy:  contentPolicy,
+	}
+}
+
+func ImageAssistantText(err error) (string, bool) {
+	var textErr *ImageAssistantTextError
+	if !errors.As(err, &textErr) {
+		return "", false
+	}
+	return strings.TrimSpace(textErr.Message), true
 }
 
 // ImageConversationTimeoutError marks the case where ChatGPT has already
@@ -546,6 +592,9 @@ func IsRetryableImageError(err error) bool {
 		return false
 	}
 	if IsImageReferenceRequired(err) {
+		return false
+	}
+	if errors.Is(err, ErrImageAssistantText) {
 		return false
 	}
 	if IsImageConversationTimeout(err) {

@@ -28,6 +28,9 @@ func TestClassifyImageErrors(t *testing.T) {
 		{name: "revoked credential", err: &openaiweb.UpstreamError{Path: "/backend-api/files", StatusCode: http.StatusUnauthorized, Body: `{"code":"token_revoked"}`}, code: "account_pool_unavailable", status: http.StatusTooManyRequests},
 		{name: "legacy credential message", err: errors.New(openaiweb.PublicCredentialInvalidMessage), code: "account_pool_unavailable", status: http.StatusTooManyRequests},
 		{name: "content policy", err: openaiweb.ErrContentPolicy, code: "content_policy_violation", status: http.StatusBadRequest},
+		{name: "assistant text", err: openaiweb.NewImageAssistantTextError("conv", "请上传图片后继续。", openaiweb.ImageAttemptDiagnostics{}, false), code: "image_response_text", status: http.StatusBadRequest},
+		{name: "image parameter confirmation", err: openaiweb.NewImageAssistantTextError("conv", `{"size":"1024x1024","n":1,"is_style_transfer":false}`, openaiweb.ImageAttemptDiagnostics{}, false), code: "image_request_not_recognized", status: http.StatusBadRequest},
+		{name: "assistant policy text", err: openaiweb.NewImageAssistantTextError("conv", "该提示违反内容政策。", openaiweb.ImageAttemptDiagnostics{}, true), code: "content_policy_violation", status: http.StatusBadRequest},
 		{name: "canceled", err: context.Canceled, code: "request_canceled", status: StatusClientClosedRequest},
 	}
 	for _, test := range tests {
@@ -40,6 +43,24 @@ func TestClassifyImageErrors(t *testing.T) {
 				t.Fatalf("incomplete info=%#v", got)
 			}
 		})
+	}
+}
+
+func TestClassifyAssistantImageParameterConfirmationUsesFixedMessage(t *testing.T) {
+	got := Classify(openaiweb.NewImageAssistantTextError("conv", `{"size":"1024x1024","n":1,"transparent_background":false}`, openaiweb.ImageAttemptDiagnostics{}, false), 0)
+	if got.Message != "OAI侧未识别到提交生图参数，请重新提交" {
+		t.Fatalf("message=%q", got.Message)
+	}
+	plainText := Classify(openaiweb.NewImageAssistantTextError("conv", "请上传或指定需要编辑的原始图片后，我才能继续进行图片处理。", openaiweb.ImageAttemptDiagnostics{}, false), 0)
+	if plainText.Message != "请上传或指定需要编辑的原始图片后，我才能继续进行图片处理。" {
+		t.Fatalf("plain message=%q", plainText.Message)
+	}
+}
+
+func TestClassifyAssistantContentPolicyUsesFixedMessage(t *testing.T) {
+	got := Classify(openaiweb.NewImageAssistantTextError("conv", "该提示违反内容政策。", openaiweb.ImageAttemptDiagnostics{}, true), 0)
+	if got.Message != "OAI侧对内容进行审计后；并不符合生图政策；请先修改提示词；" {
+		t.Fatalf("message=%q", got.Message)
 	}
 }
 

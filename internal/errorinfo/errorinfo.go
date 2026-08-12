@@ -76,6 +76,20 @@ func Classify(err error, statusHint int) Info {
 	if openaiweb.IsImageReferenceRequired(err) || strings.Contains(lower, "image reference required") || strings.Contains(text, "上游要求上传缩略图") || strings.Contains(text, "上游要求上传参考图") {
 		return info("需要上传参考图", "检测到请求需要缩略图或参考图，请上传后重新提交任务。", "reference_image_required", "request", false, "check_request", "请上传缩略图或参考图文件", http.StatusBadRequest)
 	}
+	if assistantText, ok := openaiweb.ImageAssistantText(err); ok {
+		isParameterConfirmation := isImageParameterConfirmationText(assistantText)
+		assistantText = sanitizeAssistantText(assistantText)
+		if assistantText == "" {
+			assistantText = "图片服务返回了文本，但没有生成图片。"
+		}
+		if errors.Is(err, openaiweb.ErrContentPolicy) {
+			return info("内容安全限制", "OAI侧对内容进行审计后；并不符合生图政策；请先修改提示词；", "content_policy_violation", "policy", false, "modify_content", "请调整提示词或参考图后重新提交", http.StatusBadRequest)
+		}
+		if isParameterConfirmation {
+			return info("图片未生成", "OAI侧未识别到提交生图参数，请重新提交", "image_request_not_recognized", "request", false, "check_request", "请重新提交任务", http.StatusBadRequest)
+		}
+		return info("图片未生成", assistantText, "image_response_text", "request", false, "check_request", "请根据提示修改请求后重新提交", http.StatusBadRequest)
+	}
 	if errors.Is(err, openaiweb.ErrContentPolicy) || isContentPolicyText(text) {
 		return info("内容安全限制", "提交内容触发了安全限制，请调整提示词或参考图后重试。", "content_policy_violation", "policy", false, "modify_content", "调整提示词或参考图后重新提交", http.StatusBadRequest)
 	}
@@ -171,6 +185,34 @@ func Classify(err error, statusHint int) Info {
 		}
 	}
 	return fallback(statusHint)
+}
+
+func isImageParameterConfirmationText(text string) bool {
+	var value map[string]json.RawMessage
+	if json.Unmarshal([]byte(strings.TrimSpace(text)), &value) != nil || len(value) == 0 {
+		return false
+	}
+	parameterFields := 0
+	for _, key := range []string{"size", "n", "referenced_image_ids", "is_style_transfer", "transparent_background"} {
+		if _, ok := value[key]; ok {
+			parameterFields++
+		}
+	}
+	return parameterFields >= 2
+}
+
+func sanitizeAssistantText(value string) string {
+	value = strings.Join(strings.Fields(strings.TrimSpace(value)), " ")
+	if value == "" || containsPrivateErrorDetail(strings.ToLower(value)) {
+		return ""
+	}
+	value = publicURLPattern.ReplaceAllString(value, "")
+	value = publicEndpointPattern.ReplaceAllString(value, "")
+	value = strings.TrimSpace(value)
+	if len(value) > 1024 {
+		return value[:1024] + "…"
+	}
+	return value
 }
 
 func classifyUpstreamError(upstream *openaiweb.UpstreamError) (Info, bool) {

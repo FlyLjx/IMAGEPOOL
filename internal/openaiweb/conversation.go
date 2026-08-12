@@ -878,7 +878,8 @@ func (c *Client) pollImageResultsWithProgressAndDiagnostics(ctx context.Context,
 		diagnostics.LastHTTPStatus = http.StatusOK
 		diagnostics.Response.Observe(summarizeImageResponse(conversation, 0, excludedFileIDs))
 		MergeImageConversationSignals(&diagnostics, conversation)
-		if !diagnostics.ToolSeen && !diagnostics.ImageReferenceSeen && DetectReferenceImageRequest(conversation) {
+		signals := AnalyzeImageConversation(conversation)
+		if !signals.ToolSeen && !signals.ImageReferenceSeen && DetectReferenceImageRequest(conversation) {
 			diagnostics.ResultSignature = "reference_image_required"
 			return nil, nil, diagnostics, NewImageReferenceRequiredError(conversationID, diagnostics)
 		}
@@ -901,8 +902,10 @@ func (c *Client) pollImageResultsWithProgressAndDiagnostics(ctx context.Context,
 			}
 			continue
 		}
-		if policy := findContentPolicyText(conversation); policy != "" {
-			return nil, nil, diagnostics, fmt.Errorf("%w: %s", ErrContentPolicy, policy)
+		if !signals.ToolSeen && !signals.ImageReferenceSeen {
+			if text, _ := assistantTextDetails(conversation); text != "" {
+				return nil, nil, diagnostics, NewImageAssistantTextError(conversationID, text, diagnostics, findContentPolicyText(conversation) != "")
+			}
 		}
 		if stalledErr := maybeStalled(); stalledErr != nil {
 			return nil, nil, diagnostics, stalledErr

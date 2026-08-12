@@ -509,6 +509,36 @@ func TestPollImageResultsReportsStalledConversation(t *testing.T) {
 	}
 }
 
+func TestPollImageResultsReturnsAssistantTextWithoutWaitingForStall(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/backend-api/conversation/conv-text" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"message":{"author":{"role":"assistant"},"content":{"parts":["{\"size\":\"1024x1024\",\"n\":1,\"is_style_transfer\":false}"]}}}`))
+	}))
+	defer srv.Close()
+	cfg := config.Default()
+	cfg.ChatGPTBaseURL = srv.URL
+	client := NewClient(cfg, WithHTTPClient(srv.Client()))
+	client.pollTimeout = time.Second
+	client.pollInterval = time.Second
+	client.stallTimeout = time.Second
+	started := time.Now()
+	_, _, diagnostics, err := client.pollImageResultsWithProgressAndDiagnostics(context.Background(), accounts.Account{AccessToken: "token"}, "conv-text", nil, nil, nil)
+	if !errors.Is(err, ErrImageAssistantText) {
+		t.Fatalf("diagnostics=%#v err=%v", diagnostics, err)
+	}
+	message, ok := ImageAssistantText(err)
+	if !ok || message != `{"size":"1024x1024","n":1,"is_style_transfer":false}` {
+		t.Fatalf("message=%q ok=%t", message, ok)
+	}
+	if elapsed := time.Since(started); elapsed >= 500*time.Millisecond {
+		t.Fatalf("assistant text waited for stall timeout: %s", elapsed)
+	}
+}
+
 func TestConsumeImageStreamFiltersUploadedReferenceWithoutRole(t *testing.T) {
 	payload := `data: {"conversation_id":"conv-1","message":{"content":{"parts":[{"asset_pointer":"file-service://file_uploaded"},{"asset_pointer":"file-service://file_00000000aaaaaaaaaaaaaaaaaaaaaaaa"}]}}}` + "\n\n"
 	client := NewClient(config.Default())
