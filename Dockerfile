@@ -11,7 +11,14 @@ FROM golang:1.24-alpine AS go-build
 WORKDIR /src
 
 COPY go.mod go.sum ./
-RUN go mod download
+# Public module mirrors can occasionally time out in GitHub Actions. Retry the
+# download and allow a direct VCS fallback before failing the image build.
+RUN for attempt in 1 2 3 4; do \
+      GOPROXY="https://proxy.golang.org|direct" go mod download && exit 0; \
+      echo "go mod download failed (attempt ${attempt}/4), retrying..." >&2; \
+      sleep $((attempt * 3)); \
+    done; \
+    exit 1
 COPY . ./
 RUN go test ./... && go build -trimpath -ldflags="-s -w" -o /out/image-pool ./cmd/image-pool
 
