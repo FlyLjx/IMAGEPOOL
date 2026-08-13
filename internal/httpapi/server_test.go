@@ -459,7 +459,6 @@ func TestRegisterEventStreamAcceptsEventSourceToken(t *testing.T) {
 }
 
 func TestImageGenerationEndpoint(t *testing.T) {
-	t.Skip("task endpoint assertions were removed with the asynchronous image API")
 	srv := httptest.NewServer(testServer(t))
 	defer srv.Close()
 	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/v1/images/generations", strings.NewReader(`{"prompt":"draw","model":"codex-gpt-image-2"}`))
@@ -503,7 +502,7 @@ func TestImageGenerationEndpoint(t *testing.T) {
 	if err := json.NewDecoder(tasksResponse.Body).Decode(&taskPayload); err != nil {
 		t.Fatal(err)
 	}
-	if tasksResponse.StatusCode != http.StatusOK || len(taskPayload.Items) != 1 || taskPayload.Items[0].Status != tasks.StatusSucceeded || taskPayload.Items[0].Model != images.PublicImageModel || len(taskPayload.Items[0].Data) != 1 || taskPayload.Items[0].Data[0].B64JSON == "" || taskPayload.Items[0].Data[0].URL != "" || len(taskPayload.Items[0].UsedAccounts) != 1 || taskPayload.Items[0].UsedAccounts[0].Email != "a" || taskPayload.Items[0].UsedAccounts[0].AvailableQuota == nil || *taskPayload.Items[0].UsedAccounts[0].AvailableQuota != 0 {
+	if tasksResponse.StatusCode != http.StatusOK || len(taskPayload.Items) != 1 || taskPayload.Items[0].Status != tasks.StatusSucceeded || taskPayload.Items[0].Model != images.PublicImageModel || len(taskPayload.Items[0].Data) != 0 || len(taskPayload.Items[0].UsedAccounts) != 1 || taskPayload.Items[0].UsedAccounts[0].Email != "a" || taskPayload.Items[0].UsedAccounts[0].AvailableQuota == nil || *taskPayload.Items[0].UsedAccounts[0].AvailableQuota != 0 {
 		t.Fatalf("task status=%d payload=%#v", tasksResponse.StatusCode, taskPayload)
 	}
 }
@@ -624,7 +623,6 @@ func TestCredentialFailureNeverLeaksUpstreamDiagnostics(t *testing.T) {
 }
 
 func TestCompactTaskListOmitsLogsAndLegacyAlias(t *testing.T) {
-	t.Skip("asynchronous image API was removed")
 	srv := httptest.NewServer(testServer(t))
 	defer srv.Close()
 	create, _ := http.NewRequest(http.MethodPost, srv.URL+"/v1/images/generations", strings.NewReader(`{"prompt":"draw","model":"gpt-image-2"}`))
@@ -677,7 +675,7 @@ func TestCompactTaskListOmitsLogsAndLegacyAlias(t *testing.T) {
 	if err := json.NewDecoder(compactWithDataResponse.Body).Decode(&compactWithDataPayload); err != nil {
 		t.Fatal(err)
 	}
-	if compactWithDataResponse.StatusCode != http.StatusOK || len(compactWithDataPayload.Items) != 1 || len(compactWithDataPayload.Items[0].StatusLogs) != 0 || len(compactWithDataPayload.Items[0].Data) == 0 {
+	if compactWithDataResponse.StatusCode != http.StatusOK || len(compactWithDataPayload.Items) != 1 || len(compactWithDataPayload.Items[0].StatusLogs) != 0 || len(compactWithDataPayload.Items[0].Data) != 0 {
 		t.Fatalf("compact response with data status=%d payload=%#v", compactWithDataResponse.StatusCode, compactWithDataPayload)
 	}
 	compactStatusRequest, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/image-tasks/"+compactPayload.Items[0].ID+"/status?compact=1", nil)
@@ -705,7 +703,7 @@ func TestCompactTaskListOmitsLogsAndLegacyAlias(t *testing.T) {
 	if err := json.NewDecoder(fullStatusResponse.Body).Decode(&fullStatus); err != nil {
 		t.Fatal(err)
 	}
-	if fullStatusResponse.StatusCode != http.StatusOK || len(fullStatus.StatusLogs) == 0 || len(fullStatus.Data) == 0 {
+	if fullStatusResponse.StatusCode != http.StatusOK || len(fullStatus.StatusLogs) == 0 || len(fullStatus.Data) != 0 {
 		t.Fatalf("full status code=%d task=%#v", fullStatusResponse.StatusCode, fullStatus)
 	}
 
@@ -732,7 +730,9 @@ func TestCompactTaskListOmitsLogsAndLegacyAlias(t *testing.T) {
 	if err := json.Unmarshal(legacyBody, &legacyPayload); err != nil {
 		t.Fatal(err)
 	}
-	if legacyResponse.StatusCode != http.StatusOK || len(legacyPayload.Items) != 1 || len(legacyPayload.Tasks) == 0 || len(legacyPayload.Items[0].StatusLogs) == 0 || len(legacyPayload.Items[0].Data) == 0 || len(legacyPayload.Items[0].UsedAccounts) != 1 {
+	// Task records retain progress and account diagnostics, but never persist
+	// generated image payloads (URLs or Base64).
+	if legacyResponse.StatusCode != http.StatusOK || len(legacyPayload.Items) != 1 || len(legacyPayload.Tasks) == 0 || len(legacyPayload.Items[0].StatusLogs) == 0 || len(legacyPayload.Items[0].Data) != 0 || len(legacyPayload.Items[0].UsedAccounts) != 1 {
 		t.Fatalf("legacy payload=%#v", legacyPayload)
 	}
 }

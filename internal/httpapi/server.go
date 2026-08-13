@@ -333,6 +333,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"register": s.register.Reset()})
 	case r.Method == http.MethodPost && r.URL.Path == "/api/register/outlook-pool/reset":
 		s.handleRegisterOutlookReset(w, r)
+	case r.Method == http.MethodGet && r.URL.Path == "/api/image-tasks":
+		s.handleTaskList(w, r)
+	case r.Method == http.MethodGet && r.URL.Path == "/api/image-tasks/history":
+		s.handleTaskHistory(w, r)
+	case strings.HasPrefix(r.URL.Path, "/api/image-tasks/"):
+		s.handleTaskItem(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/api/image-pool/capacity":
 		s.handleImagePoolCapacity(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/api/accounts/recovery-logs":

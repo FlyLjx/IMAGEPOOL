@@ -16,7 +16,7 @@
 - Anthropic 兼容：`POST /v1/messages`
 - 搜索：`POST /v1/search`
 - 稳定性：`GET /health/stability`（公开、无缓存，返回最近 60 秒调用的稳定性与逐秒统计，并包含最近 1 小时调用统计 `recent_hour` 和总览“运行状况”卡片的 `runtime` 数据）
-- 图片生成仅支持同步响应：`POST /v1/images/generations`、`POST /v1/images/edits`
+- 图片生成仅支持同步响应：`POST /v1/images/generations`、`POST /v1/images/edits`；后台可通过任务队列查看同步请求的调度与诊断记录。
 - 管理接口：账号池、用户 Key、配置、运行状况、日志、图片与标签、代理运行时设置。
 
 账号导入支持 OpenAI OAuth PKCE：管理员在账号导入页打开授权 URL，完成登录后粘贴 callback URL 即可保存 access token、refresh token 和 id token。FlareSolverr 模式可通过 clearance 测试接口刷新并保存通行 Cookie。

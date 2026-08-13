@@ -76,7 +76,7 @@ Go 测试里通过 mock ChatGPT Web 服务验证了文本 SSE payload、header �
 ## 图片生成
 
 - 图片生成与编辑仅支持同步响应：`POST /v1/images/generations`、`POST /v1/images/edits`。
-- 不支持 `async`、`callback_url` 和 `/api/image-tasks/*` 任务轮询接口。
+- 不支持 `async` 和 `callback_url`。管理员可通过 `/api/image-tasks`、`/api/image-tasks/history` 及 `/api/image-tasks/{id}/status` 查看同步请求的调度与诊断记录。
 - `b64_json` 仅存在于当前 HTTP 响应中，不写入任务历史或 PostgreSQL。
 
 ## 不支持的任务
