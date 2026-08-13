@@ -30,6 +30,8 @@ type Info struct {
 
 const publicServiceCategory = "service"
 
+const imageRequestEchoFallbackMessage = "非常抱歉，生成的图片可能违反了关于暴力内容的防护限制。如果你认为此判断有误，请重试或修改提示语。"
+
 var (
 	publicURLPattern      = regexp.MustCompile(`(?i)https?://[^\s"'<>，。；：]+`)
 	publicEndpointPattern = regexp.MustCompile(`(?i)(?:/backend-api/|/backend-anon/|/v1/)[^\s"'<>，。；：,}]*`)
@@ -77,6 +79,9 @@ func Classify(err error, statusHint int) Info {
 		return info("需要上传参考图", "检测到请求需要缩略图或参考图，请上传后重新提交任务。", "reference_image_required", "request", false, "check_request", "请上传缩略图或参考图文件", http.StatusBadRequest)
 	}
 	if assistantText, ok := openaiweb.ImageAssistantText(err); ok {
+		if openaiweb.IsImageRequestEchoRetryError(err) {
+			return info("内容安全限制", imageRequestEchoFallbackMessage, "content_policy_violation", "policy", false, "modify_content", "请根据返回内容修改后重新提交", http.StatusBadRequest)
+		}
 		if isSkippedMainlineText(assistantText) {
 			return info("图片未生成", "本次请求未触发生图流程，请修改提示词后重新提交。", "image_generation_not_started", "request", false, "check_request", "请修改提示词后重新提交", http.StatusBadRequest)
 		}

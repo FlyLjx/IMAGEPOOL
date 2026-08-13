@@ -269,14 +269,48 @@ func IsSkippedMainlineImageError(err error) bool {
 // were accepted by the current account, yet the image-generation turn was not
 // started, so retrying the original request on another account is appropriate.
 func IsReferencedImageIDsRetryError(err error) bool {
+	_, referenced := imageRequestEchoDetails(err)
+	return referenced
+}
+
+// IsImageRequestEchoRetryError identifies an upstream response that only
+// echoes image-generation request fields instead of starting an image tool.
+// This is distinct from an assistant's natural-language answer, so retrying
+// the original request with another account is appropriate.
+func IsImageRequestEchoRetryError(err error) bool {
+	echoed, _ := imageRequestEchoDetails(err)
+	return echoed
+}
+
+func imageRequestEchoDetails(err error) (echoed, referenced bool) {
 	text, ok := ImageAssistantText(err)
 	if !ok {
-		return false
+		return false, false
+	}
+	var raw map[string]json.RawMessage
+	if json.Unmarshal([]byte(strings.TrimSpace(text)), &raw) != nil {
+		return false, false
 	}
 	var value struct {
 		ReferencedImageIDs []string `json:"referenced_image_ids"`
 	}
-	return json.Unmarshal([]byte(strings.TrimSpace(text)), &value) == nil && len(value.ReferencedImageIDs) > 0
+	if json.Unmarshal([]byte(strings.TrimSpace(text)), &value) == nil && len(value.ReferencedImageIDs) > 0 {
+		return true, true
+	}
+	prompt, ok := raw["prompt"]
+	if !ok {
+		return false, false
+	}
+	var promptText string
+	if json.Unmarshal(prompt, &promptText) != nil || strings.TrimSpace(promptText) == "" {
+		return false, false
+	}
+	for _, field := range []string{"size", "n", "model", "quality", "response_format", "output_format", "is_style_transfer"} {
+		if _, ok := raw[field]; ok {
+			return true, false
+		}
+	}
+	return false, false
 }
 
 // ImageConversationTimeoutError marks the case where ChatGPT has already
@@ -653,7 +687,7 @@ func IsRetryableImageError(err error) bool {
 		return false
 	}
 	if errors.Is(err, ErrImageAssistantText) {
-		return IsSkippedMainlineImageError(err) || IsReferencedImageIDsRetryError(err)
+		return IsSkippedMainlineImageError(err) || IsImageRequestEchoRetryError(err)
 	}
 	if IsImageConversationTimeout(err) {
 		return false

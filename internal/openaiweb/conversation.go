@@ -904,10 +904,15 @@ func (c *Client) pollImageResultsWithProgressAndDiagnostics(ctx context.Context,
 		}
 		if text, _ := assistantTextDetails(conversation); text != "" {
 			assistantErr := NewImageAssistantTextError(conversationID, text, diagnostics, findContentPolicyText(conversation) != "")
-			if IsReferencedImageIDsRetryError(assistantErr) {
-				diagnostics.ResultSignature = "referenced_image_ids_echo"
+			if IsImageRequestEchoRetryError(assistantErr) {
+				referencedImageIDs := IsReferencedImageIDsRetryError(assistantErr)
+				if referencedImageIDs {
+					diagnostics.ResultSignature = "referenced_image_ids_echo"
+				} else {
+					diagnostics.ResultSignature = "image_request_parameters_echo"
+				}
 				assistantErr = NewImageAssistantTextError(conversationID, text, diagnostics, false)
-				log.Printf("image_reference_binding event=upstream_generation_not_started conversation_id=%s uploaded_file_count=%d response_raw_file_refs=%d response_reference_markers=%s", conversationID, len(excludedFileIDs), diagnostics.Response.LastRawFileReferences, joinDiagnosticValues(diagnostics.Response.LastReferenceMarkers))
+				log.Printf("image_request_echo event=upstream_generation_not_started conversation_id=%s referenced_image_ids=%t uploaded_file_count=%d response_raw_file_refs=%d response_reference_markers=%s", conversationID, referencedImageIDs, len(excludedFileIDs), diagnostics.Response.LastRawFileReferences, joinDiagnosticValues(diagnostics.Response.LastReferenceMarkers))
 			}
 			return nil, nil, diagnostics, assistantErr
 		}
