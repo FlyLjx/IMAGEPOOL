@@ -362,7 +362,7 @@ func TestTaskLifecycle(t *testing.T) {
 	for time.Now().Before(deadline) {
 		got, ok := m.Status(task.ID)
 		if ok && got.Status == StatusSucceeded {
-			if got.ProgressPercent != 100 || len(got.Data) != 1 || got.StatusLogCount == 0 {
+			if got.ProgressPercent != 100 || len(got.Data) != 0 || got.StatusLogCount == 0 {
 				t.Fatalf("bad completed task: %#v", got)
 			}
 			return
@@ -448,7 +448,7 @@ func TestRunGenerationCreatesTrackedTask(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if task.Status != StatusSucceeded || task.OwnerID != "user-a" || len(task.Data) != 1 || len(result.Data) != 1 {
+	if task.Status != StatusSucceeded || task.OwnerID != "user-a" || len(task.Data) != 0 || len(result.Data) != 1 {
 		t.Fatalf("task=%#v result=%#v", task, result)
 	}
 	if task.Model != images.PublicImageModel || result.BackendModel != images.PublicImageModel {
@@ -594,8 +594,8 @@ func TestCompletedTasksAreCompacted(t *testing.T) {
 	if !ok || stored.Status != StatusSucceeded {
 		t.Fatalf("stored=%#v ok=%v", stored, ok)
 	}
-	if len(stored.Data) != 1 {
-		t.Fatalf("completed task lost image data: %#v", stored)
+	if len(stored.Data) != 0 {
+		t.Fatalf("completed task retained image data: %#v", stored)
 	}
 	if len(stored.StatusLogs) != maxCompletedStatusLogs {
 		t.Fatalf("status logs=%d want %d", len(stored.StatusLogs), maxCompletedStatusLogs)

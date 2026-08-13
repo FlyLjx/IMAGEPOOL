@@ -9,7 +9,6 @@ import {
   LogOut,
   Menu,
   Settings,
-  TimerReset,
   UsersRound,
 } from "lucide-react";
 import { Button, Drawer, Layout, Menu as AntMenu } from "antd";
@@ -24,7 +23,6 @@ const adminNavItems = [
   { href: "/dashboard", label: "系统总览", icon: LayoutDashboard },
   { href: "/accounts", label: "号池管理", icon: UsersRound },
   { href: "/image-manager", label: "图片管理", icon: Images },
-  { href: "/tasks", label: "任务队列", icon: TimerReset },
   { href: "/debug", label: "调试", icon: Bug },
   { href: "/settings", label: "设置", icon: Settings },
 ];

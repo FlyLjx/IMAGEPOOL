@@ -11,8 +11,6 @@ import { formatShanghaiDateTime } from "@/lib/datetime";
 const endpointOptions = [
   { label: "图片生成", value: "/v1/images/generations" },
   { label: "图片编辑", value: "/v1/images/edits" },
-  { label: "异步图片生成", value: "/api/image-tasks/generations" },
-  { label: "异步图片编辑", value: "/api/image-tasks/edits" },
   { label: "Chat Completions", value: "/v1/chat/completions" },
   { label: "Responses", value: "/v1/responses" },
   { label: "Messages", value: "/v1/messages" },

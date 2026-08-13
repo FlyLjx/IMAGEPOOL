@@ -16,6 +16,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1057,53 +1058,70 @@ func (s *Service) finalizeResult(ctx context.Context, account accounts.Account, 
 }
 
 func (s *Service) resultAsBase64(ctx context.Context, account accounts.Account, result openaiweb.ImageResult, req Request, outputFormat string) (openaiweb.ImageResult, error) {
-	dataItems, err := s.resultImageBytes(ctx, account, result)
-	if err != nil {
-		return result, err
-	}
 	out := result
 	out.URLs = nil
-	out.B64JSON = make([]string, 0, len(dataItems))
-	for _, data := range dataItems {
-		if outputFormat != "" {
-			var err error
-			data, err = convertImageDataFormat(data, outputFormat)
+	out.B64JSON = make([]string, 0, len(result.B64JSON)+len(result.URLs))
+	if len(result.B64JSON) == 0 && len(result.URLs) == 0 {
+		return result, fmt.Errorf("upstream completed without generating images")
+	}
+	for _, encoded := range result.B64JSON {
+		data, err := base64.StdEncoding.DecodeString(encoded)
+		if err != nil {
+			return result, fmt.Errorf("decode b64_json image: %w", err)
+		}
+		value, err := s.encodeTemporaryImage(data, outputFormat)
+		if err != nil {
+			return result, err
+		}
+		out.B64JSON = append(out.B64JSON, value)
+	}
+	if len(result.URLs) > 0 {
+		downloader, ok := s.backend.(imageDownloader)
+		if !ok {
+			return result, fmt.Errorf("image downloader is required for response_format=b64_json")
+		}
+		for _, remoteURL := range result.URLs {
+			data, err := downloader.DownloadImageFor(ctx, account, remoteURL)
 			if err != nil {
 				return result, err
 			}
+			value, err := s.encodeTemporaryImage(data, outputFormat)
+			if err != nil {
+				return result, err
+			}
+			out.B64JSON = append(out.B64JSON, value)
 		}
-		out.B64JSON = append(out.B64JSON, base64.StdEncoding.EncodeToString(data))
 	}
 	return out, nil
 }
 
-func (s *Service) resultImageBytes(ctx context.Context, account accounts.Account, result openaiweb.ImageResult) ([][]byte, error) {
-	items := make([][]byte, 0, len(result.B64JSON)+len(result.URLs))
-	for _, encoded := range result.B64JSON {
-		data, err := base64.StdEncoding.DecodeString(encoded)
+// encodeTemporaryImage keeps the downloaded image out of the persistent image
+// cache. The temporary file is removed on every success and error path.
+func (s *Service) encodeTemporaryImage(data []byte, outputFormat string) (string, error) {
+	file, err := os.CreateTemp("", "image-pool-b64-*")
+	if err != nil {
+		return "", fmt.Errorf("create temporary image: %w", err)
+	}
+	path := file.Name()
+	defer os.Remove(path)
+	if _, err := file.Write(data); err != nil {
+		file.Close()
+		return "", fmt.Errorf("write temporary image: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		return "", fmt.Errorf("close temporary image: %w", err)
+	}
+	converted, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("read temporary image: %w", err)
+	}
+	if outputFormat != "" {
+		converted, err = convertImageDataFormat(converted, outputFormat)
 		if err != nil {
-			return nil, fmt.Errorf("decode b64_json image: %w", err)
+			return "", err
 		}
-		items = append(items, data)
 	}
-	if len(result.URLs) == 0 {
-		if len(items) == 0 {
-			return nil, fmt.Errorf("upstream completed without generating images")
-		}
-		return items, nil
-	}
-	downloader, ok := s.backend.(imageDownloader)
-	if !ok {
-		return nil, fmt.Errorf("image downloader is required for response_format=b64_json")
-	}
-	for _, remoteURL := range result.URLs {
-		data, err := downloader.DownloadImageFor(ctx, account, remoteURL)
-		if err != nil {
-			return nil, err
-		}
-		items = append(items, data)
-	}
-	return items, nil
+	return base64.StdEncoding.EncodeToString(converted), nil
 }
 
 func (s *Service) cacheResult(ctx context.Context, account accounts.Account, result openaiweb.ImageResult, req Request, outputFormat string) (openaiweb.ImageResult, error) {

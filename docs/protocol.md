@@ -73,12 +73,11 @@ Go 测试里通过 mock ChatGPT Web 服务验证了文本 SSE payload、header �
 - 账号导入接口只等待存储落盘和验证任务入队：`POST /api/accounts` 与 `POST /api/external/accounts/import` 立即返回 `refresh_id`，后台异步轻量校验凭证和图片额度。验证完成前账号不参与调度，导入请求不等待验证结果；`refresh` 字段仅保留兼容性。
 - FlareSolverr 模式的 clearance 测试会请求 `/v1`，保存返回的 Cookie、`cf_clearance` 和 User-Agent，然后热更新客户端。
 
-## 异步任务与权限
+## 图片生成
 
-- `POST /api/image-tasks/generations` 与 `POST /api/image-tasks/edits` 会立即返回新的任务 ID。
-- 任务实时状态通过 `GET /api/image-tasks/{id}/status` 获取，其中包含进度、账号尝试次数、会话 ID 和状态日志。
-- 相同的 `client_task_id` 不会复用任务。
-- 普通用户只能读取、继续轮询和取消自己的任务；管理员可以访问所有任务。
+- 图片生成与编辑仅支持同步响应：`POST /v1/images/generations`、`POST /v1/images/edits`。
+- 不支持 `async`、`callback_url` 和 `/api/image-tasks/*` 任务轮询接口。
+- `b64_json` 仅存在于当前 HTTP 响应中，不写入任务历史或 PostgreSQL。
 
 ## 不支持的任务
 

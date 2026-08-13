@@ -24,6 +24,16 @@ func validateAsyncImageRequest(r *http.Request, req images.Request, inherentlyAs
 	return validateCallbackURL(r.Context(), callbackURL)
 }
 
+func validateSynchronousImageRequest(req images.Request) error {
+	if req.Async {
+		return fmt.Errorf("async image tasks are not supported; use the synchronous image endpoint")
+	}
+	if strings.TrimSpace(req.CallbackURL) != "" {
+		return fmt.Errorf("callback_url is not supported for synchronous image requests")
+	}
+	return nil
+}
+
 func standardImageTask(task tasks.Task) map[string]any {
 	status := "queued"
 	switch task.Status {

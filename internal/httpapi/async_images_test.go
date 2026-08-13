@@ -10,10 +10,9 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 )
 
-func TestStandardAsyncImageGenerationAndStatus(t *testing.T) {
+func TestImageEndpointsRejectAsyncAndRemovedTaskRoutes(t *testing.T) {
 	srv := httptest.NewServer(testServer(t))
 	defer srv.Close()
 	request, _ := http.NewRequest(http.MethodPost, srv.URL+"/v1/images/generations", strings.NewReader(`{"prompt":"draw","async":true,"response_format":"url"}`))
@@ -24,38 +23,19 @@ func TestStandardAsyncImageGenerationAndStatus(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer response.Body.Close()
-	if response.StatusCode != http.StatusAccepted {
+	if response.StatusCode != http.StatusBadRequest {
 		t.Fatalf("status=%d", response.StatusCode)
 	}
-	var submitted map[string]any
-	if err := json.NewDecoder(response.Body).Decode(&submitted); err != nil {
+	taskRequest, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/image-tasks/generations", strings.NewReader(`{"prompt":"draw"}`))
+	taskRequest.Header.Set("Authorization", "Bearer k")
+	taskResponse, err := http.DefaultClient.Do(taskRequest)
+	if err != nil {
 		t.Fatal(err)
 	}
-	id, _ := submitted["id"].(string)
-	if id == "" || submitted["object"] != "image.task" {
-		t.Fatalf("submitted=%#v", submitted)
+	defer taskResponse.Body.Close()
+	if taskResponse.StatusCode != http.StatusNotFound {
+		t.Fatalf("task endpoint status=%d", taskResponse.StatusCode)
 	}
-
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		statusRequest, _ := http.NewRequest(http.MethodGet, srv.URL+"/v1/images/"+id, nil)
-		statusRequest.Header.Set("Authorization", "Bearer k")
-		statusResponse, err := http.DefaultClient.Do(statusRequest)
-		if err != nil {
-			t.Fatal(err)
-		}
-		var status map[string]any
-		_ = json.NewDecoder(statusResponse.Body).Decode(&status)
-		statusResponse.Body.Close()
-		if status["status"] == "completed" {
-			if status["result"] == nil {
-				t.Fatalf("completed task has no result: %#v", status)
-			}
-			return
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	t.Fatal("async image task did not complete")
 }
 
 func TestCallbackURLRejectsLocalAndPlainHTTP(t *testing.T) {

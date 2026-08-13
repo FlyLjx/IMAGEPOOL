@@ -264,8 +264,6 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleImageGeneration(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/images/edits":
 		s.handleImageEdit(w, r, false)
-	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/images/"):
-		s.handleStandardImageTask(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/chat/completions":
 		s.handleChatCompletions(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/responses":
@@ -335,16 +333,6 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"register": s.register.Reset()})
 	case r.Method == http.MethodPost && r.URL.Path == "/api/register/outlook-pool/reset":
 		s.handleRegisterOutlookReset(w, r)
-	case r.Method == http.MethodGet && r.URL.Path == "/api/image-tasks":
-		s.handleTaskList(w, r)
-	case r.Method == http.MethodGet && r.URL.Path == "/api/image-tasks/history":
-		s.handleTaskHistory(w, r)
-	case r.Method == http.MethodPost && r.URL.Path == "/api/image-tasks/generations":
-		s.handleTaskGeneration(w, r)
-	case r.Method == http.MethodPost && r.URL.Path == "/api/image-tasks/edits":
-		s.handleTaskEdit(w, r)
-	case strings.HasPrefix(r.URL.Path, "/api/image-tasks/"):
-		s.handleTaskItem(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/api/image-pool/capacity":
 		s.handleImagePoolCapacity(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/api/accounts/recovery-logs":
@@ -394,7 +382,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func isTrackedPath(path string) bool {
-	return (strings.HasPrefix(path, "/v1/") && path != "/v1/models") || path == "/api/image-tasks/generations" || path == "/api/image-tasks/edits" || path == "/api/accounts/test-image"
+	return (strings.HasPrefix(path, "/v1/") && path != "/v1/models") || path == "/api/accounts/test-image"
 }
 
 func (s *Server) currentConfig() config.Config {
@@ -494,7 +482,7 @@ func (s *Server) setConfig(cfg config.Config) {
 }
 
 func userAccessiblePath(path string) bool {
-	return path == "/auth/login" || strings.HasPrefix(path, "/v1/") || strings.HasPrefix(path, "/api/image-tasks")
+	return path == "/auth/login" || strings.HasPrefix(path, "/v1/")
 }
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
@@ -651,7 +639,7 @@ func (s *Server) handleImageGeneration(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	if err := validateAsyncImageRequest(r, req, false); err != nil {
+	if err := validateSynchronousImageRequest(req); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
@@ -662,11 +650,6 @@ func (s *Server) handleImageGeneration(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	identity, _ := auth.IdentityFromContext(r.Context())
-	if req.Async {
-		task := s.tasks.SubmitGenerationForOwner(identity.ID, "", req)
-		writeJSON(w, http.StatusAccepted, standardImageTask(publicTask(task)))
-		return
-	}
 	if req.Stream {
 		s.streamImage(w, r, req)
 		return
@@ -679,12 +662,12 @@ func (s *Server) handleImageGeneration(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp.MarshalForOpenAI())
 }
 
-func (s *Server) handleImageEdit(w http.ResponseWriter, r *http.Request, asTask bool) {
+func (s *Server) handleImageEdit(w http.ResponseWriter, r *http.Request, _ bool) {
 	// Keep the complete multipart or Base64 JSON request bounded. The limit is
 	// applied to the request body because Base64 and multipart framing add
 	// overhead around the source image itself.
 	r.Body = http.MaxBytesReader(w, r.Body, maxImageEditRequestBodyBytes)
-	req, clientTaskID, err := s.parseEditRequest(r)
+	req, _, err := s.parseEditRequest(r)
 	if err != nil {
 		writeError(w, imageEditRequestErrorStatus(err), err)
 		return
@@ -693,29 +676,14 @@ func (s *Server) handleImageEdit(w http.ResponseWriter, r *http.Request, asTask 
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	if err := validateAsyncImageRequest(r, req, asTask); err != nil {
+	if err := validateSynchronousImageRequest(req); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
 	req.OutputBaseURL = baseURL(r)
 	metrics.SetModel(r.Context(), requestMetricImageModel(req.Model))
-	endpoint := "/v1/images/edits"
-	if asTask {
-		endpoint = "/api/image-tasks/edits"
-	}
-	if err := s.consumeQuota(r, endpoint, req.Model, 1, normalizedImageCount(req.N)); err != nil {
+	if err := s.consumeQuota(r, "/v1/images/edits", req.Model, 1, normalizedImageCount(req.N)); err != nil {
 		writeError(w, statusFromError(err), err)
-		return
-	}
-	asyncTask := asTask || req.Async
-	if asyncTask {
-		identity, _ := auth.IdentityFromContext(r.Context())
-		task := s.tasks.SubmitEditForOwner(identity.ID, clientTaskID, req)
-		if asTask {
-			writeJSON(w, http.StatusAccepted, taskResponse(task, identity.IsAdmin()))
-		} else {
-			writeJSON(w, http.StatusAccepted, standardImageTask(publicTask(task)))
-		}
 		return
 	}
 	identity, _ := auth.IdentityFromContext(r.Context())

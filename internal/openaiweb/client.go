@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -415,19 +414,6 @@ func (c *Client) GenerateImage(ctx context.Context, account accounts.Account, re
 		}, fmt.Errorf("upstream completed without generating images")
 	}
 	out := ImageResult{URLs: urls, ConversationID: conversationID, AccountEmail: account.Email, BackendModel: backendModel, Diagnostics: diagnostics}
-	if strings.EqualFold(req.ResponseFormat, "b64_json") {
-		b64, err := c.downloadBase64(generationCtx, account, urls)
-		if err != nil {
-			return ImageResult{
-				ConversationID: conversationID,
-				AccountEmail:   account.Email,
-				BackendModel:   backendModel,
-				Diagnostics:    diagnostics,
-			}, imageAttemptError(ctx, generationCtx, err)
-		}
-		out.B64JSON = b64
-		out.URLs = nil
-	}
 	return out, nil
 }
 
@@ -1003,18 +989,6 @@ func compactLogValue(value string, limit int) string {
 		return value
 	}
 	return value[:limit] + "..."
-}
-
-func (c *Client) downloadBase64(ctx context.Context, account accounts.Account, urls []string) ([]string, error) {
-	out := make([]string, 0, len(urls))
-	for _, u := range urls {
-		data, err := c.downloadImageFor(ctx, account, u)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, base64.StdEncoding.EncodeToString(data))
-	}
-	return out, nil
 }
 
 func (c *Client) DownloadImage(ctx context.Context, imageURL string) ([]byte, error) {

@@ -539,7 +539,9 @@ func (m *Manager) runWith(ctx context.Context, id string, req images.Request, ge
 	task.ProgressPercent = 100
 	task.RealtimeStatus = "任务处理完成"
 	task.Result = &result
-	task.Data = append([]images.Data(nil), result.Data...)
+	// Image bytes are returned by the synchronous request. Keep task history
+	// limited to metadata so Base64 responses are not persisted in memory or JSONB.
+	task.Data = nil
 	applyAttemptStats(task, internalResult)
 	appendLog(task, LogEntry{Time: now, Level: "success", Event: "completed", Progress: "succeeded", Message: "任务处理完成"})
 	return result, nil
@@ -1138,6 +1140,10 @@ func compactCompletedTask(task *Task) bool {
 	changed := false
 	if task.Result != nil {
 		task.Result = nil
+		changed = true
+	}
+	if task.Data != nil {
+		task.Data = nil
 		changed = true
 	}
 	if task.StatusLogCount < len(task.StatusLogs) {
