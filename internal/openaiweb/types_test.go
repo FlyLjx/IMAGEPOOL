@@ -97,6 +97,15 @@ func TestImageTimeoutRetryClassification(t *testing.T) {
 	if IsRetryableImageError(NewImageAssistantTextError("conv-1", `{"size":"1024x1536","prompt":null,"transparent_background":false}`, ImageAttemptDiagnostics{}, false)) {
 		t.Fatal("a partial object with a null prompt must not be treated as an image request echo")
 	}
+	if !IsRetryableImageError(NewImageAssistantTextError("conv-1", `{"size":null,"n":1,"prompt":"真人国风实景摄影，85mm镜头，浅景深。竖`, ImageAttemptDiagnostics{}, false)) {
+		t.Fatal("a truncated image request argument object must switch accounts")
+	}
+	if IsRetryableImageError(NewImageAssistantTextError("conv-1", `{"prompt":"draw`, ImageAttemptDiagnostics{}, false)) {
+		t.Fatal("a truncated prompt-only object must not be treated as an image request echo")
+	}
+	if IsRetryableImageError(NewImageAssistantTextError("conv-1", `图片参数示例：{"size":null,"n":1,"prompt":"draw`, ImageAttemptDiagnostics{}, false)) {
+		t.Fatal("assistant prose containing an argument example must not be treated as an image request echo")
+	}
 	if IsRetryableImageError(NewImageAssistantTextError("conv-1", "请上传图片后继续。", ImageAttemptDiagnostics{}, false)) {
 		t.Fatal("ordinary assistant text must not switch accounts")
 	}

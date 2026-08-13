@@ -287,9 +287,10 @@ func imageRequestEchoDetails(err error) (echoed, referenced bool) {
 	if !ok {
 		return false, false
 	}
+	text = strings.TrimSpace(text)
 	var raw map[string]json.RawMessage
-	if json.Unmarshal([]byte(strings.TrimSpace(text)), &raw) != nil {
-		return false, false
+	if json.Unmarshal([]byte(text), &raw) != nil {
+		return truncatedImageRequestEchoDetails(text)
 	}
 	var value struct {
 		ReferencedImageIDs []string `json:"referenced_image_ids"`
@@ -316,6 +317,27 @@ func imageRequestEchoDetails(err error) (echoed, referenced bool) {
 	// upstream turn fails to start. Require several companion fields so an
 	// unrelated JSON object containing prompt:null is not treated as an echo.
 	return strings.TrimSpace(string(prompt)) == "null" && imageFieldCount >= 3, false
+}
+
+// truncatedImageRequestEchoDetails recognizes an incomplete image-tool
+// argument object observed while the upstream response is still in progress.
+// It intentionally requires a JSON-object prefix, prompt, and multiple exact
+// image fields so ordinary assistant prose and user prompt text do not match.
+func truncatedImageRequestEchoDetails(text string) (echoed, referenced bool) {
+	if !strings.HasPrefix(strings.TrimSpace(text), "{") || !strings.Contains(text, `"prompt"`) {
+		return false, false
+	}
+	imageFieldCount := 0
+	for _, field := range []string{"size", "n", "model", "quality", "response_format", "output_format", "is_style_transfer", "transparent_background", "referenced_image_ids"} {
+		if strings.Contains(text, `"`+field+`"`) {
+			imageFieldCount++
+		}
+	}
+	if imageFieldCount < 2 {
+		return false, false
+	}
+	referenced = strings.Contains(text, `"referenced_image_ids"`) && !strings.Contains(text, `"referenced_image_ids":null`)
+	return true, referenced
 }
 
 // ImageConversationTimeoutError marks the case where ChatGPT has already
