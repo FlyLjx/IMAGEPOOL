@@ -76,6 +76,17 @@ func (m *RefreshManager) SetConcurrency(concurrency int) {
 }
 
 func (m *RefreshManager) Start(tokens []string) (string, error) {
+	return m.start(tokens, false)
+}
+
+// StartLightweight immediately queues account metadata and quota validation
+// without running image-readiness or model-list checks. Import endpoints use
+// this path so persistence and the HTTP response do not wait on validation.
+func (m *RefreshManager) StartLightweight(tokens []string) (string, error) {
+	return m.start(tokens, true)
+}
+
+func (m *RefreshManager) start(tokens []string, lightweight bool) (string, error) {
 	if m == nil || m.store == nil || m.checker == nil {
 		return "", fmt.Errorf("account refresh is not configured")
 	}
@@ -88,7 +99,7 @@ func (m *RefreshManager) Start(tokens []string) (string, error) {
 	id := fmt.Sprintf("refresh_%d_%d", time.Now().UnixNano(), m.sequence)
 	m.progress[id] = &RefreshProgress{Total: len(tokens), StatusCounts: map[string]int{}, Results: []RefreshItem{}}
 	m.mu.Unlock()
-	go m.run(id, tokens)
+	go m.run(id, tokens, lightweight)
 	return id, nil
 }
 
@@ -148,8 +159,8 @@ func (m *RefreshManager) RefreshScheduled(tokens []string) (RefreshProgress, err
 	return progress, nil
 }
 
-func (m *RefreshManager) run(id string, tokens []string) {
-	for result := range m.refreshResults(tokens, false) {
+func (m *RefreshManager) run(id string, tokens []string, lightweight bool) {
+	for result := range m.refreshResults(tokens, lightweight) {
 		m.mu.Lock()
 		progress := m.progress[id]
 		if progress != nil {

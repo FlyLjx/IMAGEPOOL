@@ -1145,23 +1145,8 @@ func (s *Server) handleAccountImport(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"added": added, "skipped": skipped, "refreshed": refreshed, "refresh_id": refreshID, "errors": issues, "items": s.publicAccounts()})
 }
 
-func (s *Server) importAccounts(items []accounts.Account, refresh bool) (added, skipped, refreshed int, issues []map[string]string, refreshID string, err error) {
-	if !refresh {
-		added, skipped, refreshed, issues, err = s.importAccountsWithoutValidation(items)
-		return added, skipped, refreshed, issues, "", err
-	}
+func (s *Server) importAccounts(items []accounts.Account, _ bool) (added, skipped, refreshed int, issues []map[string]string, refreshID string, err error) {
 	return s.importAccountsAndValidate(items)
-}
-
-// importAccountsWithoutValidation persists newly uploaded accounts immediately.
-// The normal account scheduler treats an empty status as dispatchable, while
-// periodic refresh and image requests continue to detect unusable accounts.
-func (s *Server) importAccountsWithoutValidation(items []accounts.Account) (added, skipped, refreshed int, issues []map[string]string, err error) {
-	for i := range items {
-		items[i].AccessToken = strings.TrimSpace(items[i].AccessToken)
-	}
-	added, skipped, err = s.accounts.AddWithResult(items)
-	return added, skipped, 0, nil, err
 }
 
 func (s *Server) importAccountsAndValidate(items []accounts.Account) (added, skipped, refreshed int, issues []map[string]string, refreshID string, err error) {
@@ -1185,7 +1170,7 @@ func (s *Server) importAccountsAndValidate(items []accounts.Account) (added, ski
 	if err != nil || len(validationTokens) == 0 {
 		return added, skipped, 0, nil, "", err
 	}
-	refreshID, err = s.refresh.Start(validationTokens)
+	refreshID, err = s.refresh.StartLightweight(validationTokens)
 	if err != nil {
 		return added, skipped, 0, nil, "", err
 	}

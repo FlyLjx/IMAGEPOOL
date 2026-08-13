@@ -724,6 +724,23 @@ func TestGenerateRemovesFreePlanExhaustedAccountAndRetries(t *testing.T) {
 	}
 }
 
+func TestGenerateRetriesFreePlanExhaustionWithSingleAttemptBudget(t *testing.T) {
+	cfg := config.Default()
+	cfg.MaxImageAttempts = 1
+	store := accounts.NewStore([]accounts.Account{{Email: "available", AccessToken: "available", CreatedAt: 1}, {Email: "exhausted", AccessToken: "exhausted", CreatedAt: 2}}, "")
+	fb := &fakeBackend{errs: []error{errors.New("You've hit the Free plan limit for image generations requests")}}
+	response, err := NewService(cfg, store, fb).Generate(context.Background(), Request{Prompt: "draw"})
+	if err != nil || response.AccountEmail != "available" || fb.calls != 2 {
+		t.Fatalf("response=%#v err=%v calls=%d", response, err, fb.calls)
+	}
+	if _, found := store.Get("exhausted"); found {
+		t.Fatalf("free-plan exhausted account was not removed: %#v", store.List())
+	}
+	if len(response.Attempts) != 2 || response.Attempts[0].SwitchReason != "quota_exhausted" || !response.Attempts[0].RemovedAccount {
+		t.Fatalf("attempts=%#v", response.Attempts)
+	}
+}
+
 func TestGenerateReturnsQuotaExhaustionAfterAllFreePlanAccountsAreRemoved(t *testing.T) {
 	store := accounts.NewStore([]accounts.Account{{Email: "only", AccessToken: "only"}}, "")
 	fb := &fakeBackend{errs: []error{errors.New("You've hit the Free plan limit for image generations requests")}}

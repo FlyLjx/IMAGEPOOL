@@ -756,13 +756,14 @@ func (s *Service) generateOne(ctx context.Context, req Request) (openaiweb.Image
 		attemptLog.Error = err.Error()
 		accountEvicted := accounts.IsImageAccountEvicted(lease.Context)
 		referenceImageRequired := openaiweb.IsImageReferenceRequired(err)
-		if !accountEvicted && !referenceImageRequired {
+		quotaExhausted := openaiweb.IsNoFreeImageQuotaError(err)
+		if !accountEvicted && !referenceImageRequired && !quotaExhausted {
 			s.recordImageFailure(account.AccessToken, err)
 		}
 		authenticationError := openaiweb.IsAuthenticationError(err)
 		if authenticationError {
 			attemptLog.RemovedAccount = s.removeInvalidImageAccount(account.AccessToken, err)
-		} else if openaiweb.IsNoFreeImageQuotaError(err) {
+		} else if quotaExhausted {
 			removed, _ := s.store.RemoveQuotaExhausted(account.AccessToken, err)
 			attemptLog.RemovedAccount = removed
 		}
@@ -783,6 +784,15 @@ func (s *Service) generateOne(ctx context.Context, req Request) (openaiweb.Image
 		if openaiweb.IsInteractiveChallengeError(err) {
 			attempts = append(attempts, finishAttempt())
 			return openaiweb.ImageResult{Attempts: attempts}, err
+		}
+		if quotaExhausted {
+			logImageAttemptSwitch(req, lease, account, &attemptLog, "quota_exhausted")
+			// A permanently exhausted account is pool maintenance, not a user
+			// generation attempt. Preserve the configured retry budget for the
+			// next account selected for this task.
+			maxAttempts++
+			attempts = append(attempts, finishAttempt())
+			continue
 		}
 		if authenticationError {
 			logImageAttemptSwitch(req, lease, account, &attemptLog, "authentication_failed")

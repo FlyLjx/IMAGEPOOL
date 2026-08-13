@@ -541,15 +541,15 @@ func TestFailedTaskHidesImagePollTimeoutDetails(t *testing.T) {
 	}
 }
 
-func TestFailedTaskPassesThroughImageResponseText(t *testing.T) {
+func TestFailedTaskClassifiesAssistantQuotaExhaustion(t *testing.T) {
 	upstreamMessage := "You've hit the Free plan limit for image generations requests"
 	raw := openaiweb.NewImageAssistantTextError("conv-1", upstreamMessage, openaiweb.ImageAttemptDiagnostics{}, false)
 	m := NewManager(sensitiveFailureTaskSvc{err: raw})
 	task, _, err := m.RunGenerationForOwner(context.Background(), "user-a", images.Request{Prompt: "draw"})
-	if err == nil || task.Error != upstreamMessage || task.RealtimeStatus != upstreamMessage {
+	if err == nil || task.Error != "当前号池生图额度不足，请稍后重试。" || task.RealtimeStatus != task.Error {
 		t.Fatalf("task=%#v err=%v", task, err)
 	}
-	if task.ErrorCode != "image_response_text" || task.ErrorHint != "" {
+	if task.ErrorCode != "image_quota_exhausted" || !task.ErrorRetryable || task.ErrorCategory != "capacity" {
 		t.Fatalf("task=%#v", task)
 	}
 }

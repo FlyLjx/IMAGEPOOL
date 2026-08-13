@@ -302,15 +302,20 @@ func imageRequestEchoDetails(err error) (echoed, referenced bool) {
 		return false, false
 	}
 	var promptText string
-	if json.Unmarshal(prompt, &promptText) != nil || strings.TrimSpace(promptText) == "" {
-		return false, false
-	}
-	for _, field := range []string{"size", "n", "model", "quality", "response_format", "output_format", "is_style_transfer"} {
+	promptIsText := json.Unmarshal(prompt, &promptText) == nil && strings.TrimSpace(promptText) != ""
+	imageFieldCount := 0
+	for _, field := range []string{"size", "n", "model", "quality", "response_format", "output_format", "is_style_transfer", "transparent_background", "referenced_image_ids"} {
 		if _, ok := raw[field]; ok {
-			return true, false
+			imageFieldCount++
 		}
 	}
-	return false, false
+	if promptIsText {
+		return imageFieldCount > 0, false
+	}
+	// A null prompt is also emitted by the image tool argument schema when the
+	// upstream turn fails to start. Require several companion fields so an
+	// unrelated JSON object containing prompt:null is not treated as an echo.
+	return strings.TrimSpace(string(prompt)) == "null" && imageFieldCount >= 3, false
 }
 
 // ImageConversationTimeoutError marks the case where ChatGPT has already

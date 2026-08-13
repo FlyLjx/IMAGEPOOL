@@ -21,7 +21,7 @@
 
 账号导入支持 OpenAI OAuth PKCE：管理员在账号导入页打开授权 URL，完成登录后粘贴 callback URL 即可保存 access token、refresh token 和 id token。FlareSolverr 模式可通过 clearance 测试接口刷新并保存通行 Cookie。
 
-`POST /api/accounts` 与 `POST /api/external/accounts/import` 默认只等待账号写入存储完成就返回，不执行首次上游检查，适合注册机批量落池。传入 `{"refresh":true}` 时，账号会先以待验证状态入池，接口立即返回 `refresh_id`，后台随后校验账号可用性和图片额度；校验成功后账号才可调度，失效或额度耗尽账号会被移除。后台账号导入页面会显式使用 `refresh:true`，可通过现有刷新进度接口查询校验结果。
+`POST /api/accounts` 与 `POST /api/external/accounts/import` 只等待账号写入存储和后台验证任务入队，随后立即返回 `refresh_id`，适合注册机批量落池。新账号先以待验证状态保存，后台立即轻量校验凭证和图片额度；校验成功后账号才可调度，失效或额度耗尽账号会被移除。`refresh` 字段为兼容参数，无论是否传入都不会阻塞导入响应；可通过现有刷新进度接口查询校验结果。
 
 普通用户只能访问自己的异步图片任务；管理员可以查看全部任务。每次提交都会创建新的任务 ID，不会因为 `client_task_id` 相同而复用任务。
 

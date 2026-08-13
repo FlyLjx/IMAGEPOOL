@@ -78,6 +78,12 @@ func Classify(err error, statusHint int) Info {
 	if openaiweb.IsImageReferenceRequired(err) || strings.Contains(lower, "image reference required") || strings.Contains(text, "上游要求上传缩略图") || strings.Contains(text, "上游要求上传参考图") {
 		return info("需要上传参考图", "检测到请求需要缩略图或参考图，请上传后重新提交任务。", "reference_image_required", "request", false, "check_request", "请上传缩略图或参考图文件", http.StatusBadRequest)
 	}
+	// Quota messages can arrive as assistant text after the image tool starts.
+	// Classify them before generic assistant text so callers receive a retryable
+	// pool-capacity error when every available account has been exhausted.
+	if openaiweb.IsNoFreeImageQuotaError(err) {
+		return info("号池额度不足", "当前号池生图额度不足，请稍后重试。", "image_quota_exhausted", "capacity", true, "retry_later", "等待号池补充额度后重试", http.StatusTooManyRequests)
+	}
 	if assistantText, ok := openaiweb.ImageAssistantText(err); ok {
 		if openaiweb.IsImageRequestEchoRetryError(err) {
 			return info("内容安全限制", imageRequestEchoFallbackMessage, "content_policy_violation", "policy", false, "modify_content", "请根据返回内容修改后重新提交", http.StatusBadRequest)
@@ -123,9 +129,6 @@ func Classify(err error, statusHint int) Info {
 	}
 	if openaiweb.IsInteractiveChallengeError(err) {
 		return info("需要完成人机验证", "当前图片服务要求完成人机验证，暂时无法继续处理。", "interactive_challenge_required", publicServiceCategory, true, "retry_later", "请稍后重试", http.StatusPreconditionRequired)
-	}
-	if openaiweb.IsNoFreeImageQuotaError(err) {
-		return info("号池额度不足", "当前号池生图额度不足，请稍后重试。", "image_quota_exhausted", "capacity", true, "retry_later", "等待号池补充额度后重试", http.StatusTooManyRequests)
 	}
 	if errors.Is(err, accounts.ErrNoAvailableAccount) {
 		return info("暂无可用处理资源", "当前没有可调度的生图资源，请稍后重试。", "account_pool_unavailable", "capacity", true, "retry_later", "请稍后重新提交", http.StatusTooManyRequests)
@@ -390,6 +393,9 @@ func containsPrivateErrorDetail(lower string) bool {
 func ClassifyText(message string, statusHint int) Info {
 	message = strings.TrimSpace(message)
 	if assistantText, ok := persistedImageResponseText(message); ok {
+		if openaiweb.IsNoFreeImageQuotaError(errors.New(assistantText)) {
+			return Classify(errors.New(assistantText), statusHint)
+		}
 		return info("图片未生成", assistantText, "image_response_text", "request", false, "check_request", "", http.StatusBadRequest)
 	}
 	return Classify(errors.New(message), statusHint)

@@ -70,7 +70,7 @@ Go 测试里通过 mock ChatGPT Web 服务验证了文本 SSE payload、header �
 - 单个账号保存了 `proxy` 时，该账号的 ChatGPT Web、SSE、上传与生成结果下载请求都会优先走该代理；未设置时才使用全局运行时代理。
 - clearance 可配置手工 Cookie 和 User-Agent；修改配置后新的上游请求会使用重载后的客户端。
 - `/api/proxy/runtime`、`/api/proxy/test` 与 `/api/proxy/clearance/test` 可用于检查运行时代理状态。
-- 账号导入接口默认只等待存储落盘：`POST /api/accounts` 与 `POST /api/external/accounts/import` 传 `refresh:true` 时才同步执行首次上游检查；后台周期刷新和实际生图请求继续负责后续状态判断。
+- 账号导入接口只等待存储落盘和验证任务入队：`POST /api/accounts` 与 `POST /api/external/accounts/import` 立即返回 `refresh_id`，后台异步轻量校验凭证和图片额度。验证完成前账号不参与调度，导入请求不等待验证结果；`refresh` 字段仅保留兼容性。
 - FlareSolverr 模式的 clearance 测试会请求 `/v1`，保存返回的 Cookie、`cf_clearance` 和 User-Agent，然后热更新客户端。
 
 ## 异步任务与权限

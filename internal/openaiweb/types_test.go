@@ -91,6 +91,12 @@ func TestImageTimeoutRetryClassification(t *testing.T) {
 	if IsRetryableImageError(NewImageAssistantTextError("conv-1", `{"size":"1792x1024","prompt":null}`, ImageAttemptDiagnostics{}, false)) {
 		t.Fatal("a null prompt without reference IDs must not switch accounts")
 	}
+	if !IsRetryableImageError(NewImageAssistantTextError("conv-1", `{"size":"1024x1536","n":1,"prompt":null,"is_style_transfer":false,"referenced_image_ids":null,"transparent_background":false}`, ImageAttemptDiagnostics{}, false)) {
+		t.Fatal("a complete image request schema with a null prompt must switch accounts")
+	}
+	if IsRetryableImageError(NewImageAssistantTextError("conv-1", `{"size":"1024x1536","prompt":null,"transparent_background":false}`, ImageAttemptDiagnostics{}, false)) {
+		t.Fatal("a partial object with a null prompt must not be treated as an image request echo")
+	}
 	if IsRetryableImageError(NewImageAssistantTextError("conv-1", "请上传图片后继续。", ImageAttemptDiagnostics{}, false)) {
 		t.Fatal("ordinary assistant text must not switch accounts")
 	}

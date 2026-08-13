@@ -26,6 +26,7 @@ func TestClassifyImageErrors(t *testing.T) {
 		{name: "upload timeout", err: errors.Join(openaiweb.ErrImagePreparationTimeout, errors.New("参考图上传超时")), code: "image_upload_timeout", status: http.StatusGatewayTimeout},
 		{name: "no account", err: accounts.ErrNoAvailableAccount, code: "account_pool_unavailable", status: http.StatusTooManyRequests},
 		{name: "free plan image quota exhausted", err: errors.New("You've hit the Free plan limit for image generations requests"), code: "image_quota_exhausted", status: http.StatusTooManyRequests},
+		{name: "assistant free plan image quota exhausted", err: openaiweb.NewImageAssistantTextError("conv", "You've hit the Free plan limit for image generations requests", openaiweb.ImageAttemptDiagnostics{}, false), code: "image_quota_exhausted", status: http.StatusTooManyRequests},
 		{name: "revoked credential", err: &openaiweb.UpstreamError{Path: "/backend-api/files", StatusCode: http.StatusUnauthorized, Body: `{"code":"token_revoked"}`}, code: "account_pool_unavailable", status: http.StatusTooManyRequests},
 		{name: "legacy credential message", err: errors.New(openaiweb.PublicCredentialInvalidMessage), code: "account_pool_unavailable", status: http.StatusTooManyRequests},
 		{name: "content policy", err: openaiweb.ErrContentPolicy, code: "content_policy_violation", status: http.StatusBadRequest},
@@ -59,14 +60,11 @@ func TestClassifyAssistantTextUsesFallbackForImageRequestEcho(t *testing.T) {
 	}
 }
 
-func TestClassifyTextRestoresPersistedImageResponseText(t *testing.T) {
+func TestClassifyTextRestoresPersistedQuotaExhaustion(t *testing.T) {
 	upstreamMessage := "You've hit the Free plan limit for image generations requests"
 	got := ClassifyText("image generation returned text without an image: "+upstreamMessage+"; conversation_id=conv-123", 0)
-	if got.Code != "image_response_text" || got.Message != upstreamMessage {
+	if got.Code != "image_quota_exhausted" || got.HTTPStatus != http.StatusTooManyRequests || !got.Retryable {
 		t.Fatalf("info=%#v", got)
-	}
-	if got.Hint != "" {
-		t.Fatalf("image response text must not add a generic hint: %#v", got)
 	}
 }
 
