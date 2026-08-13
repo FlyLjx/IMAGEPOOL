@@ -147,6 +147,28 @@ func TestTodaySummaryUsesLocalDayAndExcludesRejectedFromFailureRate(t *testing.T
 	}
 }
 
+func TestRecentFailuresKeepImageResponseText(t *testing.T) {
+	svc := NewService("")
+	now := time.Date(2026, 8, 13, 10, 0, 0, 0, time.Local)
+	svc.now = func() time.Time { return now }
+	upstreamText := "抱歉，我不能帮助生成包含露骨裸体或色情裸露内容的图像。"
+	svc.Record(Call{
+		Time: now.Add(-time.Minute), Endpoint: "/v1/images/edits", Model: "gpt-image-2", Status: "failed", StatusCode: 400,
+		Error: upstreamText, ErrorCode: "image_response_text", ErrorTitle: "图片未生成", ErrorCategory: "request",
+	})
+	failed := svc.TodaySummary()["recent_failed"].([]map[string]any)
+	if len(failed) != 1 || failed[0]["error"] != upstreamText || failed[0]["error_title"] != "图片未生成" || failed[0]["error_code"] != "image_response_text" {
+		t.Fatalf("recent_failed=%#v", failed)
+	}
+	policyText := "非常抱歉，生成的图片可能违反了关于暴力内容的防护限制。"
+	policy := callErrorInfo(Call{
+		StatusCode: 400, Error: policyText, ErrorCode: "content_policy_violation", ErrorTitle: "内容安全限制", ErrorCategory: "policy", ErrorAction: "modify_content",
+	})
+	if policy.Message != policyText || policy.Title != "内容安全限制" || policy.Code != "content_policy_violation" {
+		t.Fatalf("policy=%#v", policy)
+	}
+}
+
 func TestSummaryAggregatesDynamicErrorsByStableCode(t *testing.T) {
 	svc := NewService("")
 	now := time.Date(2026, 7, 22, 16, 0, 0, 0, time.Local)
@@ -189,7 +211,7 @@ func TestStabilityUsesRollingSixtySecondWindow(t *testing.T) {
 	}
 }
 
-func TestRecentStatsUsesLastCallsAndExcludesRejectedFromFailureRate(t *testing.T) {
+func TestRecentStatsUsesLastHourAndExcludesRejectedFromFailureRate(t *testing.T) {
 	svc := NewService("")
 	now := time.Date(2026, 7, 14, 11, 30, 0, 0, time.UTC)
 	svc.now = func() time.Time { return now }
@@ -197,10 +219,14 @@ func TestRecentStatsUsesLastCallsAndExcludesRejectedFromFailureRate(t *testing.T
 	svc.Record(Call{Time: now.Add(-4 * time.Second), Endpoint: "/v1/images/generations", Status: "failed", DurationMS: 3000})
 	svc.Record(Call{Time: now.Add(-3 * time.Second), Endpoint: "/v1/images/generations", Status: "failed", DurationMS: 500, Error: "content policy violation: 非常抱歉，生成的图片可能违反了关于裸露、色情或情色内容的防护限制。"})
 	svc.Record(Call{Time: now.Add(-2 * time.Second), Endpoint: "/v1/images/generations", Status: "canceled", DurationMS: 700})
+	svc.Record(Call{Time: now.Add(-61 * time.Minute), Endpoint: "/v1/images/generations", Status: "failed", DurationMS: 2000})
 
-	recent := svc.RecentStats(60)
+	recent := svc.RecentStats(time.Hour)
 	if recent.Total != 4 || recent.AvailabilityTotal != 2 || recent.Success != 1 || recent.Failed != 1 || recent.Rejected != 1 || recent.Canceled != 1 {
 		t.Fatalf("recent=%#v", recent)
+	}
+	if recent.WindowSeconds != 3600 || !recent.WindowStart.Equal(now.Add(-time.Hour)) || !recent.WindowEnd.Equal(now) {
+		t.Fatalf("recent window=%#v", recent)
 	}
 	if recent.SuccessRate != 50 || recent.FailureRate != 50 || recent.AverageDurationMS != 2000 || recent.AverageSuccessDurationMS != 1000 || recent.AverageFailureDurationMS != 3000 {
 		t.Fatalf("recent=%#v", recent)

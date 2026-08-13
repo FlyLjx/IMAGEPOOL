@@ -57,11 +57,13 @@ type Stability struct {
 	StabilityPercent float64          `json:"stability_percent"`
 	Status           string           `json:"status"`
 	Series           []StabilityPoint `json:"series"`
-	Recent60         RecentCallStats  `json:"recent_60"`
+	RecentHour       RecentCallStats  `json:"recent_hour"`
 }
 
 type RecentCallStats struct {
-	Limit                      int       `json:"limit"`
+	WindowSeconds              int       `json:"window_seconds"`
+	WindowStart                time.Time `json:"window_start"`
+	WindowEnd                  time.Time `json:"window_end"`
 	Total                      int       `json:"total"`
 	AvailabilityTotal          int       `json:"availability_total"`
 	Success                    int       `json:"success"`
@@ -399,7 +401,7 @@ func (s *Service) Stability(window time.Duration) Stability {
 		GeneratedAt:   now,
 		Status:        "idle",
 		Series:        points,
-		Recent60:      s.RecentStats(60),
+		RecentHour:    s.RecentStats(time.Hour),
 	}
 	for _, call := range s.List("", "", "") {
 		if call.Time.Before(start) || call.Time.After(now) {
@@ -439,19 +441,21 @@ func (s *Service) Stability(window time.Duration) Stability {
 	return result
 }
 
-func (s *Service) RecentStats(limit int) RecentCallStats {
-	if limit <= 0 {
-		limit = 60
+func (s *Service) RecentStats(window time.Duration) RecentCallStats {
+	if window <= 0 {
+		window = time.Hour
 	}
-	stats := RecentCallStats{Limit: limit}
+	stats := RecentCallStats{WindowSeconds: int(window / time.Second)}
 	if s == nil {
 		return stats
 	}
 	stats.GeneratedAt = s.now()
+	stats.WindowEnd = stats.GeneratedAt
+	stats.WindowStart = stats.WindowEnd.Add(-window)
 	var durationSum, successDurationSum, failureDurationSum int64
 	for _, call := range s.List("", "", "") {
-		if stats.Total >= limit {
-			break
+		if call.Time.Before(stats.WindowStart) || call.Time.After(stats.WindowEnd) {
+			continue
 		}
 		stats.Total++
 		category := callCategory(call)
@@ -718,25 +722,31 @@ type errorReasonCount struct {
 }
 
 func callErrorInfo(call Call) errorinfo.Info {
-	if strings.TrimSpace(call.ErrorCode) == "" {
-		return errorinfo.ClassifyText(call.Error, call.StatusCode)
+	// Calls recorded by the HTTP middleware already contain the public error
+	// projected by the endpoint. Keep it intact in Dashboard rather than
+	// classifying it again from plain text and losing an upstream explanation.
+	if strings.TrimSpace(call.ErrorCode) != "" {
+		return errorinfo.Info{
+			Title:      firstNonEmpty(call.ErrorTitle, "调用失败"),
+			Message:    strings.TrimSpace(call.Error),
+			Code:       strings.TrimSpace(call.ErrorCode),
+			Category:   firstNonEmpty(call.ErrorCategory, "other"),
+			Retryable:  call.ErrorRetryable,
+			Action:     strings.TrimSpace(call.ErrorAction),
+			Hint:       strings.TrimSpace(call.ErrorHint),
+			HTTPStatus: call.StatusCode,
+		}
 	}
-	classified := errorinfo.ClassifyText(call.Error, call.StatusCode)
-	classified.Code = strings.TrimSpace(call.ErrorCode)
-	if value := strings.TrimSpace(call.ErrorTitle); value != "" {
-		classified.Title = value
+	return errorinfo.ClassifyText(call.Error, call.StatusCode)
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			return value
+		}
 	}
-	if value := strings.TrimSpace(call.ErrorCategory); value != "" {
-		classified.Category = value
-	}
-	if value := strings.TrimSpace(call.ErrorAction); value != "" {
-		classified.Action = value
-	}
-	if value := strings.TrimSpace(call.ErrorHint); value != "" {
-		classified.Hint = value
-	}
-	classified.Retryable = call.ErrorRetryable
-	return classified
+	return ""
 }
 
 func recentFailedCall(call Call, classified errorinfo.Info) map[string]any {
