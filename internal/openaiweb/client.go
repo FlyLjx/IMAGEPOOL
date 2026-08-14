@@ -429,7 +429,7 @@ func imagePromptForWeb(prompt string, edit bool, size, quality string) string {
 	if prompt == "" || strings.Contains(prompt, "调用图片生成工具") {
 		return prompt
 	}
-	return prompt + "\n\n调用图片生成工具。"
+	return "调用图片生成工具。\n\n" + prompt
 }
 
 func (c *Client) uploadReferences(ctx context.Context, account accounts.Account, images []ImageInput) ([]uploadMeta, error) {

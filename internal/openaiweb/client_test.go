@@ -35,16 +35,16 @@ func TestExtractConversationAndImageReferences(t *testing.T) {
 	}
 }
 
-func TestImagePromptForWebAppendsImageToolInstructionForEdit(t *testing.T) {
+func TestImagePromptForWebPrefixesImageToolInstructionForEdit(t *testing.T) {
 	got := imagePromptForWeb("把背景改成海边", true, "1536x864", "high")
-	if got != "把背景改成海边\n\n调用图片生成工具。" {
+	if got != "调用图片生成工具。\n\n把背景改成海边" {
 		t.Fatalf("prompt=%q", got)
 	}
 }
 
-func TestImagePromptForWebAppendsImageToolInstructionForTextImage(t *testing.T) {
+func TestImagePromptForWebPrefixesImageToolInstructionForTextImage(t *testing.T) {
 	got := imagePromptForWeb("画一只猫", false, "auto", "auto")
-	if got != "画一只猫\n\n调用图片生成工具。" {
+	if got != "调用图片生成工具。\n\n画一只猫" {
 		t.Fatalf("prompt=%q", got)
 	}
 }
