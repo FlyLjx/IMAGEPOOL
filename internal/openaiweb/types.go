@@ -425,7 +425,7 @@ func PublicErrorMessage(err error) string {
 		return PublicImagePollTimeoutMessage
 	}
 	if errors.Is(err, ErrImageGenerationStalled) {
-		return "图片生成长时间没有返回结果，系统已重新选择账号继续处理。"
+		return "图片生成长时间没有返回结果，请重新提交。"
 	}
 	if IsImageReferenceRequired(err) {
 		return PublicImageReferenceRequiredMessage
@@ -516,7 +516,7 @@ func PublicErrorText(message string) string {
 		return PublicImagePollTimeoutMessage
 	}
 	if strings.Contains(lower, "image generation stalled") || strings.Contains(message, "连续") && strings.Contains(message, "没有图片结果") {
-		return "图片生成长时间没有返回结果，系统已重新选择账号继续处理。"
+		return "图片生成长时间没有返回结果，请重新提交。"
 	}
 	if strings.Contains(lower, "image reference required") || strings.Contains(message, "上游要求上传缩略图") || strings.Contains(message, "上游要求上传参考图") {
 		return PublicImageReferenceRequiredMessage

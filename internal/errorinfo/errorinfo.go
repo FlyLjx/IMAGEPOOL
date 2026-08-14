@@ -110,7 +110,7 @@ func Classify(err error, statusHint int) Info {
 		return info("图片生成未完成", "本次图片生成未完成，系统已自动重试，请重新提交。", "image_generation_failed", publicServiceCategory, true, "retry_request", "请重新提交任务", http.StatusBadGateway)
 	}
 	if errors.Is(err, openaiweb.ErrImageGenerationStalled) {
-		return info("图片生成长时间无结果", "图片生成长时间没有返回结果，系统已重新选择账号继续处理。", "image_generation_stalled", publicServiceCategory, true, "retry_request", "请重新提交任务", http.StatusTooManyRequests)
+		return info("图片生成长时间无结果", "图片生成长时间没有返回结果，请重新提交。", "image_generation_stalled", publicServiceCategory, true, "retry_request", "请重新提交任务", http.StatusTooManyRequests)
 	}
 	if errors.Is(err, openaiweb.ErrPollTimeout) || strings.Contains(lower, "image poll timeout") || strings.Contains(text, "生图任务已等待") || strings.Contains(text, "OAI侧出图超出") || strings.Contains(text, "任务占用额度失败") {
 		return info("图片生成超时", "图片生成在 10 分钟内未完成，本次任务已结束，请重新提交。", "image_generation_timeout", publicServiceCategory, true, "retry_request", "请重新提交任务", http.StatusTooManyRequests)
@@ -190,7 +190,7 @@ func Classify(err error, statusHint int) Info {
 			return info("服务繁忙", "图片生成服务当前繁忙，请稍后重试。", "service_busy", publicServiceCategory, true, "retry_later", "请稍后重新提交", http.StatusServiceUnavailable)
 		default:
 			if upstream.StatusCode >= http.StatusInternalServerError {
-				return info("服务暂时异常", "图片生成服务暂时异常，请稍后重试。", "service_error", publicServiceCategory, true, "retry_later", "请稍后重新提交", http.StatusBadGateway)
+				return info("服务暂时异常", "图片生成服务暂时异常，请重新提交。", "service_error", publicServiceCategory, true, "retry_request", "请重新提交任务", http.StatusBadGateway)
 			}
 		}
 	}
@@ -476,7 +476,7 @@ func fallback(statusHint int) Info {
 	case http.StatusGatewayTimeout:
 		return info("服务响应超时", "图片生成服务响应超时，请稍后重试。", "service_timeout", publicServiceCategory, true, "retry_later", "请稍后重新提交", statusHint)
 	default:
-		return info("服务暂时异常", "图片生成服务暂时异常，请稍后重试。", "service_error", publicServiceCategory, true, "retry_later", "请稍后重新提交", http.StatusBadGateway)
+		return info("服务暂时异常", "图片生成服务暂时异常，请重新提交。", "service_error", publicServiceCategory, true, "retry_request", "请重新提交任务", http.StatusBadGateway)
 	}
 }
 

@@ -142,7 +142,7 @@ func TestTodaySummaryUsesLocalDayAndExcludesRejectedFromFailureRate(t *testing.T
 	if byEndpoint["/v1/images/generations"] != 2 || byEndpoint["/v1/images/edits"] != 2 {
 		t.Fatalf("byEndpoint=%#v", byEndpoint)
 	}
-	if failed := today["recent_failed"].([]map[string]any); len(failed) != 1 || failed[0]["error_code"] != "service_error" || failed[0]["error"] != "图片生成服务暂时异常，请稍后重试。" {
+	if failed := today["recent_failed"].([]map[string]any); len(failed) != 1 || failed[0]["error_code"] != "service_error" || failed[0]["error"] != "图片生成服务暂时异常，请重新提交。" {
 		t.Fatalf("recent_failed=%#v", failed)
 	}
 }
