@@ -40,6 +40,9 @@ services:
         condition: service_healthy
       flaresolverr:
         condition: service_started
+    networks:
+      - default
+      - image-shared
     environment:
       DATABASE_URL: postgresql://imagepool:imagepool@postgres:5432/imagepool?sslmode=disable
       TZ: Asia/Shanghai
@@ -65,3 +68,8 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ${DOCKER_CONFIG:-/root/.docker}:/root/.docker:ro
+
+networks:
+  image-shared:
+    name: image-shared
+    external: true
