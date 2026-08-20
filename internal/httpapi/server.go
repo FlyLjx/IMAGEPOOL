@@ -612,7 +612,10 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 		owner  string
 		parent any
 	}
-	items := make([]modelItem, 0, len(models)+32)
+	items := make([]modelItem, 0, len(models)+1)
+	// Expose the ChatGPT Web text/code route first so clients select it as the
+	// default public model. The image workspace filters this entry itself.
+	items = append(items, modelItem{id: openaiweb.DefaultTextModel, owner: "chatgpt-web"})
 	for _, model := range models {
 		items = append(items, modelItem{id: model, owner: "image-pool"})
 	}
@@ -734,7 +737,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		model = body.Model
 	}
 	if model == "" {
-		model = "auto"
+		model = openaiweb.DefaultTextModel
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"id":      responseID("chatcmpl"),
@@ -758,7 +761,7 @@ func (s *Server) streamChatCompletion(w http.ResponseWriter, r *http.Request, bo
 	created := time.Now().Unix()
 	model := body.Model
 	if model == "" {
-		model = "auto"
+		model = openaiweb.DefaultTextModel
 	}
 	sentRole := false
 	_, err := s.texts.Stream(r.Context(), body, func(delta openaiweb.ChatDelta) error {
@@ -817,7 +820,7 @@ func (s *Server) streamResponses(w http.ResponseWriter, r *http.Request, req ope
 	id := responseID("resp")
 	model := req.Model
 	if model == "" {
-		model = "auto"
+		model = openaiweb.DefaultTextModel
 	}
 	writeSSEEvent(w, "response.created", map[string]any{"type": "response.created", "response": map[string]any{"id": id, "object": "response", "status": "in_progress", "model": model}})
 	_, err := s.texts.Stream(r.Context(), req, func(delta openaiweb.ChatDelta) error {
@@ -909,7 +912,7 @@ func (s *Server) streamAnthropicMessages(w http.ResponseWriter, r *http.Request,
 	id := responseID("msg")
 	model := req.Model
 	if model == "" {
-		model = "auto"
+		model = openaiweb.DefaultTextModel
 	}
 	writeSSEEvent(w, "message_start", map[string]any{"type": "message_start", "message": map[string]any{"id": id, "type": "message", "role": "assistant", "model": model, "content": []any{}, "stop_reason": nil, "usage": map[string]any{"input_tokens": roughTextTokens(messagesText(req.Messages)), "output_tokens": 0}}})
 	writeSSEEvent(w, "content_block_start", map[string]any{"type": "content_block_start", "index": 0, "content_block": map[string]any{"type": "text", "text": ""}})
@@ -2462,7 +2465,7 @@ func roughUsage(messages []openaiweb.ChatMessage, output string) map[string]any 
 
 func responseObject(model, text string, messages []openaiweb.ChatMessage) map[string]any {
 	if model == "" {
-		model = "auto"
+		model = openaiweb.DefaultTextModel
 	}
 	inputTokens := roughTextTokens(messagesText(messages))
 	outputTokens := roughTextTokens(text)

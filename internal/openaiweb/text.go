@@ -37,6 +37,11 @@ type ChatResult struct {
 	AccountEmail   string `json:"account_email,omitempty"`
 }
 
+// DefaultTextModel is the public ChatGPT Web text/code model used when a
+// request omits model. Explicit "auto" remains supported for callers that
+// want ChatGPT Web to choose a model dynamically.
+const DefaultTextModel = "gpt-5-5"
+
 func (c *Client) GenerateText(ctx context.Context, account accounts.Account, req ChatRequest) (ChatResult, error) {
 	var text strings.Builder
 	conversationID, err := c.StreamText(ctx, account, req, func(delta ChatDelta) error {
@@ -48,7 +53,7 @@ func (c *Client) GenerateText(ctx context.Context, account accounts.Account, req
 	}
 	model := strings.TrimSpace(req.Model)
 	if model == "" {
-		model = "auto"
+		model = DefaultTextModel
 	}
 	return ChatResult{Text: text.String(), Model: model, ConversationID: conversationID, AccountEmail: account.Email}, nil
 }
@@ -65,7 +70,7 @@ func (c *Client) StreamText(ctx context.Context, account accounts.Account, req C
 		req.Messages = []ChatMessage{{Role: "user", Content: prompt}}
 	}
 	if strings.TrimSpace(req.Model) == "" {
-		req.Model = "auto"
+		req.Model = DefaultTextModel
 	}
 	scripts, dataBuild, err := c.bootstrapWithResources(ctx, account)
 	if err != nil {

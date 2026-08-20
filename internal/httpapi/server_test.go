@@ -215,7 +215,7 @@ func TestHealthAndAuth(t *testing.T) {
 	}
 }
 
-func TestModelsExposeBaseImageModel(t *testing.T) {
+func TestModelsExposeTextAndImageModels(t *testing.T) {
 	cfg := config.Default()
 	cfg.APIKeys = []string{"k"}
 	srv := httptest.NewServer(newTestServer(cfg))
@@ -236,7 +236,7 @@ func TestModelsExposeBaseImageModel(t *testing.T) {
 	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
 		t.Fatal(err)
 	}
-	if response.StatusCode != http.StatusOK || len(payload.Data) != 1 || payload.Data[0].ID != "gpt-image-2" {
+	if response.StatusCode != http.StatusOK || len(payload.Data) != 2 || payload.Data[0].ID != openaiweb.DefaultTextModel || payload.Data[1].ID != "gpt-image-2" {
 		t.Fatalf("status=%d models=%#v", response.StatusCode, payload.Data)
 	}
 }

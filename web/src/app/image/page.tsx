@@ -76,7 +76,7 @@ function ImageWorkspace() {
       setIsLoadingModels(true);
       try {
         const result = await fetchModels();
-        const ids = uniqueModelIDs((result.data || []).map((item) => item.id));
+        const ids = uniqueModelIDs((result.data || []).map((item) => item.id).filter((id) => id.includes("image")));
         if (active && ids.length > 0) {
           setModelOptions(ids);
           setModel((current) => (ids.includes(current) ? current : ids[0]));
