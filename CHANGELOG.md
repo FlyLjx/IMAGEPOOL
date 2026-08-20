@@ -1,5 +1,8 @@
 # Changelog
 
+## 0.1.90 - 2026-08-20
++ [修复] 图片接口未指定 `output_format` 时，`b64_json` 默认返回 PNG，`url` 默认缓存并返回 JPEG；显式格式仍优先。
+
 ## 0.1.89 - 2026-08-20
 + [修复] Responses 流式输出补齐 Codex 所需的 output item、content part、文本完成事件及关联 ID，避免 Codex 忽略增量正文。
 
