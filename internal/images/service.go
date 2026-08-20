@@ -172,11 +172,11 @@ func (s *Service) Generate(ctx context.Context, req Request) (Response, error) {
 	if err != nil {
 		return Response{}, err
 	}
-	if _, err := normalizeOutputFormat(req.OutputFormat); err != nil {
+	if _, err := normalizeOutputFormatForResponse(req.OutputFormat, responseFormat); err != nil {
 		return Response{}, err
 	}
 	req.ResponseFormat = responseFormat
-	req.OutputFormat, _ = normalizeOutputFormat(req.OutputFormat)
+	req.OutputFormat, _ = normalizeOutputFormatForResponse(req.OutputFormat, responseFormat)
 	if req.N == 1 {
 		result, err := s.generateOne(ctx, req)
 		response := responseWithModel(responseFromResult(result), publicModel)
@@ -364,11 +364,11 @@ func (s *Service) GenerateWithAccount(ctx context.Context, token string, req Req
 	if err != nil {
 		return Response{}, err
 	}
-	if _, err := normalizeOutputFormat(req.OutputFormat); err != nil {
+	if _, err := normalizeOutputFormatForResponse(req.OutputFormat, responseFormat); err != nil {
 		return Response{}, err
 	}
 	req.ResponseFormat = responseFormat
-	req.OutputFormat, _ = normalizeOutputFormat(req.OutputFormat)
+	req.OutputFormat, _ = normalizeOutputFormatForResponse(req.OutputFormat, responseFormat)
 	account, err = s.prepareAccountForDispatch(account, req)
 	if err != nil {
 		return Response{}, err
@@ -1042,12 +1042,26 @@ func normalizeOutputFormat(value string) (string, error) {
 	}
 }
 
+func normalizeOutputFormatForResponse(value, responseFormat string) (string, error) {
+	format, err := normalizeOutputFormat(value)
+	if err != nil {
+		return "", err
+	}
+	if format != "" {
+		return format, nil
+	}
+	if responseFormat == "url" {
+		return "jpeg", nil
+	}
+	return "png", nil
+}
+
 func (s *Service) finalizeResult(ctx context.Context, account accounts.Account, result openaiweb.ImageResult, req Request) (openaiweb.ImageResult, error) {
 	responseFormat, err := normalizeResponseFormat(req.ResponseFormat)
 	if err != nil {
 		return result, err
 	}
-	outputFormat, err := normalizeOutputFormat(req.OutputFormat)
+	outputFormat, err := normalizeOutputFormatForResponse(req.OutputFormat, responseFormat)
 	if err != nil {
 		return result, err
 	}

@@ -821,7 +821,7 @@ func TestGenerateCachesRemoteImageLocally(t *testing.T) {
 	cfg := config.Default()
 	cfg.ImageOutputDir = t.TempDir()
 	store := accounts.NewStore([]accounts.Account{{AccessToken: "token", CreatedAt: 1}}, "")
-	backend := &cacheBackend{fakeBackend: &fakeBackend{}}
+	backend := &cacheBackend{fakeBackend: &fakeBackend{}, data: testPNGBytes(t)}
 	service := NewService(cfg, store, backend, storage.NewService(cfg))
 	response, err := service.Generate(context.Background(), Request{Prompt: "draw", ResponseFormat: "url", OutputBaseURL: "https://pool.example"})
 	if err != nil || len(response.Data) != 1 {
@@ -837,6 +837,25 @@ func TestGenerateCachesRemoteImageLocally(t *testing.T) {
 	}
 	if backend.downloadedAccount.AccessToken != "token" {
 		t.Fatalf("download account=%#v", backend.downloadedAccount)
+	}
+}
+
+func TestGenerateDefaultsURLToJPEG(t *testing.T) {
+	cfg := config.Default()
+	cfg.ImageOutputDir = t.TempDir()
+	store := accounts.NewStore([]accounts.Account{{AccessToken: "token", CreatedAt: 1}}, "")
+	backend := &cacheBackend{fakeBackend: &fakeBackend{}, data: testPNGBytes(t)}
+	service := NewService(cfg, store, backend, storage.NewService(cfg))
+	response, err := service.Generate(context.Background(), Request{Prompt: "draw", ResponseFormat: "url", OutputBaseURL: "https://pool.example"})
+	if err != nil || len(response.Data) != 1 {
+		t.Fatalf("response=%#v err=%v", response, err)
+	}
+	if response.Data[0].MimeType != "image/jpeg" || response.Data[0].Format != "jpeg" {
+		t.Fatalf("URL default must report JPEG, got %#v", response.Data[0])
+	}
+	items, err := storage.NewService(cfg).List("https://pool.example", "", "")
+	if err != nil || len(items) != 1 || !strings.HasSuffix(items[0].Rel, ".jpg") {
+		t.Fatalf("URL default must cache JPEG, items=%#v err=%v", items, err)
 	}
 }
 
@@ -888,6 +907,16 @@ func TestGenerateDefaultsToB64JSON(t *testing.T) {
 	response, err := NewService(config.Default(), store, backend).Generate(context.Background(), Request{Prompt: "draw"})
 	if err != nil || len(response.Data) != 1 || response.Data[0].B64JSON == "" || response.Data[0].URL != "" {
 		t.Fatalf("response=%#v err=%v", response, err)
+	}
+	data, err := base64.StdEncoding.DecodeString(response.Data[0].B64JSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(data) < 8 || !bytes.Equal(data[:8], []byte{0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a}) {
+		t.Fatalf("default b64_json must contain PNG bytes: %x", data[:min(len(data), 8)])
+	}
+	if response.Data[0].MimeType != "image/png" || response.Data[0].Format != "png" {
+		t.Fatalf("b64_json default must report PNG, got %#v", response.Data[0])
 	}
 	if backend.downloadedAccount.AccessToken != "token" {
 		t.Fatalf("download account=%#v", backend.downloadedAccount)
@@ -1001,6 +1030,7 @@ func TestGenerateSwitchesAndRemovesAccountAfterAuthenticatedCacheDownloadFailure
 	}, "")
 	backend := &cacheBackend{
 		fakeBackend: &fakeBackend{},
+		data:        testPNGBytes(t),
 		downloadErrs: map[string]error{
 			"invalid": &openaiweb.UpstreamError{Path: "/backend-api/files/file/download", StatusCode: 401, Body: `{"error":{"code":"token_revoked"}}`},
 		},
