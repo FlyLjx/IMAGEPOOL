@@ -818,13 +818,30 @@ func (s *Server) streamResponses(w http.ResponseWriter, r *http.Request, req ope
 	w.Header().Set("X-Accel-Buffering", "no")
 	flusher, _ := w.(http.Flusher)
 	id := responseID("resp")
+	itemID := responseID("msg")
 	model := req.Model
 	if model == "" {
 		model = openaiweb.DefaultTextModel
 	}
-	writeSSEEvent(w, "response.created", map[string]any{"type": "response.created", "response": map[string]any{"id": id, "object": "response", "status": "in_progress", "model": model}})
+	writeSSEEvent(w, "response.created", map[string]any{"type": "response.created", "response": map[string]any{"id": id, "object": "response", "status": "in_progress", "model": model, "output": []any{}}})
+	writeSSEEvent(w, "response.output_item.added", map[string]any{
+		"type": "response.output_item.added", "output_index": 0,
+		"item": map[string]any{"id": itemID, "type": "message", "status": "in_progress", "role": "assistant", "content": []any{}},
+	})
+	writeSSEEvent(w, "response.content_part.added", map[string]any{
+		"type": "response.content_part.added", "item_id": itemID, "output_index": 0, "content_index": 0,
+		"part": map[string]any{"type": "output_text", "text": "", "annotations": []any{}},
+	})
+	if flusher != nil {
+		flusher.Flush()
+	}
+	var output strings.Builder
 	_, err := s.texts.Stream(r.Context(), req, func(delta openaiweb.ChatDelta) error {
-		writeSSEEvent(w, "response.output_text.delta", map[string]any{"type": "response.output_text.delta", "response_id": id, "output_index": 0, "content_index": 0, "delta": delta.Delta})
+		output.WriteString(delta.Delta)
+		writeSSEEvent(w, "response.output_text.delta", map[string]any{
+			"type": "response.output_text.delta", "item_id": itemID, "response_id": id,
+			"output_index": 0, "content_index": 0, "delta": delta.Delta, "logprobs": []any{},
+		})
 		if flusher != nil {
 			flusher.Flush()
 		}
@@ -833,7 +850,22 @@ func (s *Server) streamResponses(w http.ResponseWriter, r *http.Request, req ope
 	if err != nil {
 		writeSSEEvent(w, "error", map[string]any{"type": "error", "error": map[string]any{"message": openaiweb.PublicErrorMessage(err)}})
 	} else {
-		writeSSEEvent(w, "response.completed", map[string]any{"type": "response.completed", "response": map[string]any{"id": id, "object": "response", "status": "completed", "model": model}})
+		text := output.String()
+		writeSSEEvent(w, "response.output_text.done", map[string]any{
+			"type": "response.output_text.done", "item_id": itemID, "response_id": id,
+			"output_index": 0, "content_index": 0, "text": text, "logprobs": []any{},
+		})
+		writeSSEEvent(w, "response.content_part.done", map[string]any{
+			"type": "response.content_part.done", "item_id": itemID, "response_id": id,
+			"output_index": 0, "content_index": 0,
+			"part": map[string]any{"type": "output_text", "text": text, "annotations": []any{}},
+		})
+		writeSSEEvent(w, "response.output_item.done", map[string]any{
+			"type": "response.output_item.done", "item_id": itemID, "response_id": id,
+			"output_index": 0,
+			"item":         map[string]any{"id": itemID, "type": "message", "status": "completed", "role": "assistant", "content": []any{map[string]any{"type": "output_text", "text": text, "annotations": []any{}}}},
+		})
+		writeSSEEvent(w, "response.completed", map[string]any{"type": "response.completed", "response": map[string]any{"id": id, "object": "response", "status": "completed", "model": model, "output": []any{map[string]any{"id": itemID, "type": "message", "status": "completed", "role": "assistant", "content": []any{map[string]any{"type": "output_text", "text": text, "annotations": []any{}}}}}}})
 	}
 	fmt.Fprint(w, "data: [DONE]\n\n")
 	if flusher != nil {

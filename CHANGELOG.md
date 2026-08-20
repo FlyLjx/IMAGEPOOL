@@ -1,5 +1,8 @@
 # Changelog
 
+## 0.1.89 - 2026-08-20
++ [修复] Responses 流式输出补齐 Codex 所需的 output item、content part、文本完成事件及关联 ID，避免 Codex 忽略增量正文。
+
 ## 0.1.88 - 2026-08-20
 + [修复] 文本 SSE 兼容 OpenAI 增量字段；上游流正常结束但没有正文时返回明确错误，避免接口生成空助手消息。
 
