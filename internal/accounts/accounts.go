@@ -1865,25 +1865,33 @@ func (s *Store) MarkSuccess(token string) error {
 	})
 }
 
-// MarkImageSuccess records an image result and immediately updates the local
-// remaining-quota estimate. A later account refresh remains authoritative.
+// MarkImageSuccess records an image result and updates the local remaining-
+// quota estimate. A known quota reaching zero removes the account immediately.
 func (s *Store) MarkImageSuccess(token string) error {
+	quotaExhausted := false
 	err := s.updateByToken(token, func(a *Account) {
 		now := s.now()
 		recordSuccess(a, now)
 		if a.ImageQuotaUnknown {
 			return
 		}
+		quotaWasKnown := imageQuotaKnown(*a)
 		updateImageQuotaTotal(a, a.Quota)
 		if a.Quota > 0 {
 			a.Quota--
 		}
 		updateImageQuotaRemaining(a.Extra, a.Quota)
 		a.Extra["image_quota_estimated_at"] = now.In(time.Local).Format(time.RFC3339)
-		if a.Quota == 0 {
-			a.Extra["image_quota_refresh_required"] = true
+		if quotaWasKnown && a.Quota == 0 {
+			quotaExhausted = true
 		}
 	})
+	if err == nil && quotaExhausted {
+		_, removeErr := s.RemoveQuotaExhausted(token, errors.New("local image quota exhausted"))
+		if removeErr != nil {
+			return removeErr
+		}
+	}
 	s.recordImageHealthSuccess(token)
 	return err
 }
@@ -2008,6 +2016,41 @@ func (s *Store) RemoveQuotaExhausted(token string, err error) (bool, error) {
 	s.mu.Unlock()
 	cancelImageLeaseContexts(cancelers, imageAccountEvictedError("quota exhausted"))
 	return true, s.persistSnapshot(snapshot, revision)
+}
+
+// RemoveExhaustedAccounts removes every account whose known image quota is
+// already zero. It is used by the independent quota cleanup job; account
+// refresh checks are not involved.
+func (s *Store) RemoveExhaustedAccounts() (int, error) {
+	if s == nil {
+		return 0, nil
+	}
+	s.mu.Lock()
+	next := make([]Account, 0, len(s.accounts))
+	removedTokens := make([]string, 0)
+	for _, account := range s.accounts {
+		if imageQuotaExhausted(account) {
+			s.appendCredentialRecoveryLogLocked(account, "warning", "account_deleted", "账号因图片额度耗尽被自动移除", "scheduled quota cleanup", 0)
+			removedTokens = append(removedTokens, account.AccessToken)
+			continue
+		}
+		next = append(next, account)
+	}
+	if len(removedTokens) == 0 {
+		s.mu.Unlock()
+		return 0, nil
+	}
+	s.accounts = next
+	var cancelers []context.CancelCauseFunc
+	for _, token := range removedTokens {
+		cancelers = append(cancelers, s.evictImageLeasesLocked(token)...)
+	}
+	s.signalImageAvailabilityLocked()
+	s.markDirtyLocked()
+	snapshot, revision := s.snapshotLocked()
+	s.mu.Unlock()
+	cancelImageLeaseContexts(cancelers, imageAccountEvictedError("quota exhausted"))
+	return len(removedTokens), s.persistSnapshot(snapshot, revision)
 }
 
 // RemoveRateLimited removes an account as soon as an upstream response or an

@@ -782,6 +782,43 @@ func TestMarkImageSuccessUpdatesKnownQuotaEstimate(t *testing.T) {
 	}
 }
 
+func TestMarkImageSuccessRemovesAccountWhenKnownQuotaReachesZero(t *testing.T) {
+	store := NewStore([]Account{{
+		AccessToken: "token",
+		Quota:       1,
+		Extra:       map[string]any{},
+	}}, "")
+
+	if err := store.MarkImageSuccess("token"); err != nil {
+		t.Fatal(err)
+	}
+	if _, found := store.Get("token"); found {
+		t.Fatal("account with exhausted known quota was retained")
+	}
+}
+
+func TestRemoveExhaustedAccountsRemovesOnlyKnownZeroQuota(t *testing.T) {
+	store := NewStore([]Account{
+		{AccessToken: "exhausted", Status: "正常", Extra: map[string]any{"image_quota_total": 5}},
+		{AccessToken: "unknown", Status: "正常", ImageQuotaUnknown: true},
+		{AccessToken: "available", Status: "正常", Quota: 1},
+	}, "")
+
+	removed, err := store.RemoveExhaustedAccounts()
+	if err != nil || removed != 1 {
+		t.Fatalf("removed=%d err=%v", removed, err)
+	}
+	if _, found := store.Get("exhausted"); found {
+		t.Fatal("known exhausted account was retained")
+	}
+	if _, found := store.Get("unknown"); !found {
+		t.Fatal("unknown-quota account was removed")
+	}
+	if _, found := store.Get("available"); !found {
+		t.Fatal("available account was removed")
+	}
+}
+
 func TestKnownExhaustedImageQuotaIsNotDispatched(t *testing.T) {
 	store := NewStore([]Account{
 		{Email: "exhausted@example.com", AccessToken: "exhausted", Status: "正常", Extra: map[string]any{"quota": 0, "image_quota_total": 5}},

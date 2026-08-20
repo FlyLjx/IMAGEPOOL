@@ -61,7 +61,7 @@ type Server struct {
 	callbacks          *callbackDispatcher
 	metrics            *metrics.Service
 	refresh            *accounts.RefreshManager
-	autoRefresh        *accounts.AutoRefreshScheduler
+	quotaCleanup       *accounts.QuotaCleanupScheduler
 	oauth              *oauthlogin.Service
 	debugClient        *openaiweb.ReloadableClient
 	register           *registration.Manager
@@ -106,7 +106,7 @@ func newServer(cfg config.Config, accountStore *accounts.Store, imageService *im
 	}
 	refreshManager := accounts.NewRefreshManager(accountStore, imageService, cfg.RefreshAccountConcurrency)
 	callbacks := newCallbackDispatcher()
-	server := &Server{cfg: cfg, retentionWake: make(chan struct{}, 1), auth: authService, accounts: accountStore, images: imageService, texts: textService, searches: searchService, storage: storageService, system: systemstats.New(cfg.ImageOutputDir), tags: tagStore, static: newStaticFiles(cfg.WebDistDir), tasks: taskManager, callbacks: callbacks, metrics: metricService, refresh: refreshManager, autoRefresh: accounts.NewAutoRefreshScheduler(accountStore, refreshManager, cfg.RefreshAccountIntervalMinutes), oauth: oauthlogin.New(), debugClient: openaiweb.NewReloadableClient(cfg), register: registerManager, updater: updater.NewFromEnvironment(), state: state, onConfigUpdated: onConfigUpdated}
+	server := &Server{cfg: cfg, retentionWake: make(chan struct{}, 1), auth: authService, accounts: accountStore, images: imageService, texts: textService, searches: searchService, storage: storageService, system: systemstats.New(cfg.ImageOutputDir), tags: tagStore, static: newStaticFiles(cfg.WebDistDir), tasks: taskManager, callbacks: callbacks, metrics: metricService, refresh: refreshManager, quotaCleanup: accounts.NewQuotaCleanupScheduler(accountStore, 0), oauth: oauthlogin.New(), debugClient: openaiweb.NewReloadableClient(cfg), register: registerManager, updater: updater.NewFromEnvironment(), state: state, onConfigUpdated: onConfigUpdated}
 	if taskManager != nil {
 		taskManager.SetCompletionHook(func(task tasks.Task) {
 			if strings.TrimSpace(task.CallbackURL) != "" {
@@ -121,7 +121,7 @@ func (s *Server) StartBackground(ctx context.Context) {
 	if s == nil {
 		return
 	}
-	s.autoRefresh.Start(ctx)
+	s.quotaCleanup.Start(ctx)
 	s.retentionOnce.Do(func() { go s.runImageRetention(ctx) })
 	s.autoRegisterOnce.Do(func() { go s.runImagePoolAutoRegistration(ctx) })
 }
@@ -2106,7 +2106,6 @@ func (s *Server) applyConfigPatch(patch map[string]any) (config.Config, error) {
 	}
 	s.triggerImageRetention()
 	s.refresh.SetConcurrency(next.RefreshAccountConcurrency)
-	s.autoRefresh.UpdateInterval(next.RefreshAccountIntervalMinutes)
 	s.debugClient.UpdateConfig(next)
 	if s.onConfigUpdated != nil {
 		s.onConfigUpdated(next)
