@@ -10,6 +10,8 @@ import (
 	"image/color"
 	"image/png"
 	"net/url"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -898,6 +900,121 @@ func TestGenerateConvertsB64JSONWhenOutputFormatIsSet(t *testing.T) {
 	}
 	if response.Data[0].MimeType != "image/jpeg" || response.Data[0].Format != "jpeg" {
 		t.Fatalf("b64_json response must report converted format, got %#v", response.Data[0])
+	}
+}
+
+func TestPrepareImageDataSyncSizeRules(t *testing.T) {
+	source := testPNGBytes(t)
+	tests := []struct {
+		name       string
+		syncSize   bool
+		width      int
+		height     int
+		wantWidth  int
+		wantHeight int
+	}{
+		{name: "disabled", width: 4, height: 2, wantWidth: 2, wantHeight: 2},
+		{name: "ordinary ratio", syncSize: true, width: 4, height: 2, wantWidth: 4, wantHeight: 2},
+		{name: "one to four", syncSize: true, width: 1024, height: 4096, wantWidth: 2, wantHeight: 2},
+		{name: "four to one", syncSize: true, width: 4096, height: 1024, wantWidth: 2, wantHeight: 2},
+		{name: "one to eight", syncSize: true, width: 1024, height: 8192, wantWidth: 2, wantHeight: 2},
+		{name: "eight to one", syncSize: true, width: 8192, height: 1024, wantWidth: 2, wantHeight: 2},
+		{name: "other extreme ratio", syncSize: true, width: 5, height: 1, wantWidth: 5, wantHeight: 1},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			data, err := prepareImageData(source, "png", test.syncSize, test.width, test.height)
+			if err != nil {
+				t.Fatal(err)
+			}
+			img, _, err := image.Decode(bytes.NewReader(data))
+			if err != nil {
+				t.Fatal(err)
+			}
+			bounds := img.Bounds()
+			if bounds.Dx() != test.wantWidth || bounds.Dy() != test.wantHeight {
+				t.Fatalf("dimensions=%dx%d, want %dx%d", bounds.Dx(), bounds.Dy(), test.wantWidth, test.wantHeight)
+			}
+		})
+	}
+}
+
+func TestPrepareImageDataSkipsExcludedSourceAspect(t *testing.T) {
+	canvas := image.NewRGBA(image.Rect(0, 0, 4, 1))
+	for x := 0; x < 4; x++ {
+		canvas.SetRGBA(x, 0, color.RGBA{R: 0xff, A: 0xff})
+	}
+	buffer := new(bytes.Buffer)
+	if err := png.Encode(buffer, canvas); err != nil {
+		t.Fatal(err)
+	}
+	data, err := prepareImageData(buffer.Bytes(), "png", true, 2, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	img, _, err := image.Decode(bytes.NewReader(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bounds := img.Bounds(); bounds.Dx() != 4 || bounds.Dy() != 1 {
+		t.Fatalf("excluded source dimensions=%dx%d, want 4x1", bounds.Dx(), bounds.Dy())
+	}
+}
+
+func TestGenerateSyncSizeThenFormatForB64JSON(t *testing.T) {
+	store := accounts.NewStore([]accounts.Account{{AccessToken: "token", CreatedAt: 1}}, "")
+	backend := &cacheBackend{fakeBackend: &fakeBackend{}, data: testPNGBytes(t)}
+	response, err := NewService(config.Default(), store, backend).Generate(context.Background(), Request{
+		Prompt: "draw", Size: "4x2", SyncSize: true, ResponseFormat: "b64_json", OutputFormat: "jpeg",
+	})
+	if err != nil || len(response.Data) != 1 {
+		t.Fatalf("response=%#v err=%v", response, err)
+	}
+	data, err := base64.StdEncoding.DecodeString(response.Data[0].B64JSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.Data[0].Format != "jpeg" || response.Data[0].MimeType != "image/jpeg" {
+		t.Fatalf("response format=%#v", response.Data[0])
+	}
+	img, _, err := image.Decode(bytes.NewReader(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bounds := img.Bounds(); bounds.Dx() != 4 || bounds.Dy() != 2 {
+		t.Fatalf("dimensions=%dx%d, want 4x2", bounds.Dx(), bounds.Dy())
+	}
+}
+
+func TestGenerateSyncSizeThenFormatForURL(t *testing.T) {
+	cfg := config.Default()
+	cfg.ImageOutputDir = t.TempDir()
+	store := accounts.NewStore([]accounts.Account{{AccessToken: "token", CreatedAt: 1}}, "")
+	backend := &cacheBackend{fakeBackend: &fakeBackend{}, data: testPNGBytes(t)}
+	service := NewService(cfg, store, backend, storage.NewService(cfg))
+	response, err := service.Generate(context.Background(), Request{
+		Prompt: "draw", Size: "4x2", SyncSize: true, ResponseFormat: "url", OutputBaseURL: "https://pool.example", OutputFormat: "webp",
+	})
+	if err != nil || len(response.Data) != 1 {
+		t.Fatalf("response=%#v err=%v", response, err)
+	}
+	if response.Data[0].Format != "webp" || response.Data[0].MimeType != "image/webp" {
+		t.Fatalf("response format=%#v", response.Data[0])
+	}
+	items, err := storage.NewService(cfg).List("https://pool.example", "", "")
+	if err != nil || len(items) != 1 {
+		t.Fatalf("items=%#v err=%v", items, err)
+	}
+	data, err := os.ReadFile(filepath.Join(cfg.ImageOutputDir, filepath.FromSlash(items[0].Rel)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	img, _, err := image.Decode(bytes.NewReader(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bounds := img.Bounds(); bounds.Dx() != 4 || bounds.Dy() != 2 {
+		t.Fatalf("dimensions=%dx%d, want 4x2", bounds.Dx(), bounds.Dy())
 	}
 }
 

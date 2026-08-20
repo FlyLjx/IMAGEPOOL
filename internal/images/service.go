@@ -14,6 +14,7 @@ import (
 	"image/jpeg"
 	"image/png"
 	"log"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -1065,13 +1066,14 @@ func (s *Service) finalizeResult(ctx context.Context, account accounts.Account, 
 	if err != nil {
 		return result, err
 	}
+	targetWidth, targetHeight, _ := parseEstimatedImageSize(req.Size)
 	if responseFormat == "b64_json" {
-		return s.resultAsBase64(ctx, account, result, req, outputFormat)
+		return s.resultAsBase64(ctx, account, result, req, outputFormat, targetWidth, targetHeight)
 	}
-	return s.cacheResult(ctx, account, result, req, outputFormat)
+	return s.cacheResult(ctx, account, result, req, outputFormat, targetWidth, targetHeight)
 }
 
-func (s *Service) resultAsBase64(ctx context.Context, account accounts.Account, result openaiweb.ImageResult, req Request, outputFormat string) (openaiweb.ImageResult, error) {
+func (s *Service) resultAsBase64(ctx context.Context, account accounts.Account, result openaiweb.ImageResult, req Request, outputFormat string, targetWidth, targetHeight int) (openaiweb.ImageResult, error) {
 	out := result
 	out.URLs = nil
 	out.B64JSON = make([]string, 0, len(result.B64JSON)+len(result.URLs))
@@ -1083,7 +1085,7 @@ func (s *Service) resultAsBase64(ctx context.Context, account accounts.Account, 
 		if err != nil {
 			return result, fmt.Errorf("decode b64_json image: %w", err)
 		}
-		value, err := s.encodeTemporaryImage(data, outputFormat)
+		value, err := s.encodeTemporaryImage(data, outputFormat, req.SyncSize, targetWidth, targetHeight)
 		if err != nil {
 			return result, err
 		}
@@ -1099,7 +1101,7 @@ func (s *Service) resultAsBase64(ctx context.Context, account accounts.Account, 
 			if err != nil {
 				return result, err
 			}
-			value, err := s.encodeTemporaryImage(data, outputFormat)
+			value, err := s.encodeTemporaryImage(data, outputFormat, req.SyncSize, targetWidth, targetHeight)
 			if err != nil {
 				return result, err
 			}
@@ -1111,7 +1113,7 @@ func (s *Service) resultAsBase64(ctx context.Context, account accounts.Account, 
 
 // encodeTemporaryImage keeps the downloaded image out of the persistent image
 // cache. The temporary file is removed on every success and error path.
-func (s *Service) encodeTemporaryImage(data []byte, outputFormat string) (string, error) {
+func (s *Service) encodeTemporaryImage(data []byte, outputFormat string, syncSize bool, targetWidth, targetHeight int) (string, error) {
 	file, err := os.CreateTemp("", "image-pool-b64-*")
 	if err != nil {
 		return "", fmt.Errorf("create temporary image: %w", err)
@@ -1129,16 +1131,14 @@ func (s *Service) encodeTemporaryImage(data []byte, outputFormat string) (string
 	if err != nil {
 		return "", fmt.Errorf("read temporary image: %w", err)
 	}
-	if outputFormat != "" {
-		converted, err = convertImageDataFormat(converted, outputFormat)
-		if err != nil {
-			return "", err
-		}
+	converted, err = prepareImageData(converted, outputFormat, syncSize, targetWidth, targetHeight)
+	if err != nil {
+		return "", err
 	}
 	return base64.StdEncoding.EncodeToString(converted), nil
 }
 
-func (s *Service) cacheResult(ctx context.Context, account accounts.Account, result openaiweb.ImageResult, req Request, outputFormat string) (openaiweb.ImageResult, error) {
+func (s *Service) cacheResult(ctx context.Context, account accounts.Account, result openaiweb.ImageResult, req Request, outputFormat string, targetWidth, targetHeight int) (openaiweb.ImageResult, error) {
 	if s.storage == nil {
 		return result, nil
 	}
@@ -1153,12 +1153,10 @@ func (s *Service) cacheResult(ctx context.Context, account accounts.Account, res
 			log.Printf("image cache decode b64_json failed: %v", err)
 			continue
 		}
-		if outputFormat != "" {
-			data, err = convertImageDataFormat(data, outputFormat)
-			if err != nil {
-				log.Printf("image cache convert b64_json to %s failed: %v", outputFormat, err)
-				continue
-			}
+		data, err = prepareImageData(data, outputFormat, req.SyncSize, targetWidth, targetHeight)
+		if err != nil {
+			log.Printf("image cache prepare b64_json failed: %v", err)
+			continue
 		}
 		item, err := s.storage.Save(data)
 		if err != nil {
@@ -1186,13 +1184,11 @@ func (s *Service) cacheResult(ctx context.Context, account accounts.Account, res
 			urls = append(urls, remoteURL)
 			continue
 		}
-		if outputFormat != "" {
-			data, err = convertImageDataFormat(data, outputFormat)
-			if err != nil {
-				log.Printf("image cache convert download to %s failed: %v", outputFormat, err)
-				urls = append(urls, remoteURL)
-				continue
-			}
+		data, err = prepareImageData(data, outputFormat, req.SyncSize, targetWidth, targetHeight)
+		if err != nil {
+			log.Printf("image cache prepare download failed: %v", err)
+			urls = append(urls, remoteURL)
+			continue
 		}
 		item, err := s.storage.Save(data)
 		if err != nil {
@@ -1231,6 +1227,90 @@ func convertImageDataFormat(data []byte, outputFormat string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("decode image for %s conversion: %w", outputFormat, err)
 	}
+	return encodeImageData(img, outputFormat)
+}
+
+func prepareImageData(data []byte, outputFormat string, syncSize bool, targetWidth, targetHeight int) ([]byte, error) {
+	if !syncSize || targetWidth <= 0 || targetHeight <= 0 || syncSizeExcludedAspect(targetWidth, targetHeight) {
+		return convertImageDataFormat(data, outputFormat)
+	}
+	img, _, err := image.Decode(bytes.NewReader(data))
+	if err != nil {
+		return nil, fmt.Errorf("decode image for sync_size: %w", err)
+	}
+	bounds := img.Bounds()
+	if syncSizeExcludedAspect(bounds.Dx(), bounds.Dy()) {
+		return convertImageDataFormat(data, outputFormat)
+	}
+	if bounds.Dx() == targetWidth && bounds.Dy() == targetHeight {
+		return convertImageDataFormat(data, outputFormat)
+	}
+	return encodeImageData(resizeImage(img, targetWidth, targetHeight), outputFormat)
+}
+
+func syncSizeExcludedAspect(width, height int) bool {
+	if width <= 0 || height <= 0 {
+		return false
+	}
+	return width == height*4 || height == width*4 || width == height*8 || height == width*8
+}
+
+func resizeImage(src image.Image, width, height int) image.Image {
+	dst := image.NewRGBA(image.Rect(0, 0, width, height))
+	srcBounds := src.Bounds()
+	srcWidth := srcBounds.Dx()
+	srcHeight := srcBounds.Dy()
+	for y := 0; y < height; y++ {
+		sourceY := (float64(y)+0.5)*float64(srcHeight)/float64(height) - 0.5
+		y0 := int(math.Floor(sourceY))
+		fy := sourceY - float64(y0)
+		for x := 0; x < width; x++ {
+			sourceX := (float64(x)+0.5)*float64(srcWidth)/float64(width) - 0.5
+			x0 := int(math.Floor(sourceX))
+			fx := sourceX - float64(x0)
+			c00 := rgbaAt(src, srcBounds, x0, y0)
+			c10 := rgbaAt(src, srcBounds, x0+1, y0)
+			c01 := rgbaAt(src, srcBounds, x0, y0+1)
+			c11 := rgbaAt(src, srcBounds, x0+1, y0+1)
+			dst.SetRGBA(x, y, interpolateRGBA(c00, c10, c01, c11, fx, fy))
+		}
+	}
+	return dst
+}
+
+func rgbaAt(src image.Image, bounds image.Rectangle, x, y int) color.RGBA {
+	x += bounds.Min.X
+	y += bounds.Min.Y
+	if x < bounds.Min.X {
+		x = bounds.Min.X
+	}
+	if x >= bounds.Max.X {
+		x = bounds.Max.X - 1
+	}
+	if y < bounds.Min.Y {
+		y = bounds.Min.Y
+	}
+	if y >= bounds.Max.Y {
+		y = bounds.Max.Y - 1
+	}
+	r, g, b, a := src.At(x, y).RGBA()
+	return color.RGBA{R: uint8(r >> 8), G: uint8(g >> 8), B: uint8(b >> 8), A: uint8(a >> 8)}
+}
+
+func interpolateRGBA(c00, c10, c01, c11 color.RGBA, fx, fy float64) color.RGBA {
+	interpolate := func(a, b, c, d uint8) uint8 {
+		value := (float64(a)*(1-fx)*(1-fy) + float64(b)*fx*(1-fy) + float64(c)*(1-fx)*fy + float64(d)*fx*fy)
+		return uint8(math.Round(value))
+	}
+	return color.RGBA{
+		R: interpolate(c00.R, c10.R, c01.R, c11.R),
+		G: interpolate(c00.G, c10.G, c01.G, c11.G),
+		B: interpolate(c00.B, c10.B, c01.B, c11.B),
+		A: interpolate(c00.A, c10.A, c01.A, c11.A),
+	}
+}
+
+func encodeImageData(img image.Image, outputFormat string) ([]byte, error) {
 	buffer := new(bytes.Buffer)
 	switch outputFormat {
 	case "png":

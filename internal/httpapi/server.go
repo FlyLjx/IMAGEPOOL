@@ -993,6 +993,7 @@ func (s *Server) handleTaskGeneration(w http.ResponseWriter, r *http.Request) {
 		Prompt         string `json:"prompt"`
 		Model          string `json:"model"`
 		Size           string `json:"size"`
+		SyncSize       bool   `json:"sync_size"`
 		Quality        string `json:"quality"`
 		ResponseFormat string `json:"response_format"`
 		OutputFormat   string `json:"output_format"`
@@ -1003,7 +1004,7 @@ func (s *Server) handleTaskGeneration(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	req := images.Request{Prompt: body.Prompt, Model: body.Model, Size: body.Size, Quality: body.Quality, ResponseFormat: body.ResponseFormat, OutputFormat: body.OutputFormat, CallbackURL: body.CallbackURL, N: normalizedImageCount(body.N), OutputBaseURL: baseURL(r)}
+	req := images.Request{Prompt: body.Prompt, Model: body.Model, Size: body.Size, SyncSize: body.SyncSize, Quality: body.Quality, ResponseFormat: body.ResponseFormat, OutputFormat: body.OutputFormat, CallbackURL: body.CallbackURL, N: normalizedImageCount(body.N), OutputBaseURL: baseURL(r)}
 	if err := validateImageOutputOptions(req); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
@@ -2150,7 +2151,7 @@ func (s *Server) parseEditRequest(r *http.Request) (images.Request, string, erro
 			return images.Request{}, "", err
 		}
 		form := r.MultipartForm
-		req := images.Request{Prompt: formValue(form, "prompt"), Model: formValue(form, "model"), Size: formValue(form, "size"), Quality: formValue(form, "quality"), ResponseFormat: formValue(form, "response_format"), OutputFormat: formValue(form, "output_format"), CallbackURL: formValue(form, "callback_url")}
+		req := images.Request{Prompt: formValue(form, "prompt"), Model: formValue(form, "model"), Size: formValue(form, "size"), SyncSize: parseBoolFormValue(form, "sync_size"), Quality: formValue(form, "quality"), ResponseFormat: formValue(form, "response_format"), OutputFormat: formValue(form, "output_format"), CallbackURL: formValue(form, "callback_url")}
 		req.Async, _ = strconv.ParseBool(formValue(form, "async"))
 		if n, _ := strconv.Atoi(formValue(form, "n")); n > 0 {
 			req.N = n
@@ -2184,6 +2185,7 @@ func (s *Server) parseEditRequest(r *http.Request) (images.Request, string, erro
 		Quality         string `json:"quality"`
 		ResponseFormat  string `json:"response_format"`
 		OutputFormat    string `json:"output_format"`
+		SyncSize        bool   `json:"sync_size"`
 		Async           bool   `json:"async"`
 		CallbackURL     string `json:"callback_url"`
 		Image           any    `json:"image"`
@@ -2214,7 +2216,7 @@ func (s *Server) parseEditRequest(r *http.Request) (images.Request, string, erro
 	if err != nil {
 		return images.Request{}, "", err
 	}
-	return images.Request{Prompt: body.Prompt, Model: body.Model, N: body.N, Size: body.Size, Quality: body.Quality, ResponseFormat: body.ResponseFormat, OutputFormat: body.OutputFormat, Async: body.Async, CallbackURL: body.CallbackURL, References: refs}, body.ClientTaskID, nil
+	return images.Request{Prompt: body.Prompt, Model: body.Model, N: body.N, Size: body.Size, SyncSize: body.SyncSize, Quality: body.Quality, ResponseFormat: body.ResponseFormat, OutputFormat: body.OutputFormat, Async: body.Async, CallbackURL: body.CallbackURL, References: refs}, body.ClientTaskID, nil
 }
 
 func editMultipartImageFields(files map[string][]*multipart.FileHeader) []string {
@@ -2356,6 +2358,11 @@ func formValue(form *multipart.Form, key string) string {
 		return ""
 	}
 	return form.Value[key][0]
+}
+
+func parseBoolFormValue(form *multipart.Form, key string) bool {
+	value, err := strconv.ParseBool(strings.TrimSpace(formValue(form, key)))
+	return err == nil && value
 }
 
 func responseID(prefix string) string {
