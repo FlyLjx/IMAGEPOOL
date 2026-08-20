@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -41,6 +42,11 @@ type ChatResult struct {
 // request omits model. Explicit "auto" remains supported for callers that
 // want ChatGPT Web to choose a model dynamically.
 const DefaultTextModel = "gpt-5-5"
+
+// ErrEmptyTextResponse means the upstream stream completed without exposing
+// any assistant text. Returning this as an error prevents a successful HTTP
+// response from containing an empty assistant message.
+var ErrEmptyTextResponse = errors.New("text generation returned an empty response")
 
 func (c *Client) GenerateText(ctx context.Context, account accounts.Account, req ChatRequest) (ChatResult, error) {
 	var text strings.Builder
@@ -150,6 +156,9 @@ func (c *Client) StreamText(ctx context.Context, account accounts.Account, req C
 	if err := scanner.Err(); err != nil {
 		return conversationID, err
 	}
+	if strings.TrimSpace(visibleText) == "" {
+		return conversationID, ErrEmptyTextResponse
+	}
 	return conversationID, nil
 }
 
@@ -251,6 +260,11 @@ func (c *Client) conversationHeaders(req chatRequirements) map[string]string {
 }
 
 func assistantRawText(event map[string]any, current string) string {
+	// Some compatible gateways preserve the OpenAI chat-completions stream
+	// shape. Accept those deltas in addition to ChatGPT Web JSON patches.
+	if text := openAIStreamText(event); text != "" {
+		return appendStreamText(event, current, text)
+	}
 	for _, candidate := range []any{event, event["v"]} {
 		m, ok := candidate.(map[string]any)
 		if !ok {
@@ -269,6 +283,36 @@ func assistantRawText(event map[string]any, current string) string {
 		}
 	}
 	return applyTextPatch(event, current)
+}
+
+func openAIStreamText(event map[string]any) string {
+	choices, _ := event["choices"].([]any)
+	for _, raw := range choices {
+		choice, _ := raw.(map[string]any)
+		if delta, _ := choice["delta"].(map[string]any); delta != nil {
+			if text := str(delta["content"]); text != "" {
+				return text
+			}
+		}
+		if message, _ := choice["message"].(map[string]any); message != nil {
+			if text := str(message["content"]); text != "" {
+				return text
+			}
+		}
+	}
+	return ""
+}
+
+func appendStreamText(event map[string]any, current, text string) string {
+	// A complete message replaces the current value; a delta appends to it.
+	if choices, _ := event["choices"].([]any); len(choices) > 0 {
+		if choice, _ := choices[0].(map[string]any); choice != nil {
+			if _, ok := choice["message"]; ok {
+				return text
+			}
+		}
+	}
+	return current + text
 }
 
 func assistantMessageText(message map[string]any) string {

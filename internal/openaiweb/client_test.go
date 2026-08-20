@@ -805,6 +805,58 @@ func TestGenerateTextReverseProtocol(t *testing.T) {
 	}
 }
 
+func TestGenerateTextEmptyStreamReturnsError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			_, _ = w.Write([]byte(`<html><script src="/c/test/_abc.js"></script></html>`))
+		case "/backend-api/sentinel/chat-requirements/prepare":
+			_ = json.NewEncoder(w).Encode(map[string]any{"prepare_token": "prep", "proofofwork": map[string]any{"required": false}})
+		case "/backend-api/sentinel/chat-requirements/finalize":
+			_ = json.NewEncoder(w).Encode(map[string]any{"token": "sentinel"})
+		case "/backend-api/conversation":
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte("data: {\"conversation_id\":\"conv-empty\"}\n\ndata: [DONE]\n\n"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	cfg := config.Default()
+	cfg.ChatGPTBaseURL = srv.URL
+	client := NewClient(cfg, WithHTTPClient(srv.Client()), WithIDGenerator(func() string { return "00000000-0000-4000-8000-000000000001" }))
+	_, err := client.GenerateText(context.Background(), accounts.Account{Email: "a@example.com", AccessToken: "tok"}, ChatRequest{Model: "auto", Messages: []ChatMessage{{Role: "user", Content: "hi"}}})
+	if !errors.Is(err, ErrEmptyTextResponse) {
+		t.Fatalf("expected empty response error, got %v", err)
+	}
+}
+
+func TestGenerateTextOpenAIStreamShape(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			_, _ = w.Write([]byte(`<html><script src="/c/test/_abc.js"></script></html>`))
+		case "/backend-api/sentinel/chat-requirements/prepare":
+			_ = json.NewEncoder(w).Encode(map[string]any{"prepare_token": "prep", "proofofwork": map[string]any{"required": false}})
+		case "/backend-api/sentinel/chat-requirements/finalize":
+			_ = json.NewEncoder(w).Encode(map[string]any{"token": "sentinel"})
+		case "/backend-api/conversation":
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"OK\"}}]}\n\ndata: [DONE]\n\n"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	cfg := config.Default()
+	cfg.ChatGPTBaseURL = srv.URL
+	client := NewClient(cfg, WithHTTPClient(srv.Client()), WithIDGenerator(func() string { return "00000000-0000-4000-8000-000000000001" }))
+	result, err := client.GenerateText(context.Background(), accounts.Account{Email: "a@example.com", AccessToken: "tok"}, ChatRequest{Model: "auto", Messages: []ChatMessage{{Role: "user", Content: "hi"}}})
+	if err != nil || result.Text != "OK" {
+		t.Fatalf("result=%#v err=%v", result, err)
+	}
+}
+
 func TestSearchReverseProtocol(t *testing.T) {
 	var prepareSeen atomic.Bool
 	var startSeen atomic.Bool
